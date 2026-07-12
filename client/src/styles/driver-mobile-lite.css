@@ -1,0 +1,71 @@
+/* Lightweight animations for old phones - CSS only, no JS animations */
+
+@keyframes slideup {
+  from {
+    transform: translateY(100px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes fadein {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slidein {
+  from {
+    transform: translateX(-20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slideup {
+  animation: slideup 0.2s ease-out;
+}
+
+.animate-fadein {
+  animation: fadein 0.15s ease-out;
+}
+
+.animate-slidein {
+  animation: slidein 0.15s ease-out;
+}
+
+/* Reduce animations on low-end devices */
+@media (prefers-reduced-motion: reduce) {
+  .animate-slideup,
+  .animate-fadein,
+  .animate-slidein {
+    animation: none;
+  }
+}
+
+/* Optimize rendering */
+.delivery-card {
+  will-change: auto;
+  contain: layout style paint;
+}
+
+/* Lighter shadows for better performance */
+.shadow-lite {
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1);
+}
+
+/* Disable GPU-intensive effects on scroll */
+.scroll-container {
+  -webkit-overflow-scrolling: touch;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}

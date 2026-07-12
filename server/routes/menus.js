@@ -1,0 +1,1564 @@
+import express from 'express';
+import crypto from 'crypto';
+import Customer from '../models/Customer.js';
+import MenuItem from '../models/MenuItem.js';
+import WeeklyMenu from '../models/WeeklyMenu.js';
+import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
+import { protect } from '../middleware/auth.js';
+import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
+
+const router = express.Router();
+
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const buildEmailRegex = (email) => {
+  const cleaned = String(email || '').trim();
+  return new RegExp(`^${escapeRegex(cleaned)}$`, 'i');
+};
+
+const buildMealName = (item = {}) => {
+  const provided = String(item.mealName || '').trim();
+  if (provided) return provided;
+
+  const parts = [
+    String(item.proteinSource || '').trim(),
+    String(item.carbs || '').trim(),
+    String(item.veg || '').trim(),
+    String(item.sauce || '').trim()
+  ].filter(Boolean);
+
+  return parts.length ? parts.join(' | ') : '';
+};
+
+// ============================================
+// CUSTOMER MEAL DATA ROUTES
+// ============================================
+
+/**
+ * GET /api/customers/:customerId/meal-profile
+ * Fetch customer meal preferences (DB only).
+ * Optional query param: menuId — when provided, loads the customer's selections
+ * for that specific menu from MenuSelectionRecord (historical). Falls back to
+ * customer.selectedMeals when no MenuSelectionRecord exists yet (e.g. old data).
+ */
+router.get('/customers/:customerId/meal-profile', async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { email, menuId } = req.query;
+
+    // normalize incoming email values
+    const resolvedEmail = String(email || (customerId.includes('@') ? customerId : '')).trim();
+
+    console.log('=== GET meal-profile called ===');
+    console.log('customerId:', customerId);
+    console.log('email from query:', email);
+    console.log('menuId from query:', menuId);
+
+    // Try to get from cache first (30 minute TTL for profiles)
+    // Include menuId in cache key so per-menu loads are cached separately
+    const cacheKey = `customer:profile:${customerId}:${resolvedEmail}:${menuId || ''}`;
+    // Only use cache when a specific menuId is requested (historical menu selections).
+    // For plain profile views (no menuId), always read from DB so edits are reflected immediately.
+    if (menuId) {
+      const cached = await cacheGet(cacheKey);
+      if (cached) {
+        return res.json({
+          success: true,
+          data: cached,
+          cached: true
+        });
+      }
+    }
+
+    let customer = null;
+    if (resolvedEmail) {
+      customer = await Customer.findOne({ email: buildEmailRegex(resolvedEmail) });
+    }
+
+    if (!customer) {
+      customer = await Customer.findOne({ customerId });
+    }
+    console.log('Customer found in DB:', customer ? 'YES' : 'NO');
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer not found in database.'
+      });
+    }
+
+    // External Athleat/FileMaker sync intentionally disabled.
+
+    // Determine which selections to return.
+    // If menuId is provided, prefer the MenuSelectionRecord for that specific menu
+    // so customers loading an older link see their historical selections for that menu.
+    let consolidatedMeals = [];
+    // True only when we found a real MenuSelectionRecord for this specific menu.
+    // The frontend uses this to decide whether to skip straight to the "All Set" page.
+    let foundMenuSelectionRecord = false;
+
+    if (menuId && resolvedEmail) {
+      const record = await MenuSelectionRecord.findOne({
+        weeklyMenuId: menuId,
+        email: buildEmailRegex(resolvedEmail)
+      });
+      if (record && record.selectedMeals?.length > 0) {
+        foundMenuSelectionRecord = true;
+        consolidatedMeals = record.selectedMeals.map(m => ({
+          date: m.date,
+          mealType: m.mealType,
+          menuItemId: m.menuItemId,
+          mealName: m.mealName,
+          description: m.description,
+          slotNumber: m.slotNumber,
+          proteinChoice: m.proteinChoice,
+          vegChoice: m.vegChoice,
+          carbChoice: m.carbChoice,
+          sauceChoice: m.sauceChoice,
+          quantity: m.quantity || 1
+        }));
+        console.log('Loaded', consolidatedMeals.length, 'selections from MenuSelectionRecord for menu', menuId);
+      }
+    }
+
+    // Fall back to customer.selectedMeals only when no MenuSelectionRecord was found.
+    // These meals may belong to a DIFFERENT menu — the frontend will check currentWeekMenu
+    // to decide whether they apply to the current link.
+    if (consolidatedMeals.length === 0) {
+      let rawMeals = customer.selectedMeals || [];
+      if (rawMeals.length > 0) {
+        const consolidatedMap = new Map();
+        rawMeals.forEach(meal => {
+          const dateKey = meal.date ? meal.date.toISOString().split('T')[0] : '';
+          const itemId = String(meal.menuItemId || '');
+          const slotKey = Number(meal.slotNumber || 0);
+          const mealNameKey = String(meal.mealName || '');
+          const key = `${dateKey}-${itemId}-${slotKey}-${mealNameKey}`;
+          if (consolidatedMap.has(key)) {
+            const existing = consolidatedMap.get(key);
+            existing.quantity = (existing.quantity || 1) + (meal.quantity || 1);
+          } else {
+            consolidatedMap.set(key, {
+              date: meal.date,
+              mealType: meal.mealType,
+              menuItemId: meal.menuItemId,
+              mealName: meal.mealName,
+              description: meal.description,
+              slotNumber: meal.slotNumber,
+              proteinChoice: meal.proteinChoice,
+              vegChoice: meal.vegChoice,
+              carbChoice: meal.carbChoice,
+              sauceChoice: meal.sauceChoice,
+              quantity: meal.quantity || 1
+            });
+          }
+        });
+        consolidatedMeals = Array.from(consolidatedMap.values());
+
+        // Save consolidated meals back to database if they changed
+        if (consolidatedMeals.length !== customer.selectedMeals.length) {
+          customer.selectedMeals = consolidatedMeals;
+          await customer.save();
+        }
+      }
+    }
+
+    const returnData = {
+      customerId: customer.customerId,
+      email: customer.email,
+      firstName: customer.firstName,
+      lastName: customer.lastName,
+      phone: customer.phone,
+      mealPerDay: customer.mealPerDay,
+      breakfastInclude: customer.breakfastInclude,
+      mealSnack: customer.mealSnack,
+      mealPlan: customer.mealPlan,
+      mealExclusion: customer.mealExclusion,
+      allergies: customer.allergies || [],
+      athleatId: customer.athleatId,
+      athleatSyncedAt: customer.athleatSyncedAt,
+      selectedMeals: consolidatedMeals,
+      macros: customer.macros || { C: 0, P: 0, F: 0 },
+      // currentWeekMenu reflects what the customer last submitted regardless of menu
+      currentWeekMenu: customer.currentWeekMenu,
+      // hasSubmittedForRequestedMenu = true ONLY when a real MenuSelectionRecord was found
+      // for the requested menuId. Never true from the customer.selectedMeals fallback.
+      hasSubmittedForRequestedMenu: foundMenuSelectionRecord,
+      lastMenuSelectionDate: customer.lastMenuSelectionDate,
+      weekend: customer.weekend || false,
+      hasFileMakerPreferences: !!(customer.mealPerDay > 1 || customer.mealPlan),
+      note: null
+    };
+
+    // Only cache when a specific menuId was requested (historical selections).
+    // Plain profile views skip caching so edits are always reflected on refresh.
+    if (menuId) {
+      await cacheSet(cacheKey, returnData, 300); // 5 min TTL
+    }
+
+    return res.json({
+      success: true,
+      data: returnData
+    });
+  } catch (error) {
+    console.error('Error in GET meal-profile:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * GET /api/customers/:customerId/filemaker-layouts
+ * Fetch raw FileMaker layout data for a customer (Customer, Leads, Orders)
+ */
+router.get('/customers/:customerId/filemaker-layouts', async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { email } = req.query;
+
+    const customer = await Customer.findOne({ customerId });
+    const resolvedEmail = (email || customer?.email || '');
+
+    if (!resolvedEmail) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required to fetch FileMaker layouts.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        email: resolvedEmail,
+        customerLayout: [],
+        leadLayout: [],
+        orderLayout: [],
+        orderScheduleLayout: [],
+        menuItemLayout: [],
+        note: 'External FileMaker/Athleat API is disabled.'
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching FileMaker layouts:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch FileMaker layouts',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/customers/:customerId/meal-profile
+ * Update customer meal preferences
+ */
+router.post('/customers/:customerId/meal-profile', async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const {
+      email,
+      mealPerDay,
+      breakfastInclude,
+      mealSnack,
+      mealPlan,
+      mealExclusion,
+      allergies,
+      dietaryRestrictions,
+      preferences
+    } = req.body;
+
+    const updateFields = {};
+    if (email !== undefined && email) updateFields.email = email;
+    if (mealPerDay !== undefined) updateFields.mealPerDay = Number(mealPerDay);
+    if (breakfastInclude !== undefined) updateFields.breakfastInclude = breakfastInclude;
+    if (mealSnack !== undefined) updateFields.mealSnack = mealSnack;
+    if (req.body.weekend !== undefined) updateFields.weekend = !!req.body.weekend;
+    if (mealPlan !== undefined) updateFields.mealPlan = mealPlan;
+    if (mealExclusion !== undefined) updateFields.mealExclusion = mealExclusion;
+    if (allergies !== undefined) updateFields.allergies = allergies;
+    if (dietaryRestrictions !== undefined) updateFields.dietaryRestrictions = dietaryRestrictions;
+    if (preferences !== undefined) updateFields.preferences = preferences;
+
+    // findOneAndUpdate is atomic and avoids stale-read race conditions
+    const customer = await Customer.findOneAndUpdate(
+      { customerId },
+      { $set: updateFields },
+      { new: true, upsert: true, runValidators: true }
+    );
+
+    // Invalidate ALL possible cache key variants for this customer
+    const emailVal = customer.email || '';
+    const keysToDelete = [
+      `customer:profile:${customerId}::`,
+      `customer:profile:${customerId}:${emailVal}:`,
+      `customer:profile:${emailVal}:${emailVal}:`,
+    ];
+    await Promise.all([
+      cacheDeletePattern(`customer:profile:${customerId}:*`),
+      // Also clear email-keyed entries (used when customer accesses via share link with email)
+      cacheDeletePattern(`customer:profile:${emailVal}:*`),
+      ...keysToDelete.map(k => cacheDelete(k).catch(() => {}))
+    ]);
+
+    res.json({
+      success: true,
+      message: 'Meal profile updated successfully',
+      data: customer
+    });
+  } catch (error) {
+    console.error('Error updating meal profile:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/customers/:customerId/complete-profile
+ * Fetch COMPLETE customer profile (DB only)
+ */
+router.get('/customers/:customerId/complete-profile', async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { email } = req.query;
+
+    console.log('\n=== GET complete-profile called ===');
+    console.log('customerId:', customerId);
+    console.log('email:', email);
+
+    let customer = await Customer.findOne({ customerId });
+
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    const emailToUse = email || customer.email;
+    if (!emailToUse) {
+      return res.json({
+        customer: {
+          customerId: customer.customerId,
+          email: customer.email,
+          firstName: customer.firstName,
+          lastName: customer.lastName,
+          phone: customer.phone
+        },
+        filemaked: null,
+        note: 'No email found for this customer. Cannot fetch FileMaker profile.'
+      });
+    }
+
+    return res.json({
+      customer: {
+        customerId: customer.customerId,
+        email: customer.email,
+        firstName: customer.firstName,
+        lastName: customer.lastName,
+        phone: customer.phone,
+        athleatId: customer.athleatId,
+        athleatSyncedAt: customer.athleatSyncedAt,
+        uuid: customer.uuid
+      },
+      filemakeData: null,
+      note: 'External FileMaker/Athleat API is disabled. Returning database profile only.'
+    });
+  } catch (error) {
+    console.error('Error fetching complete profile:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/customers/:customerId/filemaker-raw
+ * Fetch raw data placeholder (external API disabled)
+ */
+router.get('/customers/:customerId/filemaker-raw', async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { email, startDate, endDate } = req.query;
+
+    console.log('\n=== GET filemaker-raw called ===');
+    console.log('customerId:', customerId);
+    console.log('email:', email);
+
+    const customer = await Customer.findOne({ customerId });
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    console.log('Customer found. email in DB:', customer.email);
+    const emailToUse = email || customer.email;
+    console.log('emailToUse:', emailToUse);
+    
+    if (!emailToUse) {
+      return res.json({
+        customer: {
+          customerId: customer.customerId,
+          email: customer.email
+        },
+        raw: null,
+        note: 'No email found for this customer. Cannot fetch FileMaker data.'
+      });
+    }
+
+    const uuidCustomer = customer.uuid || '';
+
+    let startDateStr = startDate;
+    let endDateStr = endDate;
+    if (!startDateStr || !endDateStr) {
+      const today = new Date();
+      const end = new Date(today);
+      end.setDate(end.getDate() + 30);
+      startDateStr = `${today.getMonth() + 1}/${today.getDate()}/${today.getFullYear()}`;
+      endDateStr = `${end.getMonth() + 1}/${end.getDate()}/${end.getFullYear()}`;
+    }
+
+    return res.json({
+      customer: {
+        customerId: customer.customerId,
+        email: customer.email,
+        uuid: uuidCustomer
+      },
+      dateRange: {
+        startDate: startDateStr,
+        endDate: endDateStr
+      },
+      raw: {
+        customer: [],
+        lead: [],
+        order: [],
+        schedule: []
+      },
+      note: 'External FileMaker/Athleat API is disabled.'
+    });
+  } catch (error) {
+    console.error('Error fetching raw FileMaker data:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// WEEKLY MENU ROUTES
+// ============================================
+
+/**
+ * GET /api/menus
+ * Get all weekly menus (admin only)
+ */
+router.get('/', protect, async (req, res) => {
+  try {
+    const { page = 1, limit = 10, isActive = 'true' } = req.query;
+
+    const query = {};
+    if (isActive !== 'all') {
+      query.isActive = isActive === 'true' || isActive === true;
+    }
+
+    const menus = await WeeklyMenu.find(query)
+      .populate('createdBy', 'profile.firstName profile.lastName')
+      .sort({ startDate: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+      .exec();
+
+    const total = await WeeklyMenu.countDocuments(query);
+
+    res.json({
+      success: true,
+      data: menus,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching menus:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/menus/share/:token
+ * Access menu via share link (public)
+ */
+router.get('/share/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    const cacheKey = `menu:share:${token}`;
+
+    // Try to get from cache first (5 minute TTL for share links)
+    const cached = await cacheGet(cacheKey);
+    if (cached) {
+      return res.json({
+        success: true,
+        data: cached,
+        cached: true
+      });
+    }
+
+    const menu = await WeeklyMenu.findOne({
+      'shareLink.token': token
+    })
+      .populate({
+        path: 'meals.items',
+        model: 'MenuItem'
+      });
+
+    if (!menu) {
+      return res.status(404).json({
+        success: false,
+        message: 'Menu not found or link expired'
+      });
+    }
+
+    if (menu.shareLink?.isActive === false) {
+      return res.status(410).json({
+        success: false,
+        message: 'This link is expired'
+      });
+    }
+
+    // Check if link has expired
+    if (menu.shareLink.expiresAt && new Date() > menu.shareLink.expiresAt) {
+      // Auto-extend expired links by 30 days
+      menu.shareLink.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      await menu.save();
+    }
+
+    // Increment view count
+    menu.viewCount += 1;
+    await menu.save();
+
+    // Cache the response for 5 minutes
+    await cacheSet(cacheKey, menu.toObject(), 300);
+
+    console.log('=== Returning menu from /share/:token ===');
+    console.log('Menu ID:', menu._id);
+    console.log('enableCompletionMessage:', menu.enableCompletionMessage);
+    console.log('completionMessage:', menu.completionMessage);
+
+    res.json({
+      success: true,
+      data: menu
+    });
+  } catch (error) {
+    console.error('Error fetching shared menu:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/menus/:id
+ * Get a weekly menu with populated items (admin only)
+ */
+router.get('/:id', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const menu = await WeeklyMenu.findById(id)
+      .populate({ path: 'meals.items', model: 'MenuItem' });
+
+    if (!menu) {
+      return res.status(404).json({
+        success: false,
+        message: 'Menu not found'
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: menu
+    });
+  } catch (error) {
+    console.error('Error fetching menu:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/menus
+ * Create a new weekly menu (admin only)
+ */
+router.post('/', protect, async (req, res) => {
+  try {
+    const {
+      title,
+      description,
+      startDate,
+      endDate,
+      mealPlans,
+      meals,
+      days,
+      enableCompletionMessage,
+      completionMessage,
+      bodybuilderMode,
+      selectionDeadlines
+    } = req.body;
+
+    console.log('=== POST /menus - Creating new menu ===');
+    console.log('enableCompletionMessage:', enableCompletionMessage);
+    console.log('completionMessage:', completionMessage);
+
+    const menu = new WeeklyMenu({
+      title,
+      description,
+      startDate: new Date(startDate),
+      endDate: new Date(endDate),
+      mealPlans: mealPlans || ['Standard'],
+      meals: meals || [],
+      enableCompletionMessage: enableCompletionMessage || false,
+      completionMessage: completionMessage || 'Your meal selections have been saved successfully.',
+      selectionDeadlines: Array.isArray(selectionDeadlines) ? selectionDeadlines : [],
+      createdBy: req.user._id,
+      shareLink: {
+        token: crypto.randomBytes(32).toString('hex'),
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
+      }
+    });
+
+    await menu.save();
+
+    console.log('Menu saved successfully:');
+    console.log('enableCompletionMessage:', menu.enableCompletionMessage);
+    console.log('completionMessage:', menu.completionMessage);
+
+    if (Array.isArray(days) && days.length > 0) {
+      const mealMap = new Map();
+
+      for (const day of days) {
+        if (!day?.date || !Array.isArray(day.items)) {
+          continue;
+        }
+
+        const dayDate = new Date(day.date);
+
+        for (const item of day.items) {
+          if (!item?.mealName) {
+            const generatedMealName = buildMealName(item);
+            if (!generatedMealName) {
+              continue;
+            }
+          }
+
+          const mealType = item.mealType || 'lunch';
+          const mealName = buildMealName(item);
+          const isBodybuilderItem = bodybuilderMode === true || (Array.isArray(mealPlans) && mealPlans.includes('Bodybuilder'));
+
+          const combinedIngredients = isBodybuilderItem
+            ? [
+                `Protein: ${String(item.proteinSource || '').trim()}`,
+                `Vegetables: ${String(item.veg || '').trim()}`,
+                `Carbs: ${String(item.carbs || '').trim()}`,
+                `Sauces: ${String(item.sauce || '').trim()}`
+              ].filter((value) => value.split(': ')[1]).join('; ')
+            : (item.ingredients || '');
+
+          const menuItem = new MenuItem({
+            itemDate: dayDate,
+            mealType,
+            mealName,
+            mealPlan: isBodybuilderItem ? 'Bodybuilder' : 'Standard',
+            ingredients: combinedIngredients,
+            proteinSource: item.proteinSource || '',
+            category: item.category || '',
+            intolerances: item.intolerances || '',
+            allergens: String(item.allergens || '').split(',').map(s => s.trim()).filter(Boolean),
+            garnish: item.garnish || '',
+            carbs: item.carbs || '',
+            veg: item.veg || '',
+            sauce: item.sauce || ''
+          });
+
+          await menuItem.save();
+
+          const key = `${dayDate.toISOString().split('T')[0]}|${mealType}`;
+          if (!mealMap.has(key)) {
+            mealMap.set(key, {
+              date: dayDate,
+              mealType,
+              items: []
+            });
+          }
+          mealMap.get(key).items.push(menuItem._id);
+        }
+      }
+
+      menu.meals = Array.from(mealMap.values());
+      await menu.save();
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Menu created successfully',
+      data: menu
+    });
+  } catch (error) {
+    console.error('Error creating menu:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * PUT /api/menus/:id
+ * Update weekly menu (admin only)
+ */
+router.put('/:id', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      title,
+      description,
+      meals,
+      isPublished,
+      days,
+      startDate,
+      endDate,
+      mealPlans,
+      enableCompletionMessage,
+      completionMessage,
+      shareLinkActive,
+      bodybuilderMode,
+      selectionDeadlines
+    } = req.body;
+
+    console.log('=== PUT /menus/:id - Updating menu ===');
+    console.log('Menu ID:', id);
+    console.log('enableCompletionMessage:', enableCompletionMessage);
+    console.log('completionMessage:', completionMessage);
+
+    const menu = await WeeklyMenu.findById(id);
+
+    if (!menu) {
+      return res.status(404).json({
+        success: false,
+        message: 'Menu not found'
+      });
+    }
+
+    if (title) menu.title = title;
+    if (description) menu.description = description;
+    if (startDate) menu.startDate = new Date(startDate);
+    if (endDate) menu.endDate = new Date(endDate);
+    if (Array.isArray(mealPlans) && mealPlans.length > 0) menu.mealPlans = mealPlans;
+    if (meals) menu.meals = meals;
+    if (isPublished !== undefined) menu.isPublished = isPublished;
+    if (enableCompletionMessage !== undefined) menu.enableCompletionMessage = enableCompletionMessage;
+    if (completionMessage !== undefined) menu.completionMessage = completionMessage;
+    if (Array.isArray(selectionDeadlines)) menu.selectionDeadlines = selectionDeadlines;
+    if (typeof shareLinkActive === 'boolean') {
+      if (!menu.shareLink) {
+        menu.shareLink = {
+          token: crypto.randomBytes(32).toString('hex'),
+          createdAt: new Date(),
+          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+          isActive: shareLinkActive
+        };
+      } else {
+        menu.shareLink.isActive = shareLinkActive;
+      }
+    }
+
+    console.log('Before save - menu.enableCompletionMessage:', menu.enableCompletionMessage);
+    console.log('Before save - menu.completionMessage:', menu.completionMessage);
+
+    if (Array.isArray(days) && days.length > 0) {
+      const existingItemIds = (menu.meals || [])
+        .flatMap((meal) => meal.items || [])
+        .map((id) => String(id))
+        .filter(Boolean);
+
+      // Build a lookup of existing MenuItems so we can REUSE their _id when the
+      // same (date + mealType + mealName) is re-submitted.  Reusing _id keeps
+      // customer selectedMeals.menuItemId references valid after an edit.
+      const existingItems = existingItemIds.length > 0
+        ? await MenuItem.find({ _id: { $in: existingItemIds } }).lean()
+        : [];
+
+      const existingItemMap = new Map(); // key: "YYYY-MM-DD|mealType|mealName" → MenuItem doc
+      for (const item of existingItems) {
+        const dateKey = item.itemDate
+          ? new Date(item.itemDate).toISOString().split('T')[0]
+          : '';
+        const key = `${dateKey}|${item.mealType || ''}|${(item.mealName || '').trim().toLowerCase()}`;
+        if (!existingItemMap.has(key)) existingItemMap.set(key, item);
+      }
+
+      const mealMap = new Map();
+      const usedExistingIds = new Set(); // track which old _ids we reused
+
+      for (const day of days) {
+        if (!day?.date || !Array.isArray(day.items)) {
+          continue;
+        }
+
+        const dayDate = new Date(day.date);
+
+        for (const item of day.items) {
+          if (!item?.mealName) {
+            const generatedMealName = buildMealName(item);
+            if (!generatedMealName) {
+              continue;
+            }
+          }
+
+          const mealType = item.mealType || 'lunch';
+          const mealName = buildMealName(item);
+          const isBodybuilderItem = bodybuilderMode === true || (Array.isArray(menu.mealPlans) && menu.mealPlans.includes('Bodybuilder'));
+
+          const combinedIngredients = isBodybuilderItem
+            ? [
+                `Protein: ${String(item.proteinSource || '').trim()}`,
+                `Vegetables: ${String(item.veg || '').trim()}`,
+                `Carbs: ${String(item.carbs || '').trim()}`,
+                `Sauces: ${String(item.sauce || '').trim()}`
+              ].filter((value) => value.split(': ')[1]).join('; ')
+            : (item.ingredients || '');
+
+          const updatedFields = {
+            itemDate: dayDate,
+            mealType,
+            mealName,
+            mealPlan: isBodybuilderItem ? 'Bodybuilder' : 'Standard',
+            ingredients: combinedIngredients,
+            proteinSource: item.proteinSource || '',
+            category: item.category || '',
+            intolerances: item.intolerances || '',
+            allergens: String(item.allergens || '').split(',').map(s => s.trim()).filter(Boolean),
+            garnish: item.garnish || '',
+            carbs: item.carbs || '',
+            veg: item.veg || '',
+            sauce: item.sauce || ''
+          };
+
+          // Try to match an existing MenuItem by date + mealType + mealName
+          // so we can UPDATE it in-place rather than delete+recreate.
+          // This preserves customer selectedMeals.menuItemId references.
+          const matchKey = `${dayDate.toISOString().split('T')[0]}|${mealType}|${(mealName || '').trim().toLowerCase()}`;
+          const existingMatch = existingItemMap.get(matchKey);
+
+          let menuItemId;
+          if (existingMatch && !usedExistingIds.has(String(existingMatch._id))) {
+            // Reuse existing MenuItem — update its fields in-place
+            await MenuItem.findByIdAndUpdate(existingMatch._id, { $set: updatedFields });
+            menuItemId = existingMatch._id;
+            usedExistingIds.add(String(existingMatch._id));
+          } else {
+            // No match — create a new MenuItem
+            const menuItem = new MenuItem(updatedFields);
+            await menuItem.save();
+            menuItemId = menuItem._id;
+          }
+
+          const key = `${dayDate.toISOString().split('T')[0]}|${mealType}`;
+          if (!mealMap.has(key)) {
+            mealMap.set(key, {
+              date: dayDate,
+              mealType,
+              items: []
+            });
+          }
+          mealMap.get(key).items.push(menuItemId);
+        }
+      }
+
+      // Delete only old MenuItems that were NOT reused in the new menu
+      const unusedIds = existingItemIds.filter((id) => !usedExistingIds.has(id));
+      if (unusedIds.length > 0) {
+        await MenuItem.deleteMany({ _id: { $in: unusedIds } });
+      }
+
+      menu.meals = Array.from(mealMap.values());
+    }
+
+    await menu.save();
+
+    console.log('After save - menu.enableCompletionMessage:', menu.enableCompletionMessage);
+    console.log('After save - menu.completionMessage:', menu.completionMessage);
+
+    // Clear the cache for this menu's share link
+    if (menu.shareLink?.token) {
+      const cacheKey = `menu:share:${menu.shareLink.token}`;
+      await cacheDelete(cacheKey);
+      console.log(`Cleared cache for menu share link: ${cacheKey}`);
+    }
+
+    res.json({
+      success: true,
+      message: 'Menu updated successfully',
+      data: menu
+    });
+  } catch (error) {
+    console.error('Error updating menu:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/menus/:id/share-link
+ * Get shareable link for menu
+ */
+router.get('/:id/share-link', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const menu = await WeeklyMenu.findById(id);
+
+    if (!menu) {
+      return res.status(404).json({
+        success: false,
+        message: 'Menu not found'
+      });
+    }
+
+    const fallbackOrigin = req.get('origin') || `${req.protocol}://${req.get('host')}`;
+    const shareUrl = `${process.env.FRONTEND_URL || fallbackOrigin}/menu-select/${menu.shareLink.token}`;
+
+    res.json({
+      success: true,
+      data: {
+        shareLink: menu.shareLink.token,
+        shareUrl,
+        expiresAt: menu.shareLink.expiresAt
+      }
+    });
+  } catch (error) {
+    console.error('Error getting share link:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * DELETE /api/menus/:id
+ * Delete weekly menu (admin only)
+ */
+router.delete('/:id', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const menu = await WeeklyMenu.findById(id);
+
+    if (!menu) {
+      return res.status(404).json({
+        success: false,
+        message: 'Menu not found'
+      });
+    }
+
+    const itemIds = (menu.meals || [])
+      .flatMap((meal) => meal.items || [])
+      .filter(Boolean);
+
+    await WeeklyMenu.findByIdAndDelete(id);
+
+    if (itemIds.length > 0) {
+      await MenuItem.deleteMany({ _id: { $in: itemIds } });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Menu deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting menu:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/menus/:id/selections
+ * Get customers who selected this menu (admin only).
+ * Merges MenuSelectionRecord (new, historical) with Customer.selectedMeals (legacy).
+ * Backfill filters meals to only those belonging to this menu's items,
+ * preventing meals from other menus leaking into this record.
+ */
+router.get('/:id/selections', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Fetch the menu so we can build a whitelist of valid item IDs for backfill filtering
+    const menuDoc = await WeeklyMenu.findById(id).lean();
+    const menuItemIdSet = new Set(
+      (menuDoc?.meals || []).flatMap(m => (m.items || []).map(i => String(i)))
+    );
+    // Fallback date range from the menu for meals that have no menuItemId
+    const menuStart = menuDoc?.startDate ? new Date(menuDoc.startDate) : null;
+    const menuEnd = menuDoc?.endDate ? new Date(menuDoc.endDate) : null;
+    if (menuEnd) menuEnd.setHours(23, 59, 59, 999);
+
+    const mealBelongsToMenu = (m) => {
+      const rawId = m.menuItemId?._id || m.menuItemId;
+      if (rawId) {
+        // If we have a whitelist, use it; otherwise trust the ID
+        return menuItemIdSet.size === 0 || menuItemIdSet.has(String(rawId));
+      }
+      // No menuItemId — fall back to date range check
+      if (m.date && menuStart && menuEnd) {
+        const d = new Date(m.date);
+        return d >= menuStart && d <= menuEnd;
+      }
+      // Can't determine — include conservatively
+      return true;
+    };
+
+    // -- Source 1: MenuSelectionRecord (new, historical) --
+    const records = await MenuSelectionRecord.find({ weeklyMenuId: id })
+      .populate('selectedMeals.menuItemId', '_id mealName mealType itemDate')
+      .sort({ submittedAt: -1 });
+
+    const recordEmails = new Set(records.map(r => String(r.email || '').toLowerCase()));
+
+    // -- Source 2: Customer.selectedMeals (legacy, only currentWeekMenu matches) --
+    const legacyCustomers = await Customer.find({
+      currentWeekMenu: id,
+      selectedMeals: { $exists: true, $not: { $size: 0 } }
+    })
+      .select('customerId email firstName lastName mealExclusion selectedMeals lastMenuSelectionDate')
+      .populate('selectedMeals.menuItemId', '_id mealName mealType itemDate');
+
+    // Backfill legacy customers — filter meals to only those belonging to THIS menu
+    const toBackfill = legacyCustomers.filter(
+      c => !recordEmails.has(String(c.email || '').toLowerCase())
+    );
+    if (toBackfill.length > 0) {
+      console.log(`Backfilling ${toBackfill.length} legacy customers into MenuSelectionRecord for menu ${id}`);
+      await Promise.all(toBackfill.map(c => {
+        const filteredMeals = (c.selectedMeals || [])
+          .filter(mealBelongsToMenu)
+          .map(m => ({
+            date: m.date,
+            mealType: m.mealType,
+            menuItemId: m.menuItemId?._id || m.menuItemId,
+            mealName: m.mealName,
+            description: m.description,
+            slotNumber: m.slotNumber,
+            proteinChoice: m.proteinChoice,
+            vegChoice: m.vegChoice,
+            carbChoice: m.carbChoice,
+            sauceChoice: m.sauceChoice,
+            quantity: m.quantity || 1
+          }));
+        if (filteredMeals.length === 0) return Promise.resolve();
+        return MenuSelectionRecord.findOneAndUpdate(
+          { weeklyMenuId: id, email: c.email },
+          {
+            $set: {
+              weeklyMenuId: id,
+              email: c.email,
+              customerId: c.customerId,
+              firstName: c.firstName,
+              lastName: c.lastName,
+              mealExclusion: c.mealExclusion,
+              selectedMeals: filteredMeals,
+              submittedAt: c.lastMenuSelectionDate || new Date()
+            }
+          },
+          { upsert: true, new: true }
+        );
+      }));
+    }
+
+    // Fix any already-corrupted MenuSelectionRecords that contain meals from other menus.
+    // Only run this pass when the menu has a known item whitelist.
+    if (menuItemIdSet.size > 0) {
+      const corruptedRecords = records.filter(r =>
+        (r.selectedMeals || []).some(m => !mealBelongsToMenu(m))
+      );
+      if (corruptedRecords.length > 0) {
+        console.log(`Cleaning ${corruptedRecords.length} MenuSelectionRecord(s) with cross-menu meals`);
+        await Promise.all(corruptedRecords.map(r =>
+          MenuSelectionRecord.findByIdAndUpdate(r._id, {
+            $set: {
+              selectedMeals: (r.selectedMeals || [])
+                .filter(mealBelongsToMenu)
+                .map(m => {
+                  const obj = m.toObject ? m.toObject() : { ...m };
+                  return { ...obj, menuItemId: m.menuItemId?._id || m.menuItemId };
+                })
+            }
+          })
+        ));
+      }
+    }
+
+    // Re-fetch all records after backfill/cleanup
+    const allRecords = await MenuSelectionRecord.find({ weeklyMenuId: id })
+      .populate('selectedMeals.menuItemId', '_id mealName mealType itemDate')
+      .sort({ submittedAt: -1 });
+
+    console.log('=== GET /menus/:id/selections debug ===');
+    console.log('MenuSelectionRecord count:', allRecords.length);
+
+    const sanitized = allRecords.map((rec) => {
+      const exclusionStr = String(rec.mealExclusion || '');
+      const exclusions = exclusionStr
+        ? exclusionStr.split(/[,;|]/).map(e => e.trim().toLowerCase()).filter(Boolean)
+        : [];
+
+      // Consolidate duplicate meals (guard against any legacy duplicates)
+      const consolidatedMap = new Map();
+      (rec.selectedMeals || []).forEach((m) => {
+        const dateKey = m.date ? m.date.toISOString().split('T')[0] : '';
+        const itemId = m.menuItemId
+          ? String(m.menuItemId._id || m.menuItemId)
+          : String(m.mealName || '');
+        const slotKey = Number(m.slotNumber || 0);
+        const key = `${dateKey}||${itemId}||${slotKey}`;
+
+        if (consolidatedMap.has(key)) {
+          const existing = consolidatedMap.get(key);
+          existing.quantity = (existing.quantity || 1) + (m.quantity || 1);
+        } else {
+          const mealObj = m.toObject ? m.toObject() : { ...m };
+          consolidatedMap.set(key, { ...mealObj, quantity: m.quantity || 1 });
+        }
+      });
+
+      const consolidatedMeals = Array.from(consolidatedMap.values()).map((m) => {
+        let mealName = '';
+        if (m.menuItemId && m.menuItemId.mealName) mealName = m.menuItemId.mealName;
+        else if (m.mealName) mealName = m.mealName;
+        const lower = String(mealName).toLowerCase();
+        const conflict = exclusions.some(ex => lower.includes(ex));
+        return { ...m, quantity: m.quantity || 1, conflict };
+      });
+
+      const recObj = rec.toObject ? rec.toObject() : rec;
+      return {
+        ...recObj,
+        lastMenuSelectionDate: rec.submittedAt,
+        selectedMeals: consolidatedMeals
+      };
+    });
+
+    // Recalculate and persist the live count so the menu card stays accurate
+    const liveCount = sanitized.length;
+    await WeeklyMenu.findByIdAndUpdate(id, { $set: { selectionCount: liveCount } });
+
+    res.json({
+      success: true,
+      data: sanitized
+    });
+  } catch (error) {
+    console.error('Error fetching menu selections:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// ============================================
+// MENU ITEM ROUTES
+// ============================================
+
+/**
+ * GET /api/menu-items
+ * Get menu items with filters
+ */
+router.get('/items', async (req, res) => {
+  try {
+    const { date, mealType, mealPlan, isAvailable = true } = req.query;
+
+    const query = {};
+    if (isAvailable) query.isAvailable = true;
+    if (date) query.itemDate = new Date(date);
+    if (mealType) query.mealType = mealType;
+    if (mealPlan) query.mealPlan = mealPlan;
+
+    const items = await MenuItem.find(query).sort({ itemDate: 1, mealType: 1 });
+
+    res.json({
+      success: true,
+      data: items
+    });
+  } catch (error) {
+    console.error('Error fetching menu items:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/menu-items
+ * Create menu item (admin only)
+ */
+router.post('/items', protect, async (req, res) => {
+  try {
+    const {
+      itemDate,
+      mealType,
+      mealName,
+      mealPlan,
+      description,
+      ingredients,
+      category,
+      intolerances,
+      garnish,
+        veg,
+        sauce,
+      calories,
+      protein,
+      carbs,
+      fat,
+      allergens,
+      isVegan,
+      isGlutenFree
+    } = req.body;
+
+    const item = new MenuItem({
+      itemDate: new Date(itemDate),
+      mealType,
+      mealName,
+      mealPlan,
+      description,
+      ingredients,
+      category,
+      intolerances,
+      garnish,
+      veg,
+      sauce,
+      calories,
+      protein,
+      carbs,
+      fat,
+      allergens,
+      isVegan,
+      isGlutenFree
+    });
+
+    await item.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Menu item created successfully',
+      data: item
+    });
+  } catch (error) {
+    console.error('Error creating menu item:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/customers/:email/select-meals
+ * Customer selects meals from weekly menu
+ */
+router.post('/customers/:email/select-meals', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const { weeklyMenuId, selections, macros } = req.body;
+    const cleanEmail = String(email || '').trim();
+
+    console.log('=== POST /select-meals ===');
+    console.log('Email:', cleanEmail);
+    console.log('Selections received:', selections?.length || 0);
+    if (selections && selections.length > 0) {
+      console.log('First selection sample:', JSON.stringify(selections[0], null, 2));
+      const totalWithQty = selections.reduce((sum, m) => sum + (m.quantity || 1), 0);
+      console.log('Total meals (with quantity):', totalWithQty);
+    }
+
+    let customer = await Customer.findOne({ email: buildEmailRegex(cleanEmail) });
+
+    if (!customer) {
+      customer = new Customer({ email: cleanEmail, customerId: cleanEmail.split('@')[0] });
+    }
+
+    // Capture previous menu id AND selections before overwriting them.
+    // We'll upsert them into the old menu's MenuSelectionRecord below.
+    const previousMenuId = customer.currentWeekMenu
+      ? String(customer.currentWeekMenu)
+      : null;
+    const previousMeals = (customer.selectedMeals || []).map(m => ({
+      date: m.date,
+      mealType: m.mealType,
+      menuItemId: m.menuItemId,
+      mealName: m.mealName,
+      description: m.description,
+      slotNumber: m.slotNumber,
+      proteinChoice: m.proteinChoice,
+      vegChoice: m.vegChoice,
+      carbChoice: m.carbChoice,
+      sauceChoice: m.sauceChoice,
+      quantity: m.quantity || 1,
+      carbVegAction: m.carbVegAction || undefined,
+      carbVegConflict: m.carbVegConflict?.length ? m.carbVegConflict : undefined,
+      carbConflict: m.carbConflict?.length ? m.carbConflict : undefined,
+      vegConflict: m.vegConflict?.length ? m.vegConflict : undefined
+    }));
+
+    // Explicitly map selections to ensure quantity is preserved
+    const mappedSelections = (selections || []).map(sel => ({
+      date: sel.date,
+      mealType: sel.mealType,
+      menuItemId: sel.menuItemId,
+      mealName: sel.mealName,
+      description: sel.description,
+      slotNumber: sel.slotNumber,
+      proteinChoice: sel.proteinChoice,
+      vegChoice: sel.vegChoice,
+      carbChoice: sel.carbChoice,
+      sauceChoice: sel.sauceChoice,
+      quantity: Number(sel.quantity) || 1,  // Explicitly convert to number
+      carbVegAction: sel.carbVegAction || undefined,
+      carbVegConflict: sel.carbVegConflict?.length ? sel.carbVegConflict : undefined,
+      carbConflict: sel.carbConflict?.length ? sel.carbConflict : undefined,
+      vegConflict: sel.vegConflict?.length ? sel.vegConflict : undefined
+    }));
+
+    console.log('Mapped selections with quantity:', mappedSelections.map(s => ({ 
+      mealName: s.mealName, 
+      quantity: s.quantity,
+      quantityType: typeof s.quantity
+    })));
+
+    // Update selected meals on the customer (for the customer-facing "load my selections" feature)
+    customer.selectedMeals = mappedSelections;
+    customer.currentWeekMenu = weeklyMenuId;
+    customer.lastMenuSelectionDate = new Date();
+
+    console.log('BEFORE save - customer.selectedMeals[0]:', customer.selectedMeals[0]);
+    console.log('BEFORE save - quantity value:', customer.selectedMeals[0]?.quantity);
+    console.log('BEFORE save - quantity type:', typeof customer.selectedMeals[0]?.quantity);
+
+    const saveResult = await customer.save();
+    
+    console.log('AFTER save (return value) - selectedMeals[0]:', saveResult.selectedMeals[0]);
+    console.log('AFTER save (return value) - quantity:', saveResult.selectedMeals[0]?.quantity);
+
+    console.log('Saved to DB. Checking what was saved...');
+    const savedCustomer = await Customer.findById(customer._id);
+    console.log('Saved selectedMeals count:', savedCustomer.selectedMeals.length);
+    if (savedCustomer.selectedMeals.length > 0) {
+      console.log('First saved meal:', {
+        mealName: savedCustomer.selectedMeals[0].mealName,
+        quantity: savedCustomer.selectedMeals[0].quantity
+      });
+    }
+
+    // Upsert a MenuSelectionRecord so historical selections per menu are preserved
+    // even after the customer moves on to a newer menu week.
+    if (weeklyMenuId) {
+      await MenuSelectionRecord.findOneAndUpdate(
+        { weeklyMenuId, email: customer.email },
+        {
+          $set: {
+            weeklyMenuId,
+            email: customer.email,
+            customerId: customer.customerId,
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            mealExclusion: customer.mealExclusion,
+            selectedMeals: mappedSelections,
+            submittedAt: new Date(),
+            macros: macros ? macros : undefined
+          }
+        },
+        { upsert: true, new: true }
+      );
+      console.log('MenuSelectionRecord upserted for', customer.email, 'menu', weeklyMenuId);
+    }
+
+    // Refresh selection count from MenuSelectionRecord (authoritative, never decrements on menu switch)
+    if (weeklyMenuId) {
+      const selectionTotal = await MenuSelectionRecord.countDocuments({ weeklyMenuId });
+      await WeeklyMenu.findByIdAndUpdate(weeklyMenuId, { $set: { selectionCount: selectionTotal } });
+    }
+
+    // If the customer switched from a different menu, preserve their old selections
+    // in that menu's MenuSelectionRecord before they are lost, then update its count.
+    if (previousMenuId && previousMenuId !== String(weeklyMenuId) && previousMeals.length > 0) {
+      // Only upsert if no record exists yet — don't overwrite a record the customer
+      // already submitted directly (which would be more accurate).
+      const existingOldRecord = await MenuSelectionRecord.findOne({
+        weeklyMenuId: previousMenuId,
+        email: customer.email
+      });
+      if (!existingOldRecord) {
+        await MenuSelectionRecord.findOneAndUpdate(
+          { weeklyMenuId: previousMenuId, email: customer.email },
+          {
+            $set: {
+              weeklyMenuId: previousMenuId,
+              email: customer.email,
+              customerId: customer.customerId,
+              firstName: customer.firstName,
+              lastName: customer.lastName,
+              mealExclusion: customer.mealExclusion,
+              selectedMeals: previousMeals,
+              submittedAt: customer.lastMenuSelectionDate || new Date()
+            }
+          },
+          { upsert: true, new: true }
+        );
+        console.log(`Preserved old selections for ${customer.email} in menu ${previousMenuId}`);
+      }
+      const oldSelectionTotal = await MenuSelectionRecord.countDocuments({ weeklyMenuId: previousMenuId });
+      await WeeklyMenu.findByIdAndUpdate(previousMenuId, { $set: { selectionCount: oldSelectionTotal } });
+      console.log(`Updated old menu ${previousMenuId} selectionCount to ${oldSelectionTotal}`);
+    }
+
+    res.json({
+      success: true,
+      message: 'Meals selected successfully',
+      data: customer
+    });
+  } catch (error) {
+    console.error('Error selecting meals:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * DELETE /api/menus/:menuId/selections/:email
+ * Admin deletes a customer's selection record for a specific menu.
+ */
+router.delete('/:menuId/selections/:email', protect, async (req, res) => {
+  try {
+    const { menuId, email } = req.params;
+    const cleanEmail = decodeURIComponent(String(email || '')).trim().toLowerCase();
+
+    const deleted = await MenuSelectionRecord.findOneAndDelete({
+      weeklyMenuId: menuId,
+      email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') }
+    });
+
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: 'Selection record not found' });
+    }
+
+    // Also clear the Customer document's cached selection fields so the
+    // customer-facing share link no longer shows the deleted selections.
+    const customer = await Customer.findOne({ email: { $regex: new RegExp(`^${cleanEmail}$`, 'i') } });
+    if (customer) {
+      const updateFields = { selectedMeals: [] };
+      // Only clear currentWeekMenu if it points to this specific menu
+      if (customer.currentWeekMenu && String(customer.currentWeekMenu) === String(menuId)) {
+        updateFields.currentWeekMenu = null;
+        updateFields.lastMenuSelectionDate = null;
+      }
+      await Customer.findByIdAndUpdate(customer._id, { $set: updateFields });
+
+      // Invalidate the meal-profile cache for this customer
+      const cacheKeysToDelete = [
+        `customer:profile:${customer.customerId}:${cleanEmail}:${menuId}`,
+        `customer:profile:${customer.email}:${customer.email}:${menuId}`,
+        `customer:profile:${cleanEmail}:${cleanEmail}:${menuId}`,
+        `customer:profile:${customer.customerId}:${cleanEmail}:`,
+        `customer:profile:${customer.customerId}::`,
+      ];
+      await Promise.all(cacheKeysToDelete.map(k => cacheDelete(k).catch(() => {})));
+    }
+
+    // Update the menu's selectionCount
+    const selectionTotal = await MenuSelectionRecord.countDocuments({ weeklyMenuId: menuId });
+    await WeeklyMenu.findByIdAndUpdate(menuId, { $set: { selectionCount: selectionTotal } });
+
+    return res.json({ success: true, message: 'Selection deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting selection:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Admin: update macro presets (breakfast / snack) for a customer's selection record
+router.patch('/:menuId/selections/:email/macros-presets', protect, async (req, res) => {
+  try {
+    const { menuId } = req.params;
+    const email = decodeURIComponent(req.params.email).trim().toLowerCase();
+    const { breakfast, snack } = req.body;
+
+    const update = {};
+    if (breakfast) update['macros.presets.breakfast'] = breakfast;
+    if (snack)     update['macros.presets.snack']     = snack;
+
+    const record = await MenuSelectionRecord.findOneAndUpdate(
+      { weeklyMenuId: menuId, email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+      { $set: update },
+      { new: true }
+    );
+
+    if (!record) {
+      return res.status(404).json({ success: false, message: 'Selection record not found' });
+    }
+
+    return res.json({ success: true, data: record.macros });
+  } catch (error) {
+    console.error('Error updating macro presets:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Admin override: update a customer's meal selections for a given menu
+router.put('/:menuId/selections/:email', protect, async (req, res) => {
+  try {
+    const { menuId } = req.params;
+    const email = decodeURIComponent(req.params.email);
+    const { selections } = req.body;
+
+    if (!Array.isArray(selections)) {
+      return res.status(400).json({ success: false, message: 'selections must be an array' });
+    }
+
+    const menu = await WeeklyMenu.findById(menuId);
+    if (!menu) return res.status(404).json({ success: false, message: 'Menu not found' });
+
+    const customer = await Customer.findOne({ email });
+    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+
+    const record = await MenuSelectionRecord.findOneAndUpdate(
+      { weeklyMenuId: menuId, email },
+      { $set: { selectedMeals: selections } },
+      { new: true, upsert: false }
+    );
+
+    if (!record) {
+      return res.status(404).json({ success: false, message: 'No existing selection record found for this customer and menu' });
+    }
+
+    // Sync to customer document
+    customer.selectedMeals = selections;
+    customer.currentWeekMenu = menuId;
+    await customer.save();
+
+    // Invalidate caches
+    cacheDelete(`meal-profile-${customer.customerId}`);
+    cacheDeletePattern(`weekly-menu`);
+
+    return res.json({ success: true, message: 'Selection updated successfully', record });
+  } catch (error) {
+    console.error('Error updating selection (admin override):', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+export default router;

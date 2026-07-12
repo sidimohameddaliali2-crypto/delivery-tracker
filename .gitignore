@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Environment files (contain secrets)
+.env
+.env.*
+!.env.example
+
+# PM2 config with hardcoded secrets
+server/ecosystem.config.cjs
+
+# Build output
+client/build/
+client/dist/
+
+# Uploads (user-generated content)
+server/uploads/
+
+# Logs
+*.log
+client/client.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Misc
+tmp/

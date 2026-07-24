@@ -25,6 +25,7 @@ jobs:
           DO_USER: ${{ secrets.DO_USER }}
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
           DO_SSH_KEY: ${{ secrets.DO_SSH_KEY }}
+          DO_SSH_PASSPHRASE: ${{ secrets.DO_SSH_PASSPHRASE }}
         run: |
           set -e
           if [ -z "$DO_HOST" ]; then echo "DO_HOST is missing"; exit 1; fi
@@ -38,6 +39,7 @@ jobs:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           script_stop: true
           script: |
             set -e

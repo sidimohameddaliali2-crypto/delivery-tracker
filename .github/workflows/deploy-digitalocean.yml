@@ -45,6 +45,11 @@ jobs:
             set -e
             cd ${{ secrets.DO_APP_PATH }}
 
+            echo "[0/7] Current directory"
+            pwd
+            echo "[0/7] Directory listing"
+            ls -la
+
             echo "[1/7] Verify git repository"
             git rev-parse --is-inside-work-tree
 

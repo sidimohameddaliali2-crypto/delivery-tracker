@@ -1,0 +1,57 @@
+cname: Deploy to DigitalOcean
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd ${{ secrets.DO_APP_PATH }}
+
+            echo "[1/7] Verify git repository"
+            git rev-parse --is-inside-work-tree
+
+            echo "[2/7] Fetch latest code"
+            git fetch --all --prune
+
+            echo "[3/7] Checkout and pull branch"
+            git checkout main
+            git reset --hard origin/main
+
+            echo "[4/7] Install server dependencies"
+            cd server
+            npm ci --omit=dev
+            cd ..
+
+            echo "[5/7] Install and build client"
+            cd client
+            npm ci
+            npm run build
+            cd ..
+
+            echo "[6/7] Restart API with PM2"
+            pm2 reload matter-delivery-api || pm2 start npm --name matter-delivery-api -- start --prefix server
+
+            echo "[7/7] Save PM2 process list"
+            pm2 save

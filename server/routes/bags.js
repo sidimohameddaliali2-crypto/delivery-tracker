@@ -638,13 +638,24 @@ router.patch('/:id/return', protect, async (req, res) => {
     const isObjectId = mongoose.Types.ObjectId.isValid(paramId);
     const query = isObjectId ? { $or: [{ bagId }, { _id: paramId }] } : { bagId };
 
-    const bag = await Bag.findOne(query);
+    let bag = await Bag.findOne(query);
     if (!bag) {
-      console.log('Bag not found:', paramId);
-      return res.status(404).json({
-        success: false,
-        message: 'Bag not found'
+      // Only auto-provision when the param is clearly a scanned bag code —
+      // not a database _id, which was expected to already exist.
+      if (isObjectId || !/^BAG[-_]/.test(bagId)) {
+        console.log('Bag not found:', paramId);
+        return res.status(404).json({
+          success: false,
+          message: 'Bag not found'
+        });
+      }
+      bag = new Bag({
+        bagId,
+        notes: 'Auto-created on first scan — bag was not pre-registered in inventory',
       });
+      if (!bag.$locals) bag.$locals = {};
+      bag.$locals.historyNote = 'Auto-created via bag return (bag ID not found in inventory)';
+      await bag.save();
     }
 
     const updateOps = {
@@ -774,21 +785,37 @@ router.delete('/', authorize(['admin', 'super_admin']), async (req, res) => {
 // Reassign bag to new customer
 router.patch('/reassign', protect, async (req, res) => {
   try {
-    const { bagId, customerId, customerName, deliveryId } = req.body;
+    const { bagId: rawBagId, customerId, customerName, deliveryId } = req.body;
 
-    if (!bagId) {
+    if (!rawBagId) {
       return res.status(400).json({
         success: false,
         message: 'Bag ID is required'
       });
     }
 
-    const bag = await Bag.findOne({ bagId });
+    // Normalize before querying — the schema stores bagId uppercased, so a
+    // scanned code with different casing/whitespace would otherwise silently
+    // fail to match an existing bag.
+    const bagId = rawBagId.toString().trim().toUpperCase();
+
+    let bag = await Bag.findOne({ bagId });
     if (!bag) {
-      return res.status(404).json({
-        success: false,
-        message: 'Bag not found'
+      // Drivers scan physical bag tags that may not have been registered in
+      // inventory yet. Auto-provision instead of blocking delivery
+      // completion, but still reject scans that aren't a bag code at all.
+      if (!/^BAG[-_]/.test(bagId)) {
+        return res.status(404).json({
+          success: false,
+          message: 'Bag not found'
+        });
+      }
+      bag = new Bag({
+        bagId,
+        notes: 'Auto-created on first scan — bag was not pre-registered in inventory',
       });
+      if (!bag.$locals) bag.$locals = {};
+      bag.$locals.historyNote = 'Auto-created via bag reassignment (bag ID not found in inventory)';
     }
 
     // Update customer information

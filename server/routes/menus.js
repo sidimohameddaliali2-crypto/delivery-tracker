@@ -6,6 +6,7 @@ import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { protect } from '../middleware/auth.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
+import athleatService from '../services/athleatService.js';
 
 const router = express.Router();
 
@@ -215,7 +216,7 @@ router.get('/customers/:customerId/filemaker-layouts', async (req, res) => {
     const { email } = req.query;
 
     const customer = await Customer.findOne({ customerId });
-    const resolvedEmail = (email || customer?.email || '');
+    const resolvedEmail = String(email || customer?.email || '').trim();
 
     if (!resolvedEmail) {
       return res.status(400).json({
@@ -224,16 +225,86 @@ router.get('/customers/:customerId/filemaker-layouts', async (req, res) => {
       });
     }
 
+    const parseFilemakerDate = (value) => {
+      if (!value) return null;
+
+      const raw = String(value).trim();
+      if (!raw) return null;
+
+      const direct = new Date(raw);
+      if (!Number.isNaN(direct.getTime())) return direct;
+
+      const mdY = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (mdY) {
+        const month = Number(mdY[1]);
+        const day = Number(mdY[2]);
+        const year = Number(mdY[3]);
+        const parsed = new Date(year, month - 1, day);
+        if (!Number.isNaN(parsed.getTime())) return parsed;
+      }
+
+      return null;
+    };
+
+    const formatAsFilemakerDate = (date) => {
+      const month = String(date.getMonth() + 1);
+      const day = String(date.getDate());
+      const year = String(date.getFullYear());
+      return `${month}/${day}/${year}`;
+    };
+
+    const [customerLayout, leadLayout, orderLayout] = await Promise.all([
+      athleatService.getCustomerRawByEmail(resolvedEmail),
+      athleatService.getLeadRawByEmail(resolvedEmail),
+      athleatService.getOrderRawByEmail(resolvedEmail)
+    ]);
+
+    const primaryCustomer = customerLayout[0] || null;
+    const uuidCustomer = primaryCustomer?.fieldData?.uuid || '';
+
+    const orderScheduleLayout = uuidCustomer
+      ? await athleatService.getOrderScheduleRawByUUID(uuidCustomer)
+      : [];
+
+    const candidateDates = [];
+    orderLayout.forEach((record) => {
+      const fieldData = record?.fieldData || {};
+      candidateDates.push(parseFilemakerDate(fieldData.dateStart));
+      candidateDates.push(parseFilemakerDate(fieldData.dateEnd));
+    });
+    orderScheduleLayout.forEach((record) => {
+      const fieldData = record?.fieldData || {};
+      candidateDates.push(parseFilemakerDate(fieldData.date));
+    });
+
+    const validDates = candidateDates.filter(Boolean);
+    let menuItemLayout = [];
+    if (validDates.length > 0) {
+      validDates.sort((a, b) => a.getTime() - b.getTime());
+      const minDate = formatAsFilemakerDate(validDates[0]);
+      const maxDate = formatAsFilemakerDate(validDates[validDates.length - 1]);
+      menuItemLayout = await athleatService.getMenuItemsRaw(minDate, maxDate);
+    }
+
     return res.json({
       success: true,
       data: {
+        readOnly: true,
+        note: 'Preview only. No customer/profile/FileMaker records are updated by this endpoint.',
         email: resolvedEmail,
-        customerLayout: [],
-        leadLayout: [],
-        orderLayout: [],
-        orderScheduleLayout: [],
-        menuItemLayout: [],
-        note: 'External FileMaker/Athleat API is disabled.'
+        customerLayout,
+        leadLayout,
+        orderLayout,
+        orderScheduleLayout,
+        menuItemLayout,
+        summary: {
+          customerCount: customerLayout.length,
+          leadCount: leadLayout.length,
+          orderCount: orderLayout.length,
+          orderScheduleCount: orderScheduleLayout.length,
+          menuItemCount: menuItemLayout.length,
+          uuidCustomer: uuidCustomer || null
+        }
       }
     });
   } catch (error) {

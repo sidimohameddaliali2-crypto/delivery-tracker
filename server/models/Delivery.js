@@ -222,16 +222,6 @@ deliverySchema.statics.getDriverTodaysDeliveries = function (driverId) {
     endOfDay = new Date(startOfDay.getTime() + 48 * 60 * 60 * 1000 - 1); // end of tomorrow (UTC)
   }
 
-  console.log('📅 getDriverTodaysDeliveries:', {
-    driverId: driverId.toString().substring(0, 8),
-    TIMEZONE_OFFSET_MINUTES,
-    nowUTC: nowUTC.toISOString(),
-    nowUAE: nowUAE.toISOString(),
-    todayStringUAE,
-    startOfDay: startOfDay.toISOString(),
-    endOfDay: endOfDay.toISOString()
-  });
-
   return this.find({
     driver: driverId,
     scheduledTime: {

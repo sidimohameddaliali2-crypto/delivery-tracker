@@ -137,11 +137,6 @@ router.get('/locations', protect, async (req, res) => {
 router.put('/:id/location', protect, async (req, res) => {
   try {
     const driverId = req.params.id;
-    const driver = await User.findById(driverId);
-
-    if (!driver || driver.role !== 'driver') {
-      return res.status(404).json({ message: 'Driver not found' });
-    }
 
     const canUpdate =
       req.user.role === 'super_admin' ||
@@ -158,27 +153,31 @@ router.put('/:id/location', protect, async (req, res) => {
       return res.status(400).json({ message: 'Valid latitude and longitude are required' });
     }
 
-    driver.location = {
-      ...driver.location,
-      ...normalizedLocation,
-      lastUpdated: normalizedLocation.lastUpdated || new Date()
-    };
+    // This endpoint is hit every ~10-30s per active driver (live location
+    // tracking), so it's worth a targeted partial update instead of loading
+    // the full User document (profile, kpi, dashboardLayout, etc.), mutating
+    // one field, and re-validating/re-saving the whole thing.
+    const driver = await User.findOneAndUpdate(
+      { _id: driverId, role: 'driver' },
+      {
+        $set: {
+          location: {
+            ...normalizedLocation,
+            lastUpdated: normalizedLocation.lastUpdated || new Date()
+          }
+        }
+      },
+      { new: true, select: '_id email profile isActive kpi location' }
+    );
 
-    await driver.save();
-
-    const sanitizedDriver = {
-      _id: driver._id,
-      email: driver.email,
-      profile: driver.profile,
-      isActive: driver.isActive,
-      kpi: driver.kpi,
-      location: driver.location
-    };
+    if (!driver) {
+      return res.status(404).json({ message: 'Driver not found' });
+    }
 
     res.json({
       success: true,
       driverId: driver._id,
-      driver: sanitizedDriver,
+      driver,
       location: driver.location
     });
   } catch (error) {

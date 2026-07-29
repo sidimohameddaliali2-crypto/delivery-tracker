@@ -243,6 +243,9 @@ const Customers = () => {
   const [deliveriesError, setDeliveriesError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [customerProfile, setCustomerProfile] = useState(null); // Athleat profile data
+  const [filemakerLayoutsData, setFilemakerLayoutsData] = useState(null);
+  const [filemakerLayoutsLoading, setFilemakerLayoutsLoading] = useState(false);
+  const [filemakerLayoutsError, setFilemakerLayoutsError] = useState(null);
   const [isEditingEmail, setIsEditingEmail] = useState(false);
   const [editEmailValue, setEditEmailValue] = useState('');
   const [emailSaveLoading, setEmailSaveLoading] = useState(false);
@@ -370,12 +373,14 @@ const Customers = () => {
         if (delivery.customerId) {
           const existing = customerMap.get(delivery.customerId);
           if (existing) {
-            // Update existing customer
-            existing.customerName = delivery.customerName || existing.customerName;
-            existing.company = delivery.company || existing.company;
-            existing.address = delivery.address || existing.address;
-            existing.phone = delivery.phone || existing.phone;
-            existing.email = delivery.email || existing.email;
+            // The Customer record is the source of truth (kept current via uploads/edits).
+            // Only fill in fields it didn't already provide — don't let stale info
+            // snapshotted on old delivery records override a customer's current details.
+            if (existing.customerName === 'Unknown' && delivery.customerName) existing.customerName = delivery.customerName;
+            if (existing.company === 'N/A' && delivery.company) existing.company = delivery.company;
+            if (existing.address === 'N/A' && delivery.address) existing.address = delivery.address;
+            if (existing.phone === 'N/A' && delivery.phone) existing.phone = delivery.phone;
+            if (existing.email === 'N/A' && delivery.email) existing.email = delivery.email;
           } else {
             // Add new customer from delivery
             customerMap.set(delivery.customerId, {
@@ -525,6 +530,8 @@ const Customers = () => {
   const handleSelectCustomer = (customer) => {
     setSelectedCustomer(customer);
     setCustomerProfile(null);
+    setFilemakerLayoutsData(null);
+    setFilemakerLayoutsError(null);
     setCalendarViewMonth(null);
     setShowCycleCalendar(false);
     fetchCustomerDeliveries(customer.customerId, customer.email);
@@ -534,6 +541,8 @@ const Customers = () => {
     setSelectedCustomer(null);
     setCustomerDeliveries([]);
     setCustomerProfile(null);
+    setFilemakerLayoutsData(null);
+    setFilemakerLayoutsError(null);
     setIsEditingEmail(false);
     setEditEmailValue('');
     setIsEditingPlanStart(false);
@@ -586,6 +595,37 @@ const Customers = () => {
   const handleCancelEditEmail = () => {
     setIsEditingEmail(false);
     setEditEmailValue('');
+  };
+
+  const handleFetchFilemakerLayouts = async () => {
+    const email = customerProfile?.email || selectedCustomer?.email;
+    if (!email || email === 'N/A' || !email.includes('@')) {
+      alert('Please add a valid email before fetching FileMaker layouts');
+      return;
+    }
+
+    try {
+      setFilemakerLayoutsLoading(true);
+      setFilemakerLayoutsError(null);
+
+      const response = await api.get(
+        `/menus/customers/${selectedCustomer.customerId}/filemaker-layouts`,
+        { params: { email } }
+      );
+
+      if (response.data?.success) {
+        setFilemakerLayoutsData(response.data.data);
+      } else {
+        setFilemakerLayoutsData(null);
+        setFilemakerLayoutsError('Failed to fetch FileMaker layout data');
+      }
+    } catch (error) {
+      console.error('Error fetching FileMaker layouts:', error);
+      setFilemakerLayoutsData(null);
+      setFilemakerLayoutsError(error.response?.data?.message || 'Failed to fetch FileMaker layout data');
+    } finally {
+      setFilemakerLayoutsLoading(false);
+    }
   };
 
   const handleSavePlanStart = async () => {
@@ -1191,15 +1231,24 @@ const Customers = () => {
             <div className="md:col-span-2">
               <div className="flex items-center justify-between mb-1">
                 <p className="text-gray-600 text-sm">Email</p>
-                {!isEditingEmail && (
+                <div className="flex items-center gap-3">
                   <button
-                    onClick={handleEditEmail}
-                    className="text-blue-600 hover:text-blue-700 text-sm flex items-center gap-1"
+                    onClick={handleFetchFilemakerLayouts}
+                    disabled={filemakerLayoutsLoading}
+                    className="text-indigo-600 hover:text-indigo-700 text-sm font-medium disabled:opacity-60"
                   >
-                    <Mail className="w-3 h-3" />
-                    {(customerProfile?.email || selectedCustomer.email === 'N/A') ? 'Edit' : 'Add Email'}
+                    {filemakerLayoutsLoading ? 'Fetching layouts...' : 'Preview FileMaker Layouts (Read-only)'}
                   </button>
-                )}
+                  {!isEditingEmail && (
+                    <button
+                      onClick={handleEditEmail}
+                      className="text-blue-600 hover:text-blue-700 text-sm flex items-center gap-1"
+                    >
+                      <Mail className="w-3 h-3" />
+                      {(customerProfile?.email || selectedCustomer.email === 'N/A') ? 'Edit' : 'Add Email'}
+                    </button>
+                  )}
+                </div>
               </div>
               {isEditingEmail ? (
                 <div className="flex gap-2">
@@ -1300,6 +1349,60 @@ const Customers = () => {
             )}
           </div>
         </div>
+
+        {(filemakerLayoutsError || filemakerLayoutsData) && (
+          <div className="bg-white rounded-lg border border-gray-200 p-6">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold text-gray-900">FileMaker Layout Results</h2>
+              {filemakerLayoutsData?.email && (
+                <span className="text-xs text-gray-500">Email: {filemakerLayoutsData.email}</span>
+              )}
+            </div>
+
+            {filemakerLayoutsData?.readOnly && (
+              <div className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg p-3 mb-3">
+                {filemakerLayoutsData?.note || 'Read-only preview. This action does not update customer/profile records.'}
+              </div>
+            )}
+
+            {filemakerLayoutsError && (
+              <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3 mb-3">
+                {filemakerLayoutsError}
+              </div>
+            )}
+
+            {filemakerLayoutsData?.summary && (
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-4">
+                <div className="bg-blue-50 border border-blue-100 rounded p-2 text-xs">Customer: {filemakerLayoutsData.summary.customerCount}</div>
+                <div className="bg-green-50 border border-green-100 rounded p-2 text-xs">Leads: {filemakerLayoutsData.summary.leadCount}</div>
+                <div className="bg-yellow-50 border border-yellow-100 rounded p-2 text-xs">Orders: {filemakerLayoutsData.summary.orderCount}</div>
+                <div className="bg-orange-50 border border-orange-100 rounded p-2 text-xs">Schedule: {filemakerLayoutsData.summary.orderScheduleCount}</div>
+                <div className="bg-purple-50 border border-purple-100 rounded p-2 text-xs">Menu: {filemakerLayoutsData.summary.menuItemCount}</div>
+              </div>
+            )}
+
+            {filemakerLayoutsData && (
+              <div className="space-y-3">
+                {[
+                  ['Customer: Web Data', filemakerLayoutsData.customerLayout],
+                  ['Leads: Web Data', filemakerLayoutsData.leadLayout],
+                  ['Order: Web Data', filemakerLayoutsData.orderLayout],
+                  ['Order: Schedule Meal - Web Data', filemakerLayoutsData.orderScheduleLayout],
+                  ['Menu: Item - Web Data', filemakerLayoutsData.menuItemLayout]
+                ].map(([label, rows]) => (
+                  <details key={label} className="border border-gray-200 rounded-lg" open>
+                    <summary className="px-3 py-2 cursor-pointer text-sm font-medium text-gray-800 bg-gray-50">
+                      {label} ({Array.isArray(rows) ? rows.length : 0})
+                    </summary>
+                    <pre className="text-xs bg-white p-3 overflow-auto max-h-72 border-t border-gray-200">
+                      {JSON.stringify(rows, null, 2)}
+                    </pre>
+                  </details>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Subscription */}
         {(() => {

@@ -45,7 +45,7 @@ const customerSchema = new mongoose.Schema({
   },
   mealPlan: {
     type: String,
-    enum: ['Standard', 'Customized', 'Premium', 'Vegan', 'Keto', 'Paleo', 'Bodybuilder'],
+    enum: ['Standard', 'Customized', 'Premium', 'Vegan', 'Keto', 'Paleo', 'Bodybuilder', 'Lean 2 Meal', 'Lean 3 Meal', 'Thrive 2 Meal', 'Thrive 3 Meal', 'Perform 2 Meal', 'Perform 3 Meal'],
     default: 'Standard'
   },
   mealExclusion: {

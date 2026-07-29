@@ -548,7 +548,7 @@ router.get('/', async (req, res) => {
  */
 router.post('/send-whatsapp-reminder', async (req, res) => {
   try {
-    const { customerId, customerName, mealPlan, planStartDate, cycleDuration, remaining, discount, phone } = req.body;
+    const { customerId, customerName, mealPlan, lastDeliveryDate, remaining, discount, phone } = req.body;
 
     // Always send to the default recipient; falls back to customer phone if not set
     const recipientPhone = (process.env.GALLABOX_DEFAULT_PHONE || phone || '').replace(/\s+/g, '');
@@ -557,12 +557,14 @@ router.post('/send-whatsapp-reminder', async (req, res) => {
       return res.status(400).json({ success: false, message: 'No recipient phone number available' });
     }
 
-    // Calculate plan end date
+    // Use the same date already shown to the user in the Renewal table (actual last
+    // delivery, or projected last day for active plans) rather than recomputing it
     let endDate = 'N/A';
-    if (planStartDate && cycleDuration) {
-      const start = new Date(planStartDate);
-      const end = new Date(start.getTime() + cycleDuration * 24 * 60 * 60 * 1000);
-      endDate = end.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    if (lastDeliveryDate) {
+      const date = new Date(lastDeliveryDate);
+      if (!Number.isNaN(date.getTime())) {
+        endDate = date.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      }
     }
 
     // Gallabox expects phone without leading +

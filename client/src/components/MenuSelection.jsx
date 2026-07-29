@@ -1308,7 +1308,7 @@ const MenuSelection = ({ token }) => {
                 No meals are available for your plan. Breakfast or snack options may be excluded.
               </div>
             ) : (
-              <div className="space-y-6 mb-6">
+              <div className={`mb-6 flex gap-6 ${!isBodybuilderFlow ? 'flex-col-reverse' : 'flex-col'}`}>
                 <div>
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="text-lg font-semibold text-gray-900">Meals</h3>

@@ -574,9 +574,21 @@ async function applyBagAssignmentToDelivery(delivery, bagId, assignedBy) {
     await releaseBagAssignment(delivery.bagAssignment.bagId);
   }
 
-  const bag = await Bag.findOne({ bagId: normalizedId });
+  let bag = await Bag.findOne({ bagId: normalizedId });
+  let isNewBag = false;
   if (!bag) {
-    throw Object.assign(new Error('Bag not found'), { statusCode: 404 });
+    // Drivers scan physical bag tags that may not have been registered in
+    // inventory yet (new bags, warehouse onboarding gaps). Auto-provision
+    // the bag instead of blocking delivery completion — but still reject
+    // scans that clearly aren't a bag code at all (garbage QR, wrong item).
+    if (!/^BAG[-_]/.test(normalizedId)) {
+      throw Object.assign(new Error('Bag not found'), { statusCode: 404 });
+    }
+    isNewBag = true;
+    bag = new Bag({
+      bagId: normalizedId,
+      notes: 'Auto-created on first scan — bag was not pre-registered in inventory',
+    });
   }
 
   bag.status = 'assigned';
@@ -590,6 +602,10 @@ async function applyBagAssignmentToDelivery(delivery, bagId, assignedBy) {
     },
     assignmentTime: new Date()
   };
+  if (isNewBag) {
+    if (!bag.$locals) bag.$locals = {};
+    bag.$locals.historyNote = 'Auto-created and assigned (bag ID not found in inventory)';
+  }
   await bag.save();
 
   delivery.bagAssignment = {
@@ -1798,93 +1814,9 @@ router.post('/return-bag', async (req, res) => {
 // @access  Private/Driver
 router.get('/driver/today', protect, async (req, res) => {
   try {
-    console.log('========== DRIVER TODAY DELIVERIES ==========');
-    console.log('Driver requesting deliveries:', {
-      userId: req.user._id.toString(),
-      email: req.user.email,
-      role: req.user.role,
-      serverTime: new Date().toISOString(),
-      serverLocalTime: new Date().toString()
-    });
-
-    // Use environment variable for timezone offset
-    const TIMEZONE_OFFSET_MINUTES = parseInt(process.env.LOCAL_TIMEZONE_OFFSET_MINUTES || '240', 10);
-    const uaeOffset = TIMEZONE_OFFSET_MINUTES * 60 * 1000; // Convert to milliseconds
-    
-    const nowUTC = new Date();
-    const nowUAE = new Date(nowUTC.getTime() + uaeOffset);
-    const todayStringUAE = nowUAE.toISOString().split('T')[0];
-    
-    const uaeMidnight = new Date(todayStringUAE + 'T00:00:00.000Z');
-    const startOfDay = new Date(uaeMidnight.getTime() - uaeOffset);
-    const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
-    
-    console.log('🌍 Timezone Calculation:', {
-      TIMEZONE_OFFSET_MINUTES,
-      serverUTC: nowUTC.toISOString(),
-      uaeTime: nowUAE.toISOString(),
-      uaeDate: todayStringUAE,
-      queryStartOfDay: startOfDay.toISOString(),
-      queryEndOfDay: endOfDay.toISOString()
-    });
-
-    // Extra debug: check early next-day window
-    const ENABLE_EARLY_NEXT_DAY = String(process.env.ENABLE_EARLY_NEXT_DAY || '1') === '1';
-    const NEXT_DAY_AVAILABLE_HOUR = parseInt(process.env.NEXT_DAY_AVAILABLE_HOUR || '16', 10);
-
-    const tomorrowStart = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
-    const tomorrowEnd = new Date(startOfDay.getTime() + 48 * 60 * 60 * 1000 - 1);
-
-    const tomorrowCount = await Delivery.countDocuments({
-      driver: req.user._id,
-      scheduledTime: { $gte: tomorrowStart, $lte: tomorrowEnd },
-      status: { $in: ['pending', 'assigned', 'on_route', 'picked_up', 'delivered', 'failed', 'completed'] }
-    });
-
-    console.log('⏭️ Early next-day config:', {
-      ENABLE_EARLY_NEXT_DAY,
-      NEXT_DAY_AVAILABLE_HOUR,
-      nowUAE: nowUAE.toISOString(),
-      tomorrowStart: tomorrowStart.toISOString(),
-      tomorrowEnd: tomorrowEnd.toISOString(),
-      tomorrowCount
-    });
-
     const deliveries = await Delivery.getDriverTodaysDeliveries(req.user._id)
-      .populate('driver', 'profile.firstName profile.lastName profile.colorCode email');
-
-    console.log(`✅ Found ${deliveries.length} deliveries for driver`);
-    
-    // Debug: Check if there are ANY deliveries assigned to this driver
-    const allDriverDeliveries = await Delivery.find({ driver: req.user._id }).limit(5);
-    console.log(`📊 Total deliveries for this driver (any date): ${allDriverDeliveries.length}`);
-    
-    if (allDriverDeliveries.length > 0) {
-      console.log('📅 Sample delivery dates:', allDriverDeliveries.map(d => ({
-        id: d._id.toString().substring(0, 8),
-        date: d.scheduledTime.toISOString(),
-        customer: d.customerName
-      })));
-    }
-    
-    // Debug: Check today's deliveries without driver filter
-    const allTodayDeliveries = await Delivery.find({
-      scheduledTime: { $gte: startOfDay, $lt: endOfDay }
-    }).select('_id customerName driver status scheduledTime').limit(10);
-    
-    console.log(`📋 Total deliveries for today (all drivers): ${allTodayDeliveries.length}`);
-    
-    if (allTodayDeliveries.length > 0) {
-      console.log('👥 Deliveries today (sample):', allTodayDeliveries.map(d => ({
-        id: d._id.toString().substring(0, 8),
-        customer: d.customerName,
-        driver: d.driver?.toString().substring(0, 8) || 'UNASSIGNED',
-        status: d.status,
-        time: d.scheduledTime.toISOString()
-      })));
-    }
-    
-    console.log('===========================================');
+      .populate('driver', 'profile.firstName profile.lastName profile.colorCode email')
+      .lean();
 
     res.json({
       success: true,

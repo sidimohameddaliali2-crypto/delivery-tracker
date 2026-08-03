@@ -119,6 +119,8 @@ mongoose.connection.on('connected', () => {
 
 mongoose.connection.on('disconnected', () => {
   console.warn('⚠️  Mongoose disconnected from MongoDB');
+  console.log('🔄 Attempting to reconnect in 5 seconds...');
+  setTimeout(() => connectDB(), 5000);
 });
 
 mongoose.connection.on('error', (err) => {

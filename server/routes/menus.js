@@ -1,7 +1,9 @@
 import express from 'express';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 import Customer from '../models/Customer.js';
 import MenuItem from '../models/MenuItem.js';
+import KitchenBreakfastPreset from '../models/KitchenBreakfastPreset.js';
 import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { protect } from '../middleware/auth.js';
@@ -16,6 +18,8 @@ const buildEmailRegex = (email) => {
   return new RegExp(`^${escapeRegex(cleaned)}$`, 'i');
 };
 
+const isValidObjectId = (value) => mongoose.isValidObjectId(value);
+
 const buildMealName = (item = {}) => {
   const provided = String(item.mealName || '').trim();
   if (provided) return provided;
@@ -28,6 +32,67 @@ const buildMealName = (item = {}) => {
   ].filter(Boolean);
 
   return parts.length ? parts.join(' | ') : '';
+};
+
+const normalizeBreakfastKey = (value) => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+const normalizeBreakfastPresetEntry = (raw = {}) => {
+  return {
+    breakfastName: String(raw.breakfastName || '').trim(),
+    C: Number(raw.C ?? raw.carbs ?? 0) || 0,
+    P: Number(raw.P ?? raw.protein ?? 0) || 0,
+    F: Number(raw.F ?? raw.fats ?? 0) || 0,
+    V: Number(raw.V ?? raw.vegWeight ?? 80) || 80,
+    isLargeBreakfast: !!raw.isLargeBreakfast
+  };
+};
+
+const parseKitchenBreakfastPreset = (menuDoc) => {
+  const breakfastPreset = normalizeBreakfastPresetEntry(menuDoc?.breakfastPreset || menuDoc?.breakfastMacros || {});
+  return {
+    breakfastName: breakfastPreset.breakfastName,
+    C: breakfastPreset.C,
+    P: breakfastPreset.P,
+    F: breakfastPreset.F,
+    V: breakfastPreset.V,
+    isLargeBreakfast: breakfastPreset.isLargeBreakfast
+  };
+};
+
+const parseKitchenBreakfastPresetsByName = (menuDoc) => {
+  const source = menuDoc?.breakfastPresetsByName;
+  if (!source) return {};
+
+  const pairs = source instanceof Map
+    ? Array.from(source.entries())
+    : Object.entries(source || {});
+
+  return pairs.reduce((acc, [rawKey, rawValue]) => {
+    const key = normalizeBreakfastKey(rawKey);
+    if (!key) return acc;
+    acc[key] = normalizeBreakfastPresetEntry(rawValue || {});
+    return acc;
+  }, {});
+};
+
+const normalizeKitchenMacros = (rawMacros) => {
+  if (!rawMacros) return { C: 0, P: 0, F: 0, calories: 0 };
+
+  if (rawMacros.total) {
+    return {
+      C: Number(rawMacros.total.C) || 0,
+      P: Number(rawMacros.total.P) || 0,
+      F: Number(rawMacros.total.F) || 0,
+      calories: Number(rawMacros.total.calories) || 0
+    };
+  }
+
+  return {
+    C: Number(rawMacros.C) || 0,
+    P: Number(rawMacros.P) || 0,
+    F: Number(rawMacros.F) || 0,
+    calories: Number(rawMacros.calories) || 0
+  };
 };
 
 // ============================================
@@ -552,6 +617,210 @@ router.get('/', protect, async (req, res) => {
 });
 
 /**
+ * GET /api/menus/kitchen-list
+ * Returns the active menu list for the kitchen list page.
+ */
+router.get('/kitchen-list', protect, async (req, res) => {
+  try {
+    const menus = await WeeklyMenu.find({ isActive: true })
+      .select('title name startDate endDate selectionCount breakfastPreset breakfastMacros breakfastPresetsByName')
+      .sort({ startDate: -1 })
+      .lean();
+
+    return res.json({
+      success: true,
+      data: menus.map((menu) => ({
+        ...menu,
+        breakfastPreset: parseKitchenBreakfastPreset(menu),
+        breakfastPresetsByName: parseKitchenBreakfastPresetsByName(menu)
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching kitchen list menus:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/menus/kitchen-breakfast-presets
+ * Returns the global kitchen breakfast presets shared across all menus.
+ */
+router.get('/kitchen-breakfast-presets', protect, async (req, res) => {
+  try {
+    const doc = await KitchenBreakfastPreset.findOne({ key: 'global' }).lean();
+
+    return res.json({
+      success: true,
+      data: {
+        breakfastPreset: parseKitchenBreakfastPreset(doc || {}),
+        presetsByName: parseKitchenBreakfastPresetsByName({ breakfastPresetsByName: doc?.presetsByName })
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching global breakfast presets:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * PUT /api/menus/kitchen-breakfast-presets
+ * Saves the global kitchen breakfast presets shared across all menus.
+ */
+router.put('/kitchen-breakfast-presets', protect, async (req, res) => {
+  try {
+    const { presets = [], defaultPreset = null } = req.body || {};
+
+    if (!Array.isArray(presets)) {
+      return res.status(400).json({
+        success: false,
+        message: 'presets must be an array'
+      });
+    }
+
+    const normalizedMap = presets.reduce((acc, row) => {
+      const normalized = normalizeBreakfastPresetEntry(row || {});
+      const key = normalizeBreakfastKey(normalized.breakfastName || row?.name || '');
+      if (!key) return acc;
+      acc[key] = normalized;
+      return acc;
+    }, {});
+
+    const mapEntries = Object.values(normalizedMap);
+    const resolvedDefault = normalizeBreakfastPresetEntry(defaultPreset || mapEntries[0] || {});
+
+    const doc = await KitchenBreakfastPreset.findOneAndUpdate(
+      { key: 'global' },
+      {
+        $set: {
+          breakfastPreset: resolvedDefault,
+          presetsByName: normalizedMap
+        }
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    return res.json({
+      success: true,
+      data: {
+        breakfastPreset: parseKitchenBreakfastPreset(doc || {}),
+        presetsByName: parseKitchenBreakfastPresetsByName({ breakfastPresetsByName: doc?.presetsByName })
+      }
+    });
+  } catch (error) {
+    console.error('Error saving global breakfast presets:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/menus/:id/breakfast-presets
+ * Returns imported breakfast presets for a menu.
+ */
+router.get('/:id/breakfast-presets', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const menu = await WeeklyMenu.findById(id)
+      .select('breakfastPreset breakfastMacros breakfastPresetsByName')
+      .lean();
+
+    if (!menu) {
+      return res.status(404).json({
+        success: false,
+        message: 'Menu not found'
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        breakfastPreset: parseKitchenBreakfastPreset(menu),
+        presetsByName: parseKitchenBreakfastPresetsByName(menu)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching breakfast presets:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * PUT /api/menus/:id/breakfast-presets
+ * Saves imported breakfast presets for a menu.
+ */
+router.put('/:id/breakfast-presets', protect, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { presets = [], defaultPreset = null } = req.body || {};
+
+    if (!Array.isArray(presets)) {
+      return res.status(400).json({
+        success: false,
+        message: 'presets must be an array'
+      });
+    }
+
+    const normalizedMap = presets.reduce((acc, row) => {
+      const normalized = normalizeBreakfastPresetEntry(row || {});
+      const key = normalizeBreakfastKey(normalized.breakfastName || row?.name || '');
+      if (!key) return acc;
+      acc[key] = normalized;
+      return acc;
+    }, {});
+
+    const mapEntries = Object.values(normalizedMap);
+    const resolvedDefault = normalizeBreakfastPresetEntry(
+      defaultPreset || mapEntries[0] || {}
+    );
+
+    const menu = await WeeklyMenu.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          breakfastPreset: resolvedDefault,
+          breakfastPresetsByName: normalizedMap
+        }
+      },
+      { new: true }
+    )
+      .select('breakfastPreset breakfastPresetsByName')
+      .lean();
+
+    if (!menu) {
+      return res.status(404).json({
+        success: false,
+        message: 'Menu not found'
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        breakfastPreset: parseKitchenBreakfastPreset(menu),
+        presetsByName: parseKitchenBreakfastPresetsByName(menu)
+      }
+    });
+  } catch (error) {
+    console.error('Error saving breakfast presets:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
  * GET /api/menus/share/:token
  * Access menu via share link (public)
  */
@@ -631,6 +900,13 @@ router.get('/share/:token', async (req, res) => {
 router.get('/:id', protect, async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!isValidObjectId(id)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Menu not found'
+      });
+    }
 
     const menu = await WeeklyMenu.findById(id)
       .populate({ path: 'meals.items', model: 'MenuItem' });
@@ -789,6 +1065,14 @@ router.post('/', protect, async (req, res) => {
 router.put('/:id', protect, async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!isValidObjectId(id)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Menu not found'
+      });
+    }
+
     const {
       title,
       description,
@@ -802,7 +1086,9 @@ router.put('/:id', protect, async (req, res) => {
       completionMessage,
       shareLinkActive,
       bodybuilderMode,
-      selectionDeadlines
+      selectionDeadlines,
+      breakfastPreset,
+      breakfastPresetsByName
     } = req.body;
 
     console.log('=== PUT /menus/:id - Updating menu ===');
@@ -829,6 +1115,8 @@ router.put('/:id', protect, async (req, res) => {
     if (enableCompletionMessage !== undefined) menu.enableCompletionMessage = enableCompletionMessage;
     if (completionMessage !== undefined) menu.completionMessage = completionMessage;
     if (Array.isArray(selectionDeadlines)) menu.selectionDeadlines = selectionDeadlines;
+    if (breakfastPreset !== undefined) menu.breakfastPreset = breakfastPreset;
+    if (breakfastPresetsByName !== undefined) menu.breakfastPresetsByName = breakfastPresetsByName;
     if (typeof shareLinkActive === 'boolean') {
       if (!menu.shareLink) {
         menu.shareLink = {
@@ -1177,6 +1465,19 @@ router.get('/:id/selections', protect, async (req, res) => {
       .populate('selectedMeals.menuItemId', '_id mealName mealType itemDate')
       .sort({ submittedAt: -1 });
 
+    const customerEmails = Array.from(new Set(
+      allRecords.map((rec) => String(rec.email || '').trim().toLowerCase()).filter(Boolean)
+    ));
+    const customerDocs = customerEmails.length > 0
+      ? await Customer.find({
+          $or: customerEmails.map((email) => ({ email: buildEmailRegex(email) }))
+        })
+          .select('customerId email firstName lastName macros mealPerDay breakfastInclude mealSnack mealPlan mealExclusion weekend')
+      : [];
+    const customerByEmail = new Map(
+      customerDocs.map((customer) => [String(customer.email || '').trim().toLowerCase(), customer])
+    );
+
     console.log('=== GET /menus/:id/selections debug ===');
     console.log('MenuSelectionRecord count:', allRecords.length);
 
@@ -1206,17 +1507,40 @@ router.get('/:id/selections', protect, async (req, res) => {
       });
 
       const consolidatedMeals = Array.from(consolidatedMap.values()).map((m) => {
+        const menuItem = m.menuItemId && typeof m.menuItemId === 'object' ? m.menuItemId : null;
         let mealName = '';
-        if (m.menuItemId && m.menuItemId.mealName) mealName = m.menuItemId.mealName;
+        if (menuItem && menuItem.mealName) mealName = menuItem.mealName;
         else if (m.mealName) mealName = m.mealName;
+        const mealType = String(m.mealType || menuItem?.mealType || '').trim().toLowerCase() || 'meal';
         const lower = String(mealName).toLowerCase();
         const conflict = exclusions.some(ex => lower.includes(ex));
-        return { ...m, quantity: m.quantity || 1, conflict };
+        return {
+          ...m,
+          mealName,
+          mealType,
+          menuItemName: menuItem?.mealName || mealName,
+          menuItemMealType: menuItem?.mealType || mealType,
+          quantity: m.quantity || 1,
+          conflict
+        };
       });
 
       const recObj = rec.toObject ? rec.toObject() : rec;
+      const customer = customerByEmail.get(String(rec.email || '').trim().toLowerCase()) || null;
+      const recordMacros = normalizeKitchenMacros(recObj.macros);
+      const customerMacros = normalizeKitchenMacros(customer?.macros);
+      const activeMacros = (recordMacros.C || recordMacros.P || recordMacros.F)
+        ? recordMacros
+        : customerMacros;
       return {
         ...recObj,
+        targetMacros: activeMacros,
+        customerMacros: activeMacros,
+        mealPerDay: customer?.mealPerDay,
+        breakfastInclude: customer?.breakfastInclude,
+        mealSnack: customer?.mealSnack,
+        mealPlan: customer?.mealPlan,
+        weekend: customer?.weekend,
         lastMenuSelectionDate: rec.submittedAt,
         selectedMeals: consolidatedMeals
       };
@@ -1377,6 +1701,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       vegChoice: m.vegChoice,
       carbChoice: m.carbChoice,
       sauceChoice: m.sauceChoice,
+      manualProteinType: m.manualProteinType || '',
       quantity: m.quantity || 1,
       carbVegAction: m.carbVegAction || undefined,
       carbVegConflict: m.carbVegConflict?.length ? m.carbVegConflict : undefined,
@@ -1396,6 +1721,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       vegChoice: sel.vegChoice,
       carbChoice: sel.carbChoice,
       sauceChoice: sel.sauceChoice,
+      manualProteinType: String(sel.manualProteinType || '').trim().toLowerCase(),
       quantity: Number(sel.quantity) || 1,  // Explicitly convert to number
       carbVegAction: sel.carbVegAction || undefined,
       carbVegConflict: sel.carbVegConflict?.length ? sel.carbVegConflict : undefined,
@@ -1593,7 +1919,7 @@ router.patch('/:menuId/selections/:email/macros-presets', protect, async (req, r
 router.put('/:menuId/selections/:email', protect, async (req, res) => {
   try {
     const { menuId } = req.params;
-    const email = decodeURIComponent(req.params.email);
+    const email = decodeURIComponent(req.params.email).trim();
     const { selections } = req.body;
 
     if (!Array.isArray(selections)) {
@@ -1603,26 +1929,53 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
     const menu = await WeeklyMenu.findById(menuId);
     if (!menu) return res.status(404).json({ success: false, message: 'Menu not found' });
 
-    const customer = await Customer.findOne({ email });
-    if (!customer) return res.status(404).json({ success: false, message: 'Customer not found' });
+    const safeEmailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    const customer = await Customer.findOne({ email: safeEmailRegex });
+
+    const normalizedSelections = selections.map((sel) => ({
+      date: sel.date,
+      mealType: sel.mealType,
+      menuItemId: sel.menuItemId?._id || sel.menuItemId,
+      mealName: sel.mealName,
+      description: sel.description,
+      slotNumber: sel.slotNumber,
+      proteinChoice: sel.proteinChoice,
+      vegChoice: sel.vegChoice,
+      carbChoice: sel.carbChoice,
+      sauceChoice: sel.sauceChoice,
+      manualProteinType: String(sel.manualProteinType || '').trim().toLowerCase(),
+      quantity: Number(sel.quantity) || 1,
+      carbVegAction: sel.carbVegAction,
+      carbVegConflict: sel.carbVegConflict,
+      carbConflict: sel.carbConflict,
+      vegConflict: sel.vegConflict
+    }));
 
     const record = await MenuSelectionRecord.findOneAndUpdate(
-      { weeklyMenuId: menuId, email },
-      { $set: { selectedMeals: selections } },
-      { new: true, upsert: false }
+      { weeklyMenuId: menuId, email: safeEmailRegex },
+      {
+        $set: {
+          selectedMeals: normalizedSelections,
+          submittedAt: new Date(),
+          email: customer?.email || email,
+          customerId: customer?.customerId,
+          firstName: customer?.firstName,
+          lastName: customer?.lastName,
+          mealExclusion: customer?.mealExclusion
+        }
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
     );
 
-    if (!record) {
-      return res.status(404).json({ success: false, message: 'No existing selection record found for this customer and menu' });
+    // Sync to customer document when available (legacy records may not have a Customer row yet).
+    if (customer) {
+      customer.selectedMeals = normalizedSelections;
+      customer.currentWeekMenu = menuId;
+      await customer.save();
+
+      // Invalidate caches
+      cacheDelete(`meal-profile-${customer.customerId}`);
     }
-
-    // Sync to customer document
-    customer.selectedMeals = selections;
-    customer.currentWeekMenu = menuId;
-    await customer.save();
-
-    // Invalidate caches
-    cacheDelete(`meal-profile-${customer.customerId}`);
     cacheDeletePattern(`weekly-menu`);
 
     return res.json({ success: true, message: 'Selection updated successfully', record });

@@ -1,5 +1,14 @@
 import mongoose from 'mongoose';
 
+const breakfastPresetSchema = new mongoose.Schema({
+  breakfastName: { type: String, default: '' },
+  C: { type: Number, default: 0 },
+  P: { type: Number, default: 0 },
+  F: { type: Number, default: 0 },
+  V: { type: Number, default: 80 },
+  isLargeBreakfast: { type: Boolean, default: false }
+}, { _id: false });
+
 const weeklyMenuSchema = new mongoose.Schema({
   // Menu info
   title: {
@@ -90,6 +99,17 @@ const weeklyMenuSchema = new mongoose.Schema({
   completionMessage: {
     type: String,
     default: 'Your meal selections have been saved successfully.'
+  },
+
+  // Kitchen list breakfast presets imported from CSV/Excel.
+  breakfastPreset: {
+    type: breakfastPresetSchema,
+    default: () => ({})
+  },
+  breakfastPresetsByName: {
+    type: Map,
+    of: breakfastPresetSchema,
+    default: () => ({})
   },
 
   // Analytics

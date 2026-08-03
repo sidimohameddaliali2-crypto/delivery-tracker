@@ -146,6 +146,7 @@ import deliveryIssuesRoutes from './routes/deliveryIssues.js';
 import partnerAuthRoutes from './routes/partnerAuth.js';
 import partnerPortalRoutes from './routes/partnerPortal.js';
 import adminPartnerRoutes from './routes/adminPartners.js';
+import webhookRoutes from './routes/webhooks.js';
 
 // Import cache initialization
 import { initRedis } from './config/cache.js';
@@ -172,6 +173,7 @@ app.use('/api/delivery-issues', deliveryIssuesRoutes);
 app.use('/api/partner/auth', partnerAuthRoutes);
 app.use('/api/partner', partnerPortalRoutes);
 app.use('/api/admin/partners', adminPartnerRoutes);
+app.use('/api/webhooks', webhookRoutes);
 
 
 // Health check endpoint (supports both GET and HEAD methods)

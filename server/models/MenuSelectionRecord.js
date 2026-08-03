@@ -45,6 +45,11 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     vegChoice: String,
     carbChoice: String,
     sauceChoice: String,
+    manualProteinType: {
+      type: String,
+      enum: ['', 'chicken', 'beef', 'fish'],
+      default: ''
+    },
     quantity: {
       type: Number,
       default: 1,

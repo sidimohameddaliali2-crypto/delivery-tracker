@@ -22,6 +22,7 @@ import {
   Zap,
   MessageSquare,
   Building2,
+  UtensilsCrossed,
   RefreshCw
 } from 'lucide-react';
 import { logout } from '../store/slices/authSlice';
@@ -52,6 +53,7 @@ const Layout = ({ children }) => {
     { name: 'Renewal', href: '/renewal', icon: RefreshCw, roles: ['super_admin', 'admin', 'manager'] },
     { name: 'Menus', href: '/menus', icon: Menu, permission: 'menus', roles: ['super_admin', 'admin'] },
     { name: 'Partners', href: '/admin/partners', icon: Building2, roles: ['super_admin', 'admin', 'kitchen'] },
+    { name: 'Kitchen List', href: '/kitchen-list', icon: UtensilsCrossed, roles: ['super_admin', 'admin', 'kitchen'] },
     { name: 'Store Keeper', href: '/store-keeper', icon: ShoppingBag, roles: ['store_keeper'] },
   ];
 

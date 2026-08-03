@@ -31,6 +31,7 @@ import Communication from './pages/Communication';
 import BatchAutoAssign from './pages/BatchAutoAssign';
 import TestAPI from './pages/TestAPI';
 import MenuManagement from './pages/MenuManagement';
+import KitchenList from './pages/KitchenList';
 import MenuSelectPage from './pages/MenuSelectPage';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import YellowblockApp from './pages/YellowblockApp';
@@ -477,6 +478,16 @@ function App() {
                 <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'kitchen']}>
                   <Layout>
                     <AdminPartners />
+                  </Layout>
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+
+            <Route path="/kitchen-list" element={
+              <ProtectedRoute allowKitchen>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'kitchen']}>
+                  <Layout>
+                    <KitchenList />
                   </Layout>
                 </RoleBasedRoute>
               </ProtectedRoute>

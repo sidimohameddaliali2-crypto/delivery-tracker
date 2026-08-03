@@ -46,6 +46,7 @@ const userSchema = new mongoose.Schema({
     reports: { type: Boolean, default: false },
     delivery_changes: { type: Boolean, default: false },
     menus: { type: Boolean, default: false },
+    employees: { type: Boolean, default: false },
     settings: { type: Boolean, default: false },
     live_map: { type: Boolean, default: false },
     yellowblock: { type: Boolean, default: false }
@@ -113,7 +114,8 @@ function getDefaultPermissions(role) {
     reports: false,
     menus: false,
     settings: false,
-    yellowblock: false
+    yellowblock: false,
+    employees: false
   };
 
   switch (role) {
@@ -134,6 +136,7 @@ function getDefaultPermissions(role) {
       permissions.delivery_changes = true;
       permissions.reports = true;
       permissions.menus = true;
+      permissions.employees = true;
       break;
     case 'manager':
       permissions.dashboard = true;
@@ -144,6 +147,7 @@ function getDefaultPermissions(role) {
       permissions.late_deliveries = true;
       permissions.reports = true;
       permissions.live_map = true;
+      permissions.employees = true;
       break;
     case 'dispatcher':
       permissions.dashboard = true;

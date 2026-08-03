@@ -20,6 +20,7 @@ import CreateDriver from './pages/CreateDriver';
 import LiveMap from './pages/LiveMap';
 import DriverMobile from './pages/DriverMobile';
 import Users from './pages/Users'
+import Employees from './pages/Employees'
 import DeliveryChanges from './pages/DeliveryChanges';
 import DispatcherMobile from './pages/DispatcherMobile';
 import DispatcherDesktop from './pages/DispatcherDesktop';
@@ -33,6 +34,8 @@ import TestAPI from './pages/TestAPI';
 import MenuManagement from './pages/MenuManagement';
 import KitchenList from './pages/KitchenList';
 import MenuSelectPage from './pages/MenuSelectPage';
+import MatterCore from './pages/MatterCore';
+import MatterCorePdfPage from './pages/MatterCorePdfPage';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import YellowblockApp from './pages/YellowblockApp';
 import PartnerLogin from './pages/PartnerLogin';
@@ -305,6 +308,17 @@ function App() {
     </RoleBasedRoute>
   </ProtectedRoute>
 } />
+            <Route path="/employees" element={
+  <ProtectedRoute>
+    <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
+      <PermissionBasedRoute permission="employees">
+        <Layout>
+          <Employees />
+        </Layout>
+      </PermissionBasedRoute>
+    </RoleBasedRoute>
+  </ProtectedRoute>
+} />
             <Route path="/deliveries" element={
               <ProtectedRoute>
                 <PermissionBasedRoute permission="deliveries">
@@ -471,6 +485,20 @@ function App() {
 
             <Route path="/menu-select/:token" element={
               <MenuSelectPage />
+            } />
+
+            <Route path="/matter-core" element={
+              <ProtectedRoute>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin']}>
+                  <Layout>
+                    <MatterCore />
+                  </Layout>
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+
+            <Route path="/matter-core/:token" element={
+              <MatterCorePdfPage />
             } />
 
             <Route path="/admin/partners" element={

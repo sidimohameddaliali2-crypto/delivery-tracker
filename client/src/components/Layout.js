@@ -23,7 +23,9 @@ import {
   MessageSquare,
   Building2,
   UtensilsCrossed,
-  RefreshCw
+  RefreshCw,
+  Briefcase,
+  FileText
 } from 'lucide-react';
 import { logout } from '../store/slices/authSlice';
 import UserAvatar from './users/UserAvatar';
@@ -48,10 +50,12 @@ const Layout = ({ children }) => {
     { name: 'Live Map', href: '/map', icon: MapPin, permission: 'live_map', roles: ['super_admin', 'admin', 'manager', 'dispatcher'] },
     { name: 'Delivery Changes', href: '/delivery-changes', icon: ReplaceAll, permission: 'delivery_changes', roles: ['super_admin', 'admin'] },
     { name: 'Users', href: '/users', icon: Users, permission: 'users', roles: ['super_admin', 'admin'] },
+    { name: 'Employees', href: '/employees', icon: Briefcase, permission: 'employees', roles: ['super_admin', 'admin', 'manager'] },
     { name: 'Report', href: '/reports', icon: BarChart3, permission: 'reports', roles: ['super_admin', 'admin', 'manager', 'viewer'] },
     { name: 'Subscription', href: '/subscription', icon: CreditCard, roles: ['super_admin', 'admin', 'manager'] },
     { name: 'Renewal', href: '/renewal', icon: RefreshCw, roles: ['super_admin', 'admin', 'manager'] },
     { name: 'Menus', href: '/menus', icon: Menu, permission: 'menus', roles: ['super_admin', 'admin'] },
+    { name: 'Matter Core', href: '/matter-core', icon: FileText, roles: ['super_admin', 'admin'] },
     { name: 'Partners', href: '/admin/partners', icon: Building2, roles: ['super_admin', 'admin', 'kitchen'] },
     { name: 'Kitchen List', href: '/kitchen-list', icon: UtensilsCrossed, roles: ['super_admin', 'admin', 'kitchen'] },
     { name: 'Store Keeper', href: '/store-keeper', icon: ShoppingBag, roles: ['store_keeper'] },

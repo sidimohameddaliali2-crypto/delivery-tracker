@@ -149,6 +149,8 @@ import partnerAuthRoutes from './routes/partnerAuth.js';
 import partnerPortalRoutes from './routes/partnerPortal.js';
 import adminPartnerRoutes from './routes/adminPartners.js';
 import webhookRoutes from './routes/webhooks.js';
+import employeeRoutes from './routes/employees.js';
+import matterCoreRoutes from './routes/matterCore.js';
 
 // Import cache initialization
 import { initRedis } from './config/cache.js';
@@ -167,6 +169,7 @@ app.use('/api/events', eventRoutes);
 app.use('/api/alerts', alertsRoutes);
 app.use('/api/communications', communicationRoutes);
 app.use('/api/menus', menuRoutes);
+app.use('/api/matter-core', matterCoreRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api/incidents', incidentRoutes);
 app.use('/api/store-keeper-scans', storeKeeperScansRoutes);
@@ -176,6 +179,7 @@ app.use('/api/partner/auth', partnerAuthRoutes);
 app.use('/api/partner', partnerPortalRoutes);
 app.use('/api/admin/partners', adminPartnerRoutes);
 app.use('/api/webhooks', webhookRoutes);
+app.use('/api/employees', employeeRoutes);
 
 
 // Health check endpoint (supports both GET and HEAD methods)

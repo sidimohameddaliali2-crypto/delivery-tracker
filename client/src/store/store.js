@@ -10,6 +10,7 @@ import deliveryChangeSlice from './slices/deliveryChangeSlice';
 import eventSlice from './slices/eventSlice';
 import yellowblockSlice from './slices/yellowblockSlice';
 import partnerAuthSlice from './slices/partnerAuthSlice';
+import employeeSlice from './slices/employeeSlice';
 
 
 const isDev = process.env.NODE_ENV !== 'production';
@@ -27,6 +28,7 @@ export const store = configureStore({
     events: eventSlice,
     yellowblock: yellowblockSlice,
     partnerAuth: partnerAuthSlice,
+    employee: employeeSlice,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({

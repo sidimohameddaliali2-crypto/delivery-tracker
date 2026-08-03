@@ -72,7 +72,10 @@ jobs:
             cd ..
 
             echo "[6/7] Restart API with PM2"
-            pm2 reload matter-delivery-api || pm2 start npm --name matter-delivery-api -- start --prefix server
+            cd server
+            pm2 delete matter-delivery-api 2>/dev/null || true
+            pm2 start ecosystem.config.cjs --only matter-delivery-api --env production
+            cd ..
 
             echo "[7/7] Save PM2 process list"
             pm2 save

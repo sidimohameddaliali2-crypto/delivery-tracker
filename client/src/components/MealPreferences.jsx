@@ -58,6 +58,7 @@ const MealPreferences = ({ customerId, customerEmail }) => {
         mealPerDay: formData.mealPerDay,
         breakfastInclude: formData.breakfastInclude,
         mealSnack: formData.mealSnack,
+        snackCount: formData.snackCount,
         mealPlan: formData.mealPlan,
         mealExclusion: formData.mealExclusion,
         allergies: formData.allergies,
@@ -298,6 +299,22 @@ const MealPreferences = ({ customerId, customerEmail }) => {
                     Included
                   </label>
                 </div>
+
+                <div className="bg-white p-3 rounded-lg border border-gray-200">
+                  <label className="text-gray-600 text-sm block mb-1">Snack Count</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={formData.snackCount ?? 0}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        snackCount: e.target.value === '' ? '' : Number(e.target.value)
+                      })
+                    }
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
               </div>
             ) : (
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
@@ -341,6 +358,13 @@ const MealPreferences = ({ customerId, customerEmail }) => {
                       <span className="font-semibold text-gray-600">Not Included</span>
                     )}
                   </div>
+                </div>
+
+                <div className="bg-white p-3 rounded-lg border border-gray-200">
+                  <p className="text-gray-600 text-sm">Snack Count</p>
+                  <p className="text-2xl font-bold text-indigo-600">
+                    {mealProfile.snackCount || 0}
+                  </p>
                 </div>
 
                 <div className="bg-white p-3 rounded-lg border border-gray-200">

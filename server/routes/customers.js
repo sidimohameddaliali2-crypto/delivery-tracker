@@ -176,7 +176,7 @@ router.post('/upload-bulk', async (req, res) => {
       const {
         customerId, name, mealPlan, starterDate, macroC, macroP, macroF, exclusions,
         noOfMeals, breakfast, phone, email,
-        cycleDuration, amountPaid, discount
+        cycleDuration, amountPaid, discount, snackCount
       } = customerData;
 
       if (!customerId || !name || !email) {
@@ -209,6 +209,7 @@ router.post('/upload-bulk', async (req, res) => {
         mealExclusion: normalizeMealExclusions(exclusions),
         mealPerDay: parseInt(noOfMeals) || 1,
         breakfastInclude: parsedBreakfast,
+        snackCount: parseInt(snackCount) || 0,
         phone: phone || '',
         macros: { C: Number(macroC) || 0, P: Number(macroP) || 0, F: Number(macroF) || 0 },
         planStartDate: planStart && !isNaN(planStart) ? planStart : null,
@@ -652,6 +653,54 @@ router.patch('/:customerId', async (req, res) => {
   } catch (error) {
     console.error('Error updating customer:', error);
     res.status(500).json({ success: false, message: 'Error updating customer' });
+  }
+});
+
+const normalizePhoneDigits = (value) => String(value || '').replace(/\D/g, '');
+const phoneSuffix = (value, len = 9) => normalizePhoneDigits(value).slice(-len);
+const MATCH_PROJECTION = 'customerId email firstName lastName phone company planStartDate cycleDuration amountPaid discount mealExclusion';
+
+/**
+ * Match a customer against an external record (e.g. a Matter website
+ * subscription) by cascading through email -> phone -> name, in that order
+ * of confidence. Stops at the first level that finds a match.
+ * GET /api/customers/match?email=&phone=&name=
+ */
+router.get('/match', async (req, res) => {
+  try {
+    const { email, phone, name } = req.query;
+    let customer = null;
+    let matchedBy = null;
+
+    if (email && String(email).trim()) {
+      customer = await Customer.findOne({ email: buildEmailRegex(email) }).select(MATCH_PROJECTION);
+      if (customer) matchedBy = 'email';
+    }
+
+    if (!customer && phone) {
+      const suffix = phoneSuffix(phone);
+      if (suffix) {
+        const candidates = await Customer.find({ phone: { $exists: true, $ne: '' } }).select(MATCH_PROJECTION);
+        customer = candidates.find((c) => phoneSuffix(c.phone) === suffix) || null;
+        if (customer) matchedBy = 'phone';
+      }
+    }
+
+    if (!customer && name && String(name).trim()) {
+      const parts = String(name).trim().split(/\s+/);
+      const firstName = parts[0];
+      const lastName = parts.slice(1).join(' ');
+      const query = lastName
+        ? { firstName: new RegExp(`^${escapeRegex(firstName)}$`, 'i'), lastName: new RegExp(`^${escapeRegex(lastName)}$`, 'i') }
+        : { firstName: new RegExp(`^${escapeRegex(firstName)}$`, 'i') };
+      customer = await Customer.findOne(query).select(MATCH_PROJECTION);
+      if (customer) matchedBy = 'name';
+    }
+
+    res.json({ success: true, data: { customer, matchedBy } });
+  } catch (error) {
+    console.error('Error matching customer:', error);
+    res.status(500).json({ success: false, message: 'Error matching customer', error: error.message });
   }
 });
 

@@ -25,7 +25,8 @@ import {
   UtensilsCrossed,
   RefreshCw,
   Briefcase,
-  FileText
+  FileText,
+  Globe
 } from 'lucide-react';
 import { logout } from '../store/slices/authSlice';
 import UserAvatar from './users/UserAvatar';
@@ -53,6 +54,7 @@ const Layout = ({ children }) => {
     { name: 'Employees', href: '/employees', icon: Briefcase, permission: 'employees', roles: ['super_admin', 'admin', 'manager'] },
     { name: 'Report', href: '/reports', icon: BarChart3, permission: 'reports', roles: ['super_admin', 'admin', 'manager', 'viewer'] },
     { name: 'Subscription', href: '/subscription', icon: CreditCard, roles: ['super_admin', 'admin', 'manager'] },
+    { name: 'Website Subscription', href: '/website-subscriptions', icon: Globe, roles: ['super_admin', 'admin', 'manager'] },
     { name: 'Renewal', href: '/renewal', icon: RefreshCw, roles: ['super_admin', 'admin', 'manager'] },
     { name: 'Menus', href: '/menus', icon: Menu, permission: 'menus', roles: ['super_admin', 'admin'] },
     { name: 'Matter Core', href: '/matter-core', icon: FileText, roles: ['super_admin', 'admin'] },

@@ -179,7 +179,7 @@ const resolveProteinType = (meal) => {
   const mealName = normalizeText(meal?.proteinChoice || meal?.mealName || meal?.description);
   if (mealName.includes('chicken')) return 'chicken';
   if (mealName.includes('beef')) return 'beef';
-  if (mealName.includes('fish')) return 'fish';
+  if (mealName.includes('fish') || mealName.includes('shrimp') || mealName.includes('salmon') || mealName.includes('seafood')) return 'fish';
   return 'other';
 };
 
@@ -316,12 +316,6 @@ const calculateByProteinRule = ({
   };
 };
 
-const pickSnackPreset = (preset = {}) => ({
-  C: Number(preset.snackC ?? preset.SnackC ?? preset.sc ?? 0) || 0,
-  P: Number(preset.snackP ?? preset.SnackP ?? preset.sp ?? 0) || 0,
-  F: Number(preset.snackF ?? preset.SnackF ?? preset.sf ?? 0) || 0
-});
-
 export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakfastPreset = {} }) => {
   const customerMacros = customer?.targetMacros
     || customer?.customerMacros
@@ -348,7 +342,11 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
   const breakfastProteinRaw = Number(defaultBreakfast.P) || 0;
   const breakfastProtein = breakfastProteinRaw <= 30 ? 30 : breakfastProteinRaw;
   const breakfastFats = Number(defaultBreakfast.F) || 0;
-  const snackPreset = pickSnackPreset(breakfastPreset);
+  // Only "Custom" plan customers (per the website subscription plan name)
+  // have their snack macros deducted from the rest of the day's meal budget.
+  // Other plans still get their assigned snack — it just doesn't shrink the
+  // other meals' macros.
+  const isCustomPlan = normalizeText(customer?.planName) === 'custom';
 
   const sortedDayKeys = Array.from(new Set(selectedMeals.map((m) => getDateKey(m?.date)))).sort();
   const deliveryNumberByDay = new Map(sortedDayKeys.map((key, idx) => [key, idx + 1]));
@@ -399,9 +397,9 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
       const vegWeight = 0;
       const totalWeight = proteinWeight + carbWeight + vegWeight;
       const snackMacros = {
-        C: snackPreset.C,
-        P: snackPreset.P,
-        F: snackPreset.F
+        C: Number(meal?.snackMacros?.C) || 0,
+        P: Number(meal?.snackMacros?.P) || 0,
+        F: Number(meal?.snackMacros?.F) || 0
       };
       return {
         ...meal,
@@ -436,9 +434,19 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
     const breakfastProteinForDefault = dayMeta.hasBreakfast ? dayBreakfastProtein : 0;
     const breakfastFatsForDefault = dayMeta.hasBreakfast ? (Number(dayBreakfastPreset.F) || 0) : 0;
 
-    const carbsDefault = Math.max(0, normalizedMacros.C - breakfastCarbsForDefault - snackPreset.C);
-    const proteinDefault = Math.max(0, normalizedMacros.P - breakfastProteinForDefault - snackPreset.P);
-    const fatsDefault = Math.max(0, normalizedMacros.F - breakfastFatsForDefault - snackPreset.F);
+    // Snack macros only reduce the day's remaining budget for Custom-plan
+    // customers — everyone else keeps their snack without it affecting
+    // the other meals' portions.
+    const daySnackMeals = isCustomPlan ? dayMeals.filter((m) => normalizeText(m?.mealType) === 'snack') : [];
+    const daySnackTotals = daySnackMeals.reduce((acc, m) => ({
+      C: acc.C + (Number(m?.snackMacros?.C) || 0),
+      P: acc.P + (Number(m?.snackMacros?.P) || 0),
+      F: acc.F + (Number(m?.snackMacros?.F) || 0)
+    }), { C: 0, P: 0, F: 0 });
+
+    const carbsDefault = Math.max(0, normalizedMacros.C - breakfastCarbsForDefault - daySnackTotals.C);
+    const proteinDefault = Math.max(0, normalizedMacros.P - breakfastProteinForDefault - daySnackTotals.P);
+    const fatsDefault = Math.max(0, normalizedMacros.F - breakfastFatsForDefault - daySnackTotals.F);
 
     const carbsBase = (carbsDefault / dayMealCount) + (carbsDefault * macroAdjustment);
     const proteinBase = (proteinDefault / dayMealCount) + (proteinDefault * macroAdjustment);
@@ -503,6 +511,12 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
     customerName: [customer?.firstName, customer?.lastName].filter(Boolean).join(' ').trim(),
     email: customer?.email,
     macros: normalizedMacros,
+    snacksPerDay: customer?.snacksPerDay ?? null,
+    planName: customer?.planName ?? null,
+    deliveryAddress: customer?.deliveryAddress ?? null,
+    deliveryWindow: customer?.deliveryWindow ?? null,
+    missingSelection: !!customer?.missingSelection,
+    missingSelectionDate: customer?.missingSelectionDate ?? null,
     breakfastPreset: {
       C: breakfastCarbs,
       P: breakfastProtein,

@@ -61,7 +61,14 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     },
     carbVegConflict: [String],
     carbConflict: [String],
-    vegConflict: [String]
+    vegConflict: [String],
+    // Set only for mealType: 'snack' — the randomly-assigned ingredient's
+    // macros, already divided by that day's snack count.
+    snackMacros: {
+      C: Number,
+      P: Number,
+      F: Number
+    }
   }],
 
   submittedAt: {

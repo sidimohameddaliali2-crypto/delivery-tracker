@@ -350,7 +350,7 @@ const MenuSelection = ({ token }) => {
               consolidatedMap.set(key, {
                 date: dateKey,
                 mealType: meal.mealType,
-                menuItemId: itemIdStr,
+                menuItemId: itemIdStr || undefined,
                 mealName: meal.mealName,
                 quantity: meal.quantity || 1,
                 slotNumber: meal.slotNumber,

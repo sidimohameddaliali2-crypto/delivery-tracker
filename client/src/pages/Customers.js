@@ -133,7 +133,7 @@ function getMealPlanFromMacros(C, P, F) {
 }
 
 const AddCustomerModal = ({ onClose, onSubmit, isSubmitting, submitError }) => {
-  const [form, setForm] = useState({ customerName: '', customerId: 'CUST-', email: '', mealPerDay: 1, mealPlan: 'Standard', breakfastInclude: false, mealExclusion: '' });
+  const [form, setForm] = useState({ customerName: '', customerId: 'CUST-', email: '', mealPerDay: 1, mealPlan: 'Standard', breakfastInclude: false, snackCount: 0, mealExclusion: '' });
   const [exclusionSearch, setExclusionSearch] = useState('');
   const set = (field) => (e) => setForm(p => ({ ...p, [field]: e.target.value }));
 
@@ -187,6 +187,10 @@ const AddCustomerModal = ({ onClose, onSubmit, isSubmitting, submitError }) => {
           <div className="flex items-center gap-3">
             <input type="checkbox" id="acm-breakfast" checked={form.breakfastInclude} onChange={e => setForm(p => ({ ...p, breakfastInclude: e.target.checked }))} className="w-4 h-4 accent-blue-600" />
             <label htmlFor="acm-breakfast" className="text-sm font-medium text-gray-700">Breakfast Included</label>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Snack Count</label>
+            <input type="number" min="0" value={form.snackCount} onChange={set('snackCount')} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Meal Exclusions</label>
@@ -287,6 +291,7 @@ const Customers = () => {
         mealPerDay: Number(formData.mealPerDay),
         mealPlan: formData.mealPlan,
         breakfastInclude: formData.breakfastInclude,
+        snackCount: Number(formData.snackCount) || 0,
         mealExclusion: formData.mealExclusion,
       });
       const savedCustomer = data?.data;
@@ -756,6 +761,7 @@ const Customers = () => {
               const cycleDuration = String(cells[12] ?? '0').trim();
               const amountPaid   = String(cells[13] ?? '').trim();
               const discount     = String(cells[14] ?? '').trim();
+              const snackCount   = String(cells[15] ?? '0').trim();
 
               if (!customerId) { errors.push(`Row ${i + 1}: Missing Customer ID`); continue; }
               if (!name)       { errors.push(`Row ${i + 1}: Missing Name`); continue; }
@@ -778,6 +784,7 @@ const Customers = () => {
                 cycleDuration: parseInt(cycleDuration) || 0,
                 amountPaid,
                 discount,
+                snackCount: parseInt(snackCount) || 0,
               });
             }
 
@@ -815,7 +822,7 @@ const Customers = () => {
     });
     
     // Columns: Customer ID, Name, Meal Plan, Starter Date, C, P, F, Exclusion,
-    //          No. Meal, Breakfast, Phone, Email, Cycle Duration, Amount Paid, Discount
+    //          No. Meal, Breakfast, Phone, Email, Cycle Duration, Amount Paid, Discount, Snack Count
     function parseCSVData(csvData, reject, resolve) {
       try {
         const lines = csvData.split(/\r?\n/).filter(line => line.trim());
@@ -867,6 +874,7 @@ const Customers = () => {
           const cycleDuration = cells[12]?.trim() || '0';
           const amountPaid    = cells[13]?.trim() || '';
           const discount      = cells[14]?.trim() || '';
+          const snackCount    = cells[15]?.trim() || '0';
 
           if (!customerId) { errors.push(`Row ${i + 1}: Missing Customer ID`); continue; }
           if (!name)       { errors.push(`Row ${i + 1}: Missing Name`); continue; }
@@ -888,6 +896,7 @@ const Customers = () => {
             email,
             cycleDuration: parseInt(cycleDuration) || 0,
             amountPaid,
+            snackCount: parseInt(snackCount) || 0,
             discount,
           });
         }
@@ -933,8 +942,8 @@ const Customers = () => {
       
       if (customers.length === 0) {
         const errorMsg = errors && errors.length > 0
-          ? `No valid customer data found.\n\nRequired columns (13): Customer ID, Name, Meal Plan, Starter Date, CPF, Exclusion, No. Meal, Breakfast, Phone, Email, Cycle Duration, Amount Paid, Discount\n\nErrors found:\n${errors.slice(0, 3).join('\n')}${errors.length > 3 ? '\n...and ' + (errors.length - 3) + ' more' : ''}`
-          : 'No valid customer data found. Please use the 13-column format.';
+          ? `No valid customer data found.\n\nRequired columns: Customer ID, Name, Meal Plan, Starter Date, C, P, F, Exclusion, No. Meal, Breakfast, Phone, Email, Cycle Duration, Amount Paid, Discount, Snack Count\n\nErrors found:\n${errors.slice(0, 3).join('\n')}${errors.length > 3 ? '\n...and ' + (errors.length - 3) + ' more' : ''}`
+          : 'No valid customer data found. Please use the template format.';
         setUploadError(errorMsg);
         return;
       }
@@ -1737,8 +1746,8 @@ const Customers = () => {
             </label>
             <button
               onClick={() => {
-                const headers = ['Customer ID', 'Name', 'Meal Plan', 'Starter Date', 'C', 'P', 'F', 'Exclusion', 'No. Meal', 'Breakfast', 'Phone', 'Email', 'Cycle Duration', 'Amount Paid', 'Discount'];
-                const example = ['CUST-001', 'John Doe', 'Standard', '2026-07-01', '250', '180', '70', '', '2', 'No', '+971501234567', 'john@example.com', '30', '1500', '10%'];
+                const headers = ['Customer ID', 'Name', 'Meal Plan', 'Starter Date', 'C', 'P', 'F', 'Exclusion', 'No. Meal', 'Breakfast', 'Phone', 'Email', 'Cycle Duration', 'Amount Paid', 'Discount', 'Snack Count'];
+                const example = ['CUST-001', 'John Doe', 'Standard', '2026-07-01', '250', '180', '70', '', '2', 'No', '+971501234567', 'john@example.com', '30', '1500', '10%', '1'];
                 const ws = XLSX.utils.aoa_to_sheet([headers, example]);
                 ws['!cols'] = headers.map(() => ({ wch: 18 }));
                 const wb = XLSX.utils.book_new();

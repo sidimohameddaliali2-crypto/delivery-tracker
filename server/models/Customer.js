@@ -43,6 +43,11 @@ const customerSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  snackCount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   mealPlan: {
     type: String,
     enum: ['Standard', 'Customized', 'Premium', 'Vegan', 'Keto', 'Paleo', 'Bodybuilder', 'Lean 2 Meal', 'Lean 3 Meal', 'Thrive 2 Meal', 'Thrive 3 Meal', 'Perform 2 Meal', 'Perform 3 Meal'],

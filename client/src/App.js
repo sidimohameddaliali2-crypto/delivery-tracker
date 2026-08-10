@@ -42,6 +42,8 @@ import PartnerLogin from './pages/PartnerLogin';
 import PartnerPortal from './pages/PartnerPortal';
 import AdminPartners from './pages/AdminPartners';
 import Subscription from './pages/Subscription';
+import WebsiteSubscription from './pages/WebsiteSubscription';
+import WebsiteSubscriptionProfile from './pages/WebsiteSubscriptionProfile';
 import Renewal from './pages/Renewal';
 
 // Layout
@@ -437,6 +439,24 @@ function App() {
                 <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
                   <Layout>
                     <Subscription />
+                  </Layout>
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+            <Route path="/website-subscriptions" element={
+              <ProtectedRoute>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
+                  <Layout>
+                    <WebsiteSubscription />
+                  </Layout>
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+            <Route path="/website-subscriptions/:id" element={
+              <ProtectedRoute>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
+                  <Layout>
+                    <WebsiteSubscriptionProfile />
                   </Layout>
                 </RoleBasedRoute>
               </ProtectedRoute>

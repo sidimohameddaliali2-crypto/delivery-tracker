@@ -9,6 +9,7 @@ import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { protect } from '../middleware/auth.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
 import athleatService from '../services/athleatService.js';
+import matterApiService from '../services/matterApiService.js';
 
 const router = express.Router();
 
@@ -19,6 +20,16 @@ const buildEmailRegex = (email) => {
 };
 
 const isValidObjectId = (value) => mongoose.isValidObjectId(value);
+
+// menuItemId is an optional ObjectId ref — meals with no linked catalog item
+// (e.g. auto-assigned snacks/main meals) legitimately have none. Mongoose
+// accepts `undefined` for an optional field but throws a cast error on `''`,
+// so this normalizes any falsy/empty value to undefined before it's ever
+// assigned to a document.
+const toMenuItemId = (value) => {
+  const raw = (value && typeof value === 'object' && value._id) ? value._id : value;
+  return raw === '' || raw === null || raw === undefined ? undefined : raw;
+};
 
 const buildMealName = (item = {}) => {
   const provided = String(item.mealName || '').trim();
@@ -237,6 +248,7 @@ router.get('/customers/:customerId/meal-profile', async (req, res) => {
       mealPerDay: customer.mealPerDay,
       breakfastInclude: customer.breakfastInclude,
       mealSnack: customer.mealSnack,
+      snackCount: customer.snackCount || 0,
       mealPlan: customer.mealPlan,
       mealExclusion: customer.mealExclusion,
       allergies: customer.allergies || [],
@@ -394,6 +406,7 @@ router.post('/customers/:customerId/meal-profile', async (req, res) => {
       mealPerDay,
       breakfastInclude,
       mealSnack,
+      snackCount,
       mealPlan,
       mealExclusion,
       allergies,
@@ -406,6 +419,7 @@ router.post('/customers/:customerId/meal-profile', async (req, res) => {
     if (mealPerDay !== undefined) updateFields.mealPerDay = Number(mealPerDay);
     if (breakfastInclude !== undefined) updateFields.breakfastInclude = breakfastInclude;
     if (mealSnack !== undefined) updateFields.mealSnack = mealSnack;
+    if (snackCount !== undefined) updateFields.snackCount = Number(snackCount) || 0;
     if (req.body.weekend !== undefined) updateFields.weekend = !!req.body.weekend;
     if (mealPlan !== undefined) updateFields.mealPlan = mealPlan;
     if (mealExclusion !== undefined) updateFields.mealExclusion = mealExclusion;
@@ -817,6 +831,388 @@ router.put('/:id/breakfast-presets', protect, async (req, res) => {
       success: false,
       message: error.message
     });
+  }
+});
+
+const toDateKey = (value) => {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+};
+
+/**
+ * GET /api/menus/:id/snack-options
+ * Returns the kitchen-defined snack ingredient options, keyed by date.
+ */
+router.get('/:id/snack-options', protect, async (req, res) => {
+  try {
+    const menu = await WeeklyMenu.findById(req.params.id).select('snackOptionsByDate').lean();
+    if (!menu) {
+      return res.status(404).json({ success: false, message: 'Menu not found' });
+    }
+
+    const optionsByDate = {};
+    for (const [date, options] of Object.entries(menu.snackOptionsByDate || {})) {
+      optionsByDate[date] = options || [];
+    }
+
+    res.json({ success: true, data: optionsByDate });
+  } catch (error) {
+    console.error('Error fetching snack options:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * PUT /api/menus/:id/snack-options
+ * Replaces the snack ingredient options for a single date.
+ * Body: { date: 'YYYY-MM-DD', options: [{ name, exclusions, C, P, F }] }
+ */
+router.put('/:id/snack-options', protect, async (req, res) => {
+  try {
+    const { date, options } = req.body || {};
+    const dateKey = toDateKey(date);
+    if (!dateKey) {
+      return res.status(400).json({ success: false, message: 'A valid date is required' });
+    }
+    if (!Array.isArray(options)) {
+      return res.status(400).json({ success: false, message: 'options must be an array' });
+    }
+
+    const normalizedOptions = options
+      .map((opt) => ({
+        name: String(opt?.name || '').trim(),
+        exclusions: Array.isArray(opt?.exclusions)
+          ? opt.exclusions.map((e) => String(e).trim()).filter(Boolean)
+          : String(opt?.exclusions || '').split(',').map((e) => e.trim()).filter(Boolean),
+        C: Number(opt?.C) || 0,
+        P: Number(opt?.P) || 0,
+        F: Number(opt?.F) || 0
+      }))
+      .filter((opt) => opt.name);
+
+    const menu = await WeeklyMenu.findById(req.params.id);
+    if (!menu) {
+      return res.status(404).json({ success: false, message: 'Menu not found' });
+    }
+
+    menu.snackOptionsByDate.set(dateKey, normalizedOptions);
+    await menu.save();
+
+    const optionsByDate = {};
+    for (const [key, opts] of menu.snackOptionsByDate.entries()) {
+      optionsByDate[key] = opts || [];
+    }
+
+    res.json({ success: true, data: optionsByDate });
+  } catch (error) {
+    console.error('Error saving snack options:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * POST /api/menus/:id/assign-snacks
+ * For every customer selection on this menu, ensures each day they have
+ * meals gets the right number of snack slots (from their website
+ * subscription's snacks_per_day), each randomly assigned an ingredient from
+ * that date's snack options — skipping any option whose exclusion tags match
+ * the customer's exclusion list. Idempotent: only fills in missing slots, never duplicates existing
+ * assignments. Macros for each slot are the ingredient's macros divided by
+ * the day's snack count.
+ */
+router.post('/:id/assign-snacks', protect, async (req, res) => {
+  try {
+    const menu = await WeeklyMenu.findById(req.params.id).select('snackOptionsByDate').lean();
+    if (!menu) {
+      return res.status(404).json({ success: false, message: 'Menu not found' });
+    }
+    const snackOptionsByDate = menu.snackOptionsByDate || {};
+
+    const records = await MenuSelectionRecord.find({ weeklyMenuId: req.params.id });
+
+    // Nutrition lookups (2 Matter API calls each) dominate runtime — run every
+    // customer concurrently instead of one at a time.
+    const results = await Promise.all(records.map(async (record) => {
+      const stats = { assigned: 0, skippedNoSnacksNeeded: 0, skippedNoOptions: 0, datesWithNoOptions: [] };
+
+      let nutrition = null;
+      try {
+        nutrition = await matterApiService.getSubscriptionNutritionByEmail(record.email);
+      } catch (lookupError) {
+        console.error(`Snack assignment: failed to look up ${record.email}:`, lookupError.message);
+      }
+
+      const snacksPerDay = Number(nutrition?.snacks_per_day) || 0;
+      if (snacksPerDay <= 0) {
+        stats.skippedNoSnacksNeeded = 1;
+        return stats;
+      }
+
+      const exclusions = String(record.mealExclusion || '')
+        .split(/[,;|]/)
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
+
+      const dateKeys = Array.from(new Set(
+        (record.selectedMeals || [])
+          .filter((m) => m.mealType !== 'snack')
+          .map((m) => toDateKey(m.date))
+          .filter(Boolean)
+      ));
+
+      let changed = false;
+
+      for (const dateKey of dateKeys) {
+        const existingSnackCount = (record.selectedMeals || []).filter(
+          (m) => m.mealType === 'snack' && toDateKey(m.date) === dateKey
+        ).length;
+        const slotsNeeded = snacksPerDay - existingSnackCount;
+        if (slotsNeeded <= 0) continue;
+
+        const dayOptions = (snackOptionsByDate[dateKey] || []).filter((opt) => {
+          const optExclusions = (opt.exclusions || []).map((e) => String(e).toLowerCase().trim());
+          return !exclusions.some((ex) => optExclusions.some((tag) => tag.includes(ex) || ex.includes(tag)));
+        });
+
+        if (dayOptions.length === 0) {
+          stats.skippedNoOptions += 1;
+          stats.datesWithNoOptions.push(dateKey);
+          continue;
+        }
+
+        for (let i = 0; i < slotsNeeded; i += 1) {
+          const choice = dayOptions[Math.floor(Math.random() * dayOptions.length)];
+          record.selectedMeals.push({
+            date: new Date(dateKey),
+            mealType: 'snack',
+            mealName: choice.name,
+            quantity: 1,
+            snackMacros: {
+              C: (Number(choice.C) || 0) / snacksPerDay,
+              P: (Number(choice.P) || 0) / snacksPerDay,
+              F: (Number(choice.F) || 0) / snacksPerDay
+            }
+          });
+          stats.assigned += 1;
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        await record.save();
+      }
+
+      return stats;
+    }));
+
+    const assigned = results.reduce((sum, r) => sum + r.assigned, 0);
+    const skippedNoSnacksNeeded = results.reduce((sum, r) => sum + r.skippedNoSnacksNeeded, 0);
+    const skippedNoOptions = results.reduce((sum, r) => sum + r.skippedNoOptions, 0);
+    const datesWithNoOptions = Array.from(new Set(results.flatMap((r) => r.datesWithNoOptions))).sort();
+
+    return res.json({
+      success: true,
+      data: { assigned, skippedNoSnacksNeeded, skippedNoOptions, datesWithNoOptions, customersProcessed: records.length }
+    });
+  } catch (error) {
+    console.error('Error assigning snacks:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * GET /api/menus/:id/main-meal-options
+ * Returns the kitchen-defined main meal rotation + fallback sub meals, keyed by date.
+ */
+router.get('/:id/main-meal-options', protect, async (req, res) => {
+  try {
+    const menu = await WeeklyMenu.findById(req.params.id).select('mainMealOptionsByDate').lean();
+    if (!menu) {
+      return res.status(404).json({ success: false, message: 'Menu not found' });
+    }
+
+    const optionsByDate = {};
+    for (const [date, value] of Object.entries(menu.mainMealOptionsByDate || {})) {
+      optionsByDate[date] = { mainMeals: value?.mainMeals || [], subMeals: value?.subMeals || [] };
+    }
+
+    res.json({ success: true, data: optionsByDate });
+  } catch (error) {
+    console.error('Error fetching main meal options:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * PUT /api/menus/:id/main-meal-options
+ * Replaces the main meal rotation + fallback sub meals for a single date.
+ * Body: { date, mainMeals: [{name, type, exclusions}], subMeals: [{name, type, exclusions}] }
+ */
+router.put('/:id/main-meal-options', protect, async (req, res) => {
+  try {
+    const { date, mainMeals, subMeals } = req.body || {};
+    const dateKey = toDateKey(date);
+    if (!dateKey) {
+      return res.status(400).json({ success: false, message: 'A valid date is required' });
+    }
+
+    const normalize = (list) => (Array.isArray(list) ? list : [])
+      .map((opt) => ({
+        name: String(opt?.name || '').trim(),
+        type: ['chicken', 'beef', 'fish'].includes(opt?.type) ? opt.type : null,
+        exclusions: Array.isArray(opt?.exclusions)
+          ? opt.exclusions.map((e) => String(e).trim()).filter(Boolean)
+          : String(opt?.exclusions || '').split(',').map((e) => e.trim()).filter(Boolean)
+      }))
+      .filter((opt) => opt.name && opt.type);
+
+    const menu = await WeeklyMenu.findById(req.params.id);
+    if (!menu) {
+      return res.status(404).json({ success: false, message: 'Menu not found' });
+    }
+
+    menu.mainMealOptionsByDate.set(dateKey, {
+      mainMeals: normalize(mainMeals).slice(0, 3),
+      subMeals: normalize(subMeals)
+    });
+    await menu.save();
+
+    const optionsByDate = {};
+    for (const [key, value] of menu.mainMealOptionsByDate.entries()) {
+      optionsByDate[key] = { mainMeals: value?.mainMeals || [], subMeals: value?.subMeals || [] };
+    }
+
+    res.json({ success: true, data: optionsByDate });
+  } catch (error) {
+    console.error('Error saving main meal options:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * POST /api/menus/:id/assign-main-meals
+ * Fills in a main meal for each given customer on a date, using the 3-meal
+ * rotation (not random — cycles 1st -> 2nd -> 3rd, advancing one step per
+ * slot assigned across all customers). If a customer's exclusions rule out
+ * every rotation option for a slot, falls back to the sub-meal pool.
+ * Idempotent per customer: only fills the gap between their existing main
+ * meals that day and their meal_frequency.
+ * Body: { date, customers: [{ email, name, customerId, mealFrequency, exclusions }] }
+ */
+router.post('/:id/assign-main-meals', protect, async (req, res) => {
+  try {
+    const { date, customers } = req.body || {};
+    const dateKey = toDateKey(date);
+    if (!dateKey) {
+      return res.status(400).json({ success: false, message: 'A valid date is required' });
+    }
+    if (!Array.isArray(customers) || customers.length === 0) {
+      return res.status(400).json({ success: false, message: 'customers must be a non-empty array' });
+    }
+
+    const menu = await WeeklyMenu.findById(req.params.id).select('mainMealOptionsByDate').lean();
+    if (!menu) {
+      return res.status(404).json({ success: false, message: 'Menu not found' });
+    }
+
+    const dayOptions = (menu.mainMealOptionsByDate || {})[dateKey] || { mainMeals: [], subMeals: [] };
+    const mainMeals = dayOptions.mainMeals || [];
+    const subMeals = dayOptions.subMeals || [];
+
+    if (mainMeals.length === 0) {
+      return res.status(400).json({ success: false, message: 'No main meals configured for this date' });
+    }
+
+    const conflicts = (option, customerExclusions) => {
+      const optionExclusions = (option.exclusions || []).map((e) => String(e).toLowerCase().trim());
+      return customerExclusions.some((ex) => optionExclusions.some((tag) => tag.includes(ex) || ex.includes(tag)));
+    };
+
+    // Stable order so the rotation is deterministic and repeatable across runs.
+    const sortedCustomers = [...customers].sort(
+      (a, b) => String(a.name || a.email || '').localeCompare(String(b.name || b.email || ''))
+    );
+
+    let cursor = 0;
+    let assigned = 0;
+    let skippedNoOption = 0;
+    let skippedAlreadyAssigned = 0;
+
+    for (const customer of sortedCustomers) {
+      const email = String(customer.email || '').trim();
+      if (!email) continue;
+
+      const existingRecord = await MenuSelectionRecord.findOne({ weeklyMenuId: req.params.id, email }).lean();
+      const existingMainMealsCount = (existingRecord?.selectedMeals || []).filter(
+        (m) => toDateKey(m.date) === dateKey && ['lunch', 'dinner'].includes(m.mealType)
+      ).length;
+
+      const totalNeeded = Math.max(1, Number(customer.mealFrequency) || 1);
+      const slotsNeeded = totalNeeded - existingMainMealsCount;
+      if (slotsNeeded <= 0) {
+        skippedAlreadyAssigned += 1;
+        continue;
+      }
+
+      const customerExclusions = (customer.exclusions || []).map((e) => String(e).toLowerCase().trim());
+      const assignedMeals = [];
+
+      for (let slot = 0; slot < slotsNeeded; slot += 1) {
+        let chosen = null;
+        for (let offset = 0; offset < mainMeals.length; offset += 1) {
+          const candidate = mainMeals[(cursor + offset) % mainMeals.length];
+          if (!conflicts(candidate, customerExclusions)) {
+            chosen = candidate;
+            break;
+          }
+        }
+        if (!chosen) {
+          chosen = subMeals.find((sub) => !conflicts(sub, customerExclusions)) || null;
+        }
+        cursor += 1;
+
+        if (chosen) {
+          assignedMeals.push(chosen);
+          assigned += 1;
+        } else {
+          skippedNoOption += 1;
+        }
+      }
+
+      if (assignedMeals.length === 0) continue;
+
+      const mealTypeForSlot = (index) => (index === 1 ? 'dinner' : 'lunch');
+      const newMeals = assignedMeals.map((meal, index) => ({
+        date: new Date(dateKey),
+        mealType: mealTypeForSlot(existingMainMealsCount + index),
+        mealName: meal.name,
+        manualProteinType: meal.type,
+        quantity: 1
+      }));
+
+      await MenuSelectionRecord.findOneAndUpdate(
+        { weeklyMenuId: req.params.id, email },
+        {
+          $setOnInsert: {
+            weeklyMenuId: req.params.id,
+            email,
+            customerId: customer.customerId ? String(customer.customerId) : undefined,
+            firstName: customer.name || email
+          },
+          $push: { selectedMeals: { $each: newMeals } }
+        },
+        { upsert: true }
+      );
+    }
+
+    return res.json({
+      success: true,
+      data: { assigned, skippedNoOption, skippedAlreadyAssigned, customersProcessed: sortedCustomers.length }
+    });
+  } catch (error) {
+    console.error('Error assigning main meals:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -1527,11 +1923,9 @@ router.get('/:id/selections', protect, async (req, res) => {
 
       const recObj = rec.toObject ? rec.toObject() : rec;
       const customer = customerByEmail.get(String(rec.email || '').trim().toLowerCase()) || null;
-      const recordMacros = normalizeKitchenMacros(recObj.macros);
-      const customerMacros = normalizeKitchenMacros(customer?.macros);
-      const activeMacros = (recordMacros.C || recordMacros.P || recordMacros.F)
-        ? recordMacros
-        : customerMacros;
+      // Macros come from the menu selection record itself or (client-side) the
+      // customer's website subscription — never from the internal Customer page.
+      const activeMacros = normalizeKitchenMacros(recObj.macros);
       return {
         ...recObj,
         targetMacros: activeMacros,
@@ -1693,7 +2087,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     const previousMeals = (customer.selectedMeals || []).map(m => ({
       date: m.date,
       mealType: m.mealType,
-      menuItemId: m.menuItemId,
+      menuItemId: toMenuItemId(m.menuItemId),
       mealName: m.mealName,
       description: m.description,
       slotNumber: m.slotNumber,
@@ -1713,7 +2107,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     const mappedSelections = (selections || []).map(sel => ({
       date: sel.date,
       mealType: sel.mealType,
-      menuItemId: sel.menuItemId,
+      menuItemId: toMenuItemId(sel.menuItemId),
       mealName: sel.mealName,
       description: sel.description,
       slotNumber: sel.slotNumber,
@@ -1935,7 +2329,7 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
     const normalizedSelections = selections.map((sel) => ({
       date: sel.date,
       mealType: sel.mealType,
-      menuItemId: sel.menuItemId?._id || sel.menuItemId,
+      menuItemId: toMenuItemId(sel.menuItemId),
       mealName: sel.mealName,
       description: sel.description,
       slotNumber: sel.slotNumber,

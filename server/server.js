@@ -151,6 +151,8 @@ import adminPartnerRoutes from './routes/adminPartners.js';
 import webhookRoutes from './routes/webhooks.js';
 import employeeRoutes from './routes/employees.js';
 import matterCoreRoutes from './routes/matterCore.js';
+import matterApiRoutes from './routes/matterApi.js';
+import xeroRoutes from './routes/xero.js';
 
 // Import cache initialization
 import { initRedis } from './config/cache.js';
@@ -180,6 +182,8 @@ app.use('/api/partner', partnerPortalRoutes);
 app.use('/api/admin/partners', adminPartnerRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/employees', employeeRoutes);
+app.use('/api/matter', matterApiRoutes);
+app.use('/api/xero', xeroRoutes);
 
 
 // Health check endpoint (supports both GET and HEAD methods)

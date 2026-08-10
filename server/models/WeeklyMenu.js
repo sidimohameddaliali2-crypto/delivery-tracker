@@ -9,6 +9,22 @@ const breakfastPresetSchema = new mongoose.Schema({
   isLargeBreakfast: { type: Boolean, default: false }
 }, { _id: false });
 
+const snackOptionSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  // Ingredient/allergen tags this snack contains (e.g. "Dairy", "Nuts") —
+  // matched against the customer's exclusion list, not the snack's name.
+  exclusions: { type: [String], default: [] },
+  C: { type: Number, default: 0 },
+  P: { type: Number, default: 0 },
+  F: { type: Number, default: 0 }
+}, { _id: false });
+
+const mainMealOptionSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  type: { type: String, enum: ['chicken', 'beef', 'fish'], required: true },
+  exclusions: { type: [String], default: [] }
+}, { _id: false });
+
 const weeklyMenuSchema = new mongoose.Schema({
   // Menu info
   title: {
@@ -109,6 +125,27 @@ const weeklyMenuSchema = new mongoose.Schema({
   breakfastPresetsByName: {
     type: Map,
     of: breakfastPresetSchema,
+    default: () => ({})
+  },
+
+  // Kitchen-defined snack ingredient options per date (YYYY-MM-DD keys).
+  // The customer never chooses these — they're auto-assigned at random,
+  // excluding anything on the customer's exclusion list.
+  snackOptionsByDate: {
+    type: Map,
+    of: [snackOptionSchema],
+    default: () => ({})
+  },
+
+  // Kitchen-defined main meal rotation per date: up to 3 primary options
+  // cycled through in order (not random), plus a fallback pool used only
+  // when a customer's exclusions rule out all 3 primary options.
+  mainMealOptionsByDate: {
+    type: Map,
+    of: {
+      mainMeals: { type: [mainMealOptionSchema], default: [] },
+      subMeals: { type: [mainMealOptionSchema], default: [] }
+    },
     default: () => ({})
   },
 

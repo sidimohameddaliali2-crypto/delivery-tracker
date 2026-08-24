@@ -1,7 +1,23 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 
 dotenv.config();
+
+// Human-readable text for Matter's documented { error: { code } } responses.
+const MATTER_ERROR_MESSAGES = {
+  UNAUTHENTICATED: 'Matter API token is missing or invalid.',
+  WRITE_NOT_ALLOWED: 'Matter restricts pause writes to a single pilot customer right now — this subscription is not yet in scope for write access.',
+};
+
+export function describeMatterApiError(error) {
+  const code = error?.response?.data?.error?.code;
+  const rawMessage = error?.response?.data?.error?.message || error?.response?.data?.message;
+  if (code && MATTER_ERROR_MESSAGES[code]) return MATTER_ERROR_MESSAGES[code];
+  if (rawMessage) return rawMessage;
+  if (code) return `Matter API error: ${code}`;
+  return null;
+}
 
 const formatAddress = (addr) => {
   if (!addr) return '';
@@ -84,6 +100,21 @@ class MatterApiService {
    */
   async getSubscriptionPauses(subscriptionId) {
     const response = await this.client().get(`/subscriptions/${subscriptionId}/pauses`);
+    return response.data;
+  }
+
+  /**
+   * Pause and reschedule deliveries for a subscription. This actually
+   * reschedules a real customer's real deliveries — pausedDays and
+   * chosenDays must be the same length (1-for-1 swap). A fresh idempotency
+   * key is sent per call so retries can't double-apply.
+   */
+  async createSubscriptionPause(subscriptionId, { pausedDays, chosenDays, reason }) {
+    const response = await this.client().post(
+      `/subscriptions/${subscriptionId}/pauses`,
+      { paused_days: pausedDays, chosen_days: chosenDays, reason },
+      { headers: { 'Idempotency-Key': crypto.randomUUID() } }
+    );
     return response.data;
   }
 
@@ -195,6 +226,82 @@ class MatterApiService {
     }
 
     return contacts;
+  }
+
+  /**
+   * Per-active-subscription financial fields (amount paid, currency) that
+   * only exist on the full-detail record — the list endpoint has plan/cycle
+   * dates but not payment info. Same cost profile as
+   * listActiveSubscriptionAnalytics — hundreds of calls, on demand only.
+   */
+  async listActiveSubscriptionFinancials() {
+    const all = await this.listAllSubscriptions();
+    const activeSubs = all.filter((sub) => sub.subscription_status === 'active');
+
+    const CONCURRENCY = 20;
+    const results = [];
+
+    for (let i = 0; i < activeSubs.length; i += CONCURRENCY) {
+      const batch = activeSubs.slice(i, i + CONCURRENCY);
+      const batchResults = await Promise.all(batch.map(async (sub) => {
+        try {
+          const detail = await this.getSubscription(sub.subscription_id);
+          const subscription = detail?.data;
+          if (!subscription) return null;
+          return {
+            subscription_id: sub.subscription_id,
+            customer_id: sub.customer_id,
+            email: subscription.email || sub.email,
+            gross_paid: subscription.gross_paid ?? null,
+            currency: subscription.currency ?? null
+          };
+        } catch (error) {
+          console.error(`Failed to fetch financials for subscription ${sub.subscription_id}:`, error.message);
+          return null;
+        }
+      }));
+      results.push(...batchResults.filter(Boolean));
+    }
+
+    return results;
+  }
+
+  /**
+   * Per-active-subscription analytics fields (plan name, created date, active
+   * delivery zone) that only exist on the full-detail record. Same cost
+   * profile as listActiveCustomerContacts — hundreds of calls, on demand only.
+   */
+  async listActiveSubscriptionAnalytics() {
+    const all = await this.listAllSubscriptions();
+    const activeSubs = all.filter((sub) => sub.subscription_status === 'active');
+
+    const CONCURRENCY = 20;
+    const results = [];
+
+    for (let i = 0; i < activeSubs.length; i += CONCURRENCY) {
+      const batch = activeSubs.slice(i, i + CONCURRENCY);
+      const batchResults = await Promise.all(batch.map(async (sub) => {
+        try {
+          const detail = await this.getSubscription(sub.subscription_id);
+          const subscription = detail?.data;
+          if (!subscription) return null;
+          const addresses = subscription.customer_addresses || [];
+          const activeAddress = addresses.find((a) => a.status === 'active') || addresses[0];
+          return {
+            subscription_id: sub.subscription_id,
+            plan_name: subscription.plan?.name || sub.plan?.name || null,
+            created_at: subscription.created_at || subscription.starting_date || null,
+            zone: activeAddress?.area || null
+          };
+        } catch (error) {
+          console.error(`Failed to fetch analytics detail for subscription ${sub.subscription_id}:`, error.message);
+          return null;
+        }
+      }));
+      results.push(...batchResults.filter(Boolean));
+    }
+
+    return results;
   }
 }
 

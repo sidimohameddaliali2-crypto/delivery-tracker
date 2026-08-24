@@ -31,7 +31,44 @@ const userSchema = new mongoose.Schema({
     colorCode: {
       type: String,
       default: '#000000'
-    }
+    },
+    licenseNumber: String,
+    licenseExpiry: Date,
+    nationalId: String,
+    assignedZone: String,
+    shiftTiming: String,
+    vehicleId: String,
+    vehicleType: {
+      type: String,
+      enum: ['bike', 'van', 'car']
+    },
+    vehiclePaper: String,
+    baseSalary: Number,
+    contractType: {
+      type: String,
+      enum: ['full_time', 'part_time', 'contract', 'temporary'],
+      default: 'full_time'
+    },
+    joiningDate: Date,
+    vacation: {
+      allowanceDays: { type: Number, default: 30 },
+      usedDays: { type: Number, default: 0 },
+      currentStart: Date,
+      currentEnd: Date,
+      history: [{
+        startDate: Date,
+        endDate: Date,
+        days: Number,
+        reason: String,
+        loggedAt: { type: Date, default: Date.now }
+      }]
+    },
+    deductions: [{
+      reason: String,
+      category: { type: String, enum: ['fine', 'damage', 'other'], default: 'other' },
+      amount: { type: Number, default: 0 },
+      date: { type: Date, default: Date.now }
+    }]
   },
   permissions: {
     dashboard: { type: Boolean, default: false },

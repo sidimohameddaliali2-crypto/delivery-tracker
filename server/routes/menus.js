@@ -611,9 +611,40 @@ router.get('/', protect, async (req, res) => {
 
     const total = await WeeklyMenu.countDocuments(query);
 
+    // Real per-day customer selection counts (quantity-aware), for the list
+    // card's day strip. Client does the local-date bucketing (same pattern
+    // as the existing per-day meal-item counts) to avoid server/browser
+    // timezone mismatches, so we just hand over raw {date, count} pairs.
+    const menuIds = menus.map((m) => m._id);
+    const selectionAgg = menuIds.length > 0
+      ? await MenuSelectionRecord.aggregate([
+          { $match: { weeklyMenuId: { $in: menuIds } } },
+          { $unwind: '$selectedMeals' },
+          { $match: { 'selectedMeals.date': { $ne: null } } },
+          {
+            $group: {
+              _id: { menuId: '$weeklyMenuId', date: '$selectedMeals.date' },
+              count: { $sum: { $ifNull: ['$selectedMeals.quantity', 1] } }
+            }
+          }
+        ])
+      : [];
+    const selectionsByMenuId = new Map();
+    selectionAgg.forEach((row) => {
+      const key = String(row._id.menuId);
+      const list = selectionsByMenuId.get(key) || [];
+      list.push({ date: row._id.date, count: row.count });
+      selectionsByMenuId.set(key, list);
+    });
+
+    const menusWithSelections = menus.map((m) => ({
+      ...m.toObject(),
+      selectionsByDate: selectionsByMenuId.get(String(m._id)) || []
+    }));
+
     res.json({
       success: true,
-      data: menus,
+      data: menusWithSelections,
       pagination: {
         page,
         limit,

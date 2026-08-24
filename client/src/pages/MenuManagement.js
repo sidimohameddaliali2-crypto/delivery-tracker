@@ -1,17 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Plus,
-  Copy,
-  ExternalLink,
   Edit,
   Trash2,
-  Check,
   AlertCircle,
   Loader,
   Eye,
   Calendar,
   Users,
-  Link as LinkIcon,
   Upload,
   Download,
   Coffee,
@@ -22,14 +18,77 @@ import {
   Image as ImageIcon,
   FileText
 } from 'lucide-react';
+
+// A meal's allergens are a small, bounded, real-world vocabulary — a chip
+// picker (matching the design) fits it far better than a free-text field.
+// (The much larger ingredient-exclusion list in constants/exclusionList.js
+// stays a free-text/textarea field below — 170+ entries don't fit as chips.)
+const ALLERGEN_OPTIONS = ['Gluten', 'Dairy', 'Eggs', 'Nuts', 'Peanuts', 'Soy', 'Fish', 'Shellfish', 'Sesame'];
 import api from '../utils/api';
 import { lookupProteinWeight, lookupCarbWeight } from '../utils/nutrition';
 import XLSX from 'xlsx-js-style';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 
+// Real fields only: isPublished / isActive / shareLink.isActive / startDate /
+// endDate. There's no status enum on WeeklyMenu, so this derives one of
+// Active / Scheduled / Stopped / Ended the same way a human would read those
+// booleans + dates — no new schema field needed.
+const getMenuStatus = (menu) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = menu.endDate ? new Date(menu.endDate) : null;
+  if (end) end.setHours(0, 0, 0, 0);
+  if (end && end < today) return 'Ended';
+  if (!menu.isPublished) return 'Scheduled';
+  if (menu.shareLink?.isActive === false) return 'Stopped';
+  const start = menu.startDate ? new Date(menu.startDate) : null;
+  if (start) start.setHours(0, 0, 0, 0);
+  if (start && start > today) return 'Scheduled';
+  return 'Active';
+};
+
+// Exact bg/fg pairing from the Design canvas file's own STATUS map (Active
+// uses the green ramp, Stopped uses the blue/accent ramp — not red).
+const MENU_STATUS_STYLE = {
+  Active: 'bg-matter-accent2-300 text-matter-accent2-900',
+  Scheduled: 'bg-matter-neutral-200 text-matter-neutral-800',
+  Stopped: 'bg-matter-accent-200 text-matter-accent-800',
+  Ended: 'bg-matter-neutral-200 text-matter-neutral-600',
+};
+
+const MENU_STATUS_TABS = ['All', 'Active', 'Scheduled', 'Stopped', 'Ended'];
+
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Per-day customer selection counts (quantity-aware) for the card's day
+// strip, from menu.selectionsByDate — a raw {date, count} list the list
+// endpoint aggregates from MenuSelectionRecord. Bucketed here by local date
+// components (not the backend's, to avoid server/browser timezone drift).
+const getMenuDayStrip = (menu) => {
+  if (!menu.startDate) return [];
+  const start = new Date(menu.startDate);
+  start.setHours(0, 0, 0, 0);
+  const days = [];
+  for (let i = 0; i < 7; i += 1) {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    const count = (menu.selectionsByDate || []).reduce((sum, s) => {
+      if (!s.date) return sum;
+      const sd = new Date(s.date);
+      return (sd.getFullYear() === d.getFullYear() && sd.getMonth() === d.getMonth() && sd.getDate() === d.getDate())
+        ? sum + (s.count || 0)
+        : sum;
+    }, 0);
+    days.push({ label: WEEKDAY_SHORT[d.getDay()], count });
+  }
+  return days;
+};
+
 const MenuManagement = () => {
   const [menus, setMenus] = useState([]);
+  const [statusFilter, setStatusFilter] = useState('All');
+  const [openActionsMenuId, setOpenActionsMenuId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
@@ -45,7 +104,7 @@ const MenuManagement = () => {
   const [uploadError, setUploadError] = useState(null);
   const [isUploadingMenu, setIsUploadingMenu] = useState(false);
   const [editingMenuId, setEditingMenuId] = useState(null);
-  const [isBodybuilderMode, setIsBodybuilderMode] = useState(false);
+  const [editingSlot, setEditingSlot] = useState(null); // { dayIndex, itemIndex } | null — the meal open in the slide-in editor
   const [selectedCustomerDetail, setSelectedCustomerDetail] = useState(null);
   const [isDownloadingImage, setIsDownloadingImage] = useState(false);
   const [isDownloadingPDF, setIsDownloadingPDF] = useState(false);
@@ -199,49 +258,9 @@ const MenuManagement = () => {
     return deadlineDateLocal;
   };
 
-  const initializeWeeklyItems = (start, end, bodybuilderMode = false) => {
+  const initializeWeeklyItems = (start, end) => {
     const dates = getDateRange(start, end);
-    if (bodybuilderMode) {
-      return [{
-        date: 'ALL_DAYS',
-        items: [
-          {
-            mealType: 'lunch',
-            mealName: '',
-            ingredients: '',
-            proteinSource: '',
-            category: '',
-            intolerances: '',
-            allergens: '',
-            garnish: '',
-            carbs: '',
-            veg: '',
-            sauce: '',
-            price: 0
-          }
-        ]
-      }];
-    }
-
-    return dates.map((date) => ({
-      date: getDateKey(date),
-      items: [
-        {
-          mealType: 'lunch',
-          mealName: '',
-          ingredients: '',
-          proteinSource: '',
-          category: '',
-          intolerances: '',
-          allergens: '',
-          garnish: '',
-          carbs: '',
-          veg: '',
-          sauce: '',
-          price: 0
-        }
-      ]
-    }));
+    return dates.map((date) => ({ date: getDateKey(date), items: [] }));
   };
 
   const handleWeeklyItemChange = (dayIndex, itemIndex, field, value) => {
@@ -257,7 +276,10 @@ const MenuManagement = () => {
     });
   };
 
+  // Adds a blank meal to the day and immediately opens it in the slide-in
+  // editor — matches the design's "+ Meal" → editor-opens-on-the-new-item flow.
   const handleAddItemForDay = (dayIndex) => {
+    const newIndex = weeklyItems[dayIndex]?.items.length || 0;
     setWeeklyItems((prev) => {
       const updated = [...prev];
       updated[dayIndex] = { ...updated[dayIndex] };
@@ -280,6 +302,7 @@ const MenuManagement = () => {
       ];
       return updated;
     });
+    setEditingSlot({ dayIndex, itemIndex: newIndex });
   };
 
   const handleRemoveItemForDay = (dayIndex, itemIndex) => {
@@ -287,24 +310,24 @@ const MenuManagement = () => {
       const updated = [...prev];
       updated[dayIndex] = { ...updated[dayIndex] };
       updated[dayIndex].items = updated[dayIndex].items.filter((_, idx) => idx !== itemIndex);
-      if (updated[dayIndex].items.length === 0) {
-        updated[dayIndex].items = [{
-          mealType: 'lunch',
-          mealName: '',
-          ingredients: '',
-          proteinSource: '',
-          category: '',
-          intolerances: '',
-          allergens: '',
-          garnish: '',
-          carbs: '',
-          veg: '',
-          sauce: '',
-          price: 0
-        }];
-      }
       return updated;
     });
+    setEditingSlot(null);
+  };
+
+  const handleDuplicateItem = (dayIndex, itemIndex) => {
+    const newIndex = weeklyItems[dayIndex]?.items.length || 0;
+    setWeeklyItems((prev) => {
+      const updated = [...prev];
+      updated[dayIndex] = { ...updated[dayIndex] };
+      const source = updated[dayIndex].items[itemIndex];
+      updated[dayIndex].items = [
+        ...updated[dayIndex].items,
+        { ...source, mealName: source.mealName ? `${source.mealName} (copy)` : '' }
+      ];
+      return updated;
+    });
+    setEditingSlot({ dayIndex, itemIndex: newIndex });
   };
 
   const normalizeHeader = (value) => String(value || '')
@@ -437,75 +460,60 @@ const MenuManagement = () => {
   useEffect(() => {
     if (formData.startDate && formData.endDate) {
       if (editingMenuId && weeklyItems.length > 0) return;
-      setWeeklyItems(initializeWeeklyItems(formData.startDate, formData.endDate, isBodybuilderMode));
+      setWeeklyItems(initializeWeeklyItems(formData.startDate, formData.endDate));
     }
-  }, [formData.startDate, formData.endDate, editingMenuId, weeklyItems.length, isBodybuilderMode]);
+  }, [formData.startDate, formData.endDate, editingMenuId, weeklyItems.length]);
 
-  const handleCreateMenu = async (e) => {
-    e.preventDefault();
+  const closeCreateForm = () => {
+    setShowCreateForm(false);
+    setEditingMenuId(null);
+    setEditingSlot(null);
+    setUploadError(null);
+    setFormData({
+      title: '',
+      description: '',
+      startDate: '',
+      endDate: '',
+      mealPlans: ['Standard'],
+      enableCompletionMessage: false,
+      completionMessage: 'Your meal selections have been saved successfully.',
+      selectionDeadlines: []
+    });
+    setWeeklyItems([]);
+  };
+
+  // publish=false → save/update as a draft (matches the design's "Save draft").
+  // publish=true → save, then publish, then copy the share link — presented
+  // as one action ("Publish & copy link"), same as the design's button.
+  const handleSaveMenu = async ({ publish }) => {
     try {
-      const daysPayload = isBodybuilderMode
-        ? getDateRange(formData.startDate, formData.endDate).map((date) => ({
-            date: getDateKey(date),
-            items: (weeklyItems[0]?.items || []).map((item) => ({ ...item }))
-          }))
-        : weeklyItems;
+      const payload = { ...formData };
+      let response = editingMenuId
+        ? await api.put(`/menus/${editingMenuId}`, { ...payload, days: weeklyItems })
+        : await api.post('/menus', { ...payload, meals: [], days: weeklyItems });
 
-      const payload = {
-        ...formData,
-        mealPlans: isBodybuilderMode ? ['Bodybuilder'] : formData.mealPlans,
-        bodybuilderMode: isBodybuilderMode
-      };
-
-      if (editingMenuId) {
-        console.log('Updating menu with formData:', formData);
-        const response = await api.put(`/menus/${editingMenuId}`, {
-          ...payload,
-          days: daysPayload
-        });
-
-        if (response.data?.success) {
-          setMenus(menus.map(m => m._id === editingMenuId ? response.data.data : m));
-          setEditingMenuId(null);
-          setShowCreateForm(false);
-          setFormData({
-            title: '',
-            description: '',
-            startDate: '',
-            endDate: '',
-            mealPlans: ['Standard'],
-            enableCompletionMessage: false,
-            completionMessage: 'Your meal selections have been saved successfully.',
-            selectionDeadlines: []
-          });
-          setIsBodybuilderMode(false);
-          setWeeklyItems([]);
-        }
-      } else {
-        console.log('Creating menu with formData:', formData);
-        const response = await api.post('/menus', {
-          ...payload,
-          meals: [],
-          days: daysPayload
-        });
-
-        if (response.data?.success) {
-          setMenus([...menus, response.data.data]);
-          setShowCreateForm(false);
-          setFormData({
-            title: '',
-            description: '',
-            startDate: '',
-            endDate: '',
-            mealPlans: ['Standard'],
-            enableCompletionMessage: false,
-            completionMessage: 'Your meal selections have been saved successfully.',
-            selectionDeadlines: []
-          });
-          setIsBodybuilderMode(false);
-          setWeeklyItems([]);
-        }
+      if (!response.data?.success) {
+        setError(response.data?.message || 'Failed to save menu');
+        return;
       }
+      let savedMenu = response.data.data;
+
+      if (publish && !savedMenu.isPublished) {
+        const pubRes = await api.put(`/menus/${savedMenu._id}`, { isPublished: true });
+        if (pubRes.data?.success) savedMenu = pubRes.data.data;
+      }
+
+      setMenus((prev) => {
+        const exists = prev.some((m) => m._id === savedMenu._id);
+        return exists ? prev.map((m) => (m._id === savedMenu._id ? savedMenu : m)) : [savedMenu, ...prev];
+      });
+
+      if (publish && savedMenu.shareLink?.token) {
+        const shareUrl = `${window.location.origin}/menu-select/${savedMenu.shareLink.token}`;
+        try { await navigator.clipboard.writeText(shareUrl); } catch (clipErr) { /* clipboard may be unavailable — link is still saved */ }
+      }
+
+      closeCreateForm();
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to save menu');
     }
@@ -564,29 +572,12 @@ const MenuManagement = () => {
         completionMessage: menu.completionMessage || 'Your meal selections have been saved successfully.',
         selectionDeadlines: menu.selectionDeadlines || []
       });
-      const bodybuilderMenu = Array.isArray(menu.mealPlans) && menu.mealPlans.includes('Bodybuilder');
-      setIsBodybuilderMode(bodybuilderMenu);
-      const builtItems = buildWeeklyItemsFromMenu(menu);
-      if (bodybuilderMenu) {
-        setWeeklyItems([{
-          date: 'ALL_DAYS',
-          items: builtItems[0]?.items || [{
-            mealType: 'lunch',
-            mealName: '',
-            ingredients: '',
-            proteinSource: '',
-            category: '',
-            intolerances: '',
-            allergens: '',
-            garnish: '',
-            carbs: '',
-            veg: '',
-            sauce: ''
-          }]
-        }]);
-      } else {
-        setWeeklyItems(builtItems);
-      }
+      // Seed every day in the range (even ones with no meals yet) so the
+      // day-grid always shows all 7 columns, not just the days that already
+      // have items.
+      const fullRange = getDateRange(menu.startDate, menu.endDate).map((d) => ({ date: getDateKey(d), items: [] }));
+      const builtByDate = new Map(buildWeeklyItemsFromMenu(menu).map((d) => [d.date, d.items]));
+      setWeeklyItems(fullRange.map((d) => ({ date: d.date, items: builtByDate.get(d.date) || [] })));
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to load menu for editing');
     }
@@ -933,7 +924,7 @@ const MenuManagement = () => {
       let isFirstPage = true;
       
       // Find all date sections (each day container)
-      const dateContainers = modalContentRef.current.querySelectorAll('[class*="border-2 border-gray-200 rounded-xl"]');
+      const dateContainers = modalContentRef.current.querySelectorAll('[class*="border-2 border-matter-neutral-300 rounded-xl"]');
       
       if (dateContainers.length === 0) {
         throw new Error('No content found to export');
@@ -1406,26 +1397,56 @@ const MenuManagement = () => {
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <Loader className="animate-spin text-indigo-600" size={32} />
+        <Loader className="animate-spin text-matter-sky" size={32} />
       </div>
     );
   }
 
   return (
-    <div className="p-6 bg-gray-50 min-h-screen">
+    <div className="customer-mgmt menu-mgmt min-h-screen p-6">
       <div className="max-w-6xl mx-auto">
         {/* Header */}
-        <div className="flex justify-between items-center mb-8">
+        <div className="flex items-end justify-between gap-8 flex-wrap mb-8 pb-6 border-b border-matter-navy/15">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">Weekly Menus</h1>
-            <p className="text-gray-600 mt-1">Manage and share weekly meal menus with customers</p>
+            <h1 className="font-heading-menu text-3xl font-bold text-matter-navy mb-2">Weekly menus</h1>
+            <p className="text-matter-neutral-600 text-base max-w-[44ch]">Build a week of meals, share one link, and watch your subscribers pick.</p>
+          </div>
+          <div className="flex gap-8">
+            <div>
+              <div className="font-heading-menu text-[34px] leading-none font-bold text-matter-navy tabular-nums">{menus.length}</div>
+              <h6 className="text-xs text-matter-neutral-500 uppercase tracking-wide mt-2">Menus</h6>
+            </div>
+            <div>
+              <div className="font-heading-menu text-[34px] leading-none font-bold text-matter-accent-700 tabular-nums">
+                {menus.reduce((s, m) => s + (m.selectionCount || 0), 0)}
+              </div>
+              <h6 className="text-xs text-matter-neutral-500 uppercase tracking-wide mt-2">Selections in</h6>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 flex-wrap mb-6">
+          <div className="flex gap-2 flex-wrap">
+            {MENU_STATUS_TABS.map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setStatusFilter(tab)}
+                className={`px-3.5 py-1.5 rounded-full text-sm font-semibold border transition-colors ${
+                  statusFilter === tab
+                    ? 'bg-matter-accent-700 border-matter-accent-700 text-white'
+                    : 'bg-transparent border-matter-neutral-300 text-matter-navy hover:bg-matter-neutral-100'
+                }`}
+              >
+                {tab}
+              </button>
+            ))}
           </div>
           <div className="flex gap-3">
             <button
               onClick={() => {
                 setShowCreateForm(true);
                 setEditingMenuId(null);
-                setIsBodybuilderMode(false);
+                setEditingSlot(null);
                 setUploadError(null);
                 setFormData({
                   title: '',
@@ -1439,94 +1460,80 @@ const MenuManagement = () => {
                 });
                 setWeeklyItems([]);
               }}
-              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg transition"
+              className="flex items-center gap-2 bg-matter-navy hover:bg-matter-blueblack text-white font-semibold px-4 py-2 rounded-lg transition"
             >
-              <Plus size={20} />
-              Create Menu
-            </button>
-            <button
-              onClick={() => {
-                setShowCreateForm(true);
-                setEditingMenuId(null);
-                setIsBodybuilderMode(true);
-                setUploadError(null);
-                setFormData({
-                  title: '',
-                  description: '',
-                  startDate: '',
-                  endDate: '',
-                  mealPlans: ['Bodybuilder'],
-                  enableCompletionMessage: false,
-                  completionMessage: 'Your meal selections have been saved successfully.',
-                  selectionDeadlines: []
-                });
-                setWeeklyItems([]);
-              }}
-              className="flex items-center gap-2 bg-rose-600 hover:bg-rose-700 text-white px-4 py-2 rounded-lg transition"
-            >
-              <Plus size={20} />
-              Create Bodybuilder Menu
+              <Plus size={18} />
+              New menu
             </button>
           </div>
         </div>
 
         {/* Error Message */}
         {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 flex gap-3">
-            <AlertCircle className="text-red-600 flex-shrink-0" size={20} />
-            <p className="text-red-700">{error}</p>
+          <div className="bg-matter-red/10 border border-matter-red/30 rounded-lg p-4 mb-6 flex gap-3">
+            <AlertCircle className="text-matter-red flex-shrink-0" size={20} />
+            <p className="text-matter-red">{error}</p>
           </div>
         )}
 
-        {/* Create Form */}
+        {/* Create/Edit Form */}
         {showCreateForm && (
-          <div className="bg-white rounded-lg shadow-lg p-6 mb-8">
-            <h2 className="text-2xl font-bold text-gray-900 mb-6">Create New Menu</h2>
-            <form onSubmit={handleCreateMenu} className="space-y-4">
-              {isBodybuilderMode && (
-                <div className="bg-rose-50 border border-rose-200 rounded-lg px-4 py-3">
-                  <p className="font-semibold text-rose-800">Bodybuilder Menu Mode</p>
-                  <p className="text-sm text-rose-700">This menu skips Excel upload and uses manual ingredient inputs: Protein, Vegetables, Carbs, Sauces.</p>
+          <div className="mb-8 pb-28">
+            <button
+              type="button"
+              onClick={closeCreateForm}
+              className="text-matter-accent-700 hover:text-matter-accent-800 text-sm font-semibold mb-3"
+            >
+              ← Back to menus
+            </button>
+            <h1 className="font-heading-menu text-3xl font-bold text-matter-navy mb-2">
+              {editingMenuId ? (formData.title || 'Edit weekly menu') : 'New weekly menu'}
+            </h1>
+            <p className="text-matter-neutral-700 text-base max-w-[52ch] mb-6">
+              Seven days, one link. Add the meals for each day, then publish when it's ready.
+            </p>
+
+            <form onSubmit={(e) => e.preventDefault()} className="space-y-6">
+              <div className="bg-white rounded-2xl border border-matter-neutral-300 p-6">
+                <h6 className="text-xs font-semibold text-matter-neutral-600 uppercase tracking-wide mb-4">Menu details</h6>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <input
+                    type="text"
+                    placeholder="Menu Title"
+                    value={formData.title}
+                    onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                    required
+                    className="px-4 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Description"
+                    value={formData.description}
+                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                    className="px-4 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky"
+                  />
+                  <input
+                    type="date"
+                    value={formData.startDate}
+                    onChange={(e) => setFormData({ ...formData, startDate: e.target.value })}
+                    required
+                    className="px-4 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky"
+                  />
+                  <input
+                    type="date"
+                    value={formData.endDate}
+                    onChange={(e) => setFormData({ ...formData, endDate: e.target.value })}
+                    required
+                    className="px-4 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky"
+                  />
                 </div>
-              )}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <input
-                  type="text"
-                  placeholder="Menu Title"
-                  value={formData.title}
-                  onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                  required
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                />
-                <input
-                  type="text"
-                  placeholder="Description"
-                  value={formData.description}
-                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                />
-                <input
-                  type="date"
-                  value={formData.startDate}
-                  onChange={(e) => setFormData({ ...formData, startDate: e.target.value })}
-                  required
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                />
-                <input
-                  type="date"
-                  value={formData.endDate}
-                  onChange={(e) => setFormData({ ...formData, endDate: e.target.value })}
-                  required
-                  className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
-                />
               </div>
 
-              {!isBodybuilderMode && (
-              <div className="border border-dashed border-gray-300 rounded-lg p-4 bg-gray-50">
+              <div className="border border-dashed border-matter-neutral-300 rounded-lg p-4 bg-matter-neutral-100">
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
-                    <p className="font-semibold text-gray-900">Upload Menu (Excel)</p>
-                    <p className="text-xs text-gray-500">
+                    <p className="font-semibold text-matter-navy">Upload Menu (Excel)</p>
+                    <p className="text-xs text-matter-neutral-600">
                       Columns: CATEGORY, INTOLERANCES, DAY (1/2/3), GARNISH, MEAL NAME, CARB, VEG, SAUCE.
                     </p>
                   </div>
@@ -1534,11 +1541,11 @@ const MenuManagement = () => {
                     <button
                       type="button"
                       onClick={handleDownloadMenuTemplate}
-                      className="px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg hover:bg-gray-100"
+                      className="px-3 py-2 text-sm bg-white border border-matter-neutral-300 rounded-lg hover:bg-matter-neutral-200"
                     >
                       Download Template
                     </button>
-                    <label className="px-3 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 cursor-pointer flex items-center gap-2">
+                    <label className="px-3 py-2 text-sm bg-matter-navy text-white rounded-lg hover:bg-matter-blueblack cursor-pointer flex items-center gap-2">
                       <Upload size={16} />
                       {isUploadingMenu ? 'Uploading...' : 'Upload Excel'}
                       <input
@@ -1555,12 +1562,11 @@ const MenuManagement = () => {
                   <p className="text-sm text-red-600 mt-2">{uploadError}</p>
                 )}
               </div>
-              )}
 
               {/* Completion Message Section */}
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
+              <div className="bg-matter-accent-100 border border-matter-accent-300 rounded-lg p-4 space-y-3">
                 <div className="flex items-center justify-between">
-                  <label className="font-semibold text-gray-900">Completion Message for Customers</label>
+                  <label className="font-semibold text-matter-navy">Completion Message for Customers</label>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
@@ -1568,7 +1574,7 @@ const MenuManagement = () => {
                       onChange={(e) => setFormData({ ...formData, enableCompletionMessage: e.target.checked })}
                       className="w-4 h-4 rounded"
                     />
-                    <span className="text-sm text-gray-700">Enable custom message</span>
+                    <span className="text-sm text-matter-neutral-800">Enable custom message</span>
                   </label>
                 </div>
                 {formData.enableCompletionMessage && (
@@ -1576,18 +1582,18 @@ const MenuManagement = () => {
                     placeholder="Enter a message to show customers after they complete their selections..."
                     value={formData.completionMessage}
                     onChange={(e) => setFormData({ ...formData, completionMessage: e.target.value })}
-                    className="w-full px-4 py-2 border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500 resize-y"
+                    className="w-full px-4 py-2 border border-matter-accent-300 rounded-lg focus:ring-2 focus:ring-matter-sky resize-y"
                     rows={3}
                   />
                 )}
               </div>
 
               {/* Selection Deadlines Section */}
-              <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 space-y-3">
+              <div className="bg-matter-neutral-200 border border-matter-neutral-300 rounded-lg p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <label className="font-semibold text-gray-900">Selection Deadlines</label>
-                    <p className="text-xs text-gray-500 mt-0.5">
+                    <label className="font-semibold text-matter-navy">Selection Deadlines</label>
+                    <p className="text-xs text-matter-neutral-600 mt-0.5">
                       Set a cutoff: after this deadline customers can no longer edit meals for that day.
                       E.g. Monday delivery → locked Friday at 23:59 (3 days before).
                     </p>
@@ -1603,20 +1609,20 @@ const MenuManagement = () => {
                         ]
                       });
                     }}
-                    className="flex-shrink-0 px-3 py-1.5 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600"
+                    className="flex-shrink-0 px-3 py-1.5 bg-matter-accent-600 text-white text-sm rounded-lg hover:opacity-90"
                   >
                     + Add Rule
                   </button>
                 </div>
 
                 {formData.selectionDeadlines.length === 0 && (
-                  <p className="text-sm text-gray-400 italic">No deadlines set — customers can edit anytime.</p>
+                  <p className="text-sm text-matter-neutral-500 italic">No deadlines set — customers can edit anytime.</p>
                 )}
 
                 {formData.selectionDeadlines.map((rule, idx) => (
-                  <div key={idx} className="flex flex-wrap items-center gap-3 bg-white border border-orange-200 rounded-lg p-3">
+                  <div key={idx} className="flex flex-wrap items-center gap-3 bg-white border border-matter-neutral-300 rounded-lg p-3">
                     <div className="flex flex-col gap-0.5">
-                      <label className="text-xs text-gray-500">Delivery Day</label>
+                      <label className="text-xs text-matter-neutral-600">Delivery Day</label>
                       <select
                         value={rule.deliveryDay}
                         onChange={(e) => {
@@ -1624,7 +1630,7 @@ const MenuManagement = () => {
                           updated[idx] = { ...updated[idx], deliveryDay: e.target.value };
                           setFormData({ ...formData, selectionDeadlines: updated });
                         }}
-                        className="px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-orange-400"
+                        className="px-2 py-1 border border-matter-neutral-300 rounded text-sm focus:ring-2 focus:ring-matter-accent-500"
                       >
                         {['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map(d => (
                           <option key={d} value={d}>{d}</option>
@@ -1633,7 +1639,7 @@ const MenuManagement = () => {
                     </div>
 
                     <div className="flex flex-col gap-0.5">
-                      <label className="text-xs text-gray-500">Lock N days before</label>
+                      <label className="text-xs text-matter-neutral-600">Lock N days before</label>
                       <input
                         type="number"
                         min={0}
@@ -1644,12 +1650,12 @@ const MenuManagement = () => {
                           updated[idx] = { ...updated[idx], daysBefore: Number(e.target.value) };
                           setFormData({ ...formData, selectionDeadlines: updated });
                         }}
-                        className="w-20 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-orange-400"
+                        className="w-20 px-2 py-1 border border-matter-neutral-300 rounded text-sm focus:ring-2 focus:ring-matter-accent-500"
                       />
                     </div>
 
                     <div className="flex flex-col gap-0.5">
-                      <label className="text-xs text-gray-500">Deadline Time</label>
+                      <label className="text-xs text-matter-neutral-600">Deadline Time</label>
                       <input
                         type="time"
                         value={rule.deadlineTime}
@@ -1658,13 +1664,13 @@ const MenuManagement = () => {
                           updated[idx] = { ...updated[idx], deadlineTime: e.target.value };
                           setFormData({ ...formData, selectionDeadlines: updated });
                         }}
-                        className="px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-orange-400"
+                        className="px-2 py-1 border border-matter-neutral-300 rounded text-sm focus:ring-2 focus:ring-matter-accent-500"
                       />
                     </div>
 
                     <div className="flex flex-col gap-0.5 flex-1 min-w-[140px]">
-                      <label className="text-xs text-gray-500">Summary</label>
-                      <span className="text-xs text-orange-700 font-medium">
+                      <label className="text-xs text-matter-neutral-600">Summary</label>
+                      <span className="text-xs text-matter-neutral-800 font-medium">
                         {rule.deliveryDay} → locked {rule.daysBefore} day{rule.daysBefore !== 1 ? 's' : ''} before at {rule.deadlineTime}
                       </span>
                     </div>
@@ -1683,431 +1689,455 @@ const MenuManagement = () => {
                 ))}
               </div>
 
-              {weeklyItems.length > 0 && (
-                <div className="mt-6 space-y-6">
-                  <h3 className="text-lg font-semibold text-gray-900">Weekly Menu Items</h3>
-                  <p className="text-sm text-gray-600">
-                    {isBodybuilderMode
-                      ? 'Add items one time. The same ingredient options will be used for all days: Protein, Vegetables, Carbs, Sauces.'
-                      : 'Add meals for each day (Category, Intolerances, Garnish, Meal Name, CARB, VEG, SAUCE).'}
-                  </p>
+              {weeklyItems.length > 0 && (() => {
+                const editingItem = editingSlot ? weeklyItems[editingSlot.dayIndex]?.items[editingSlot.itemIndex] : null;
+                const updateEditingField = (field, value) => {
+                  if (!editingSlot) return;
+                  handleWeeklyItemChange(editingSlot.dayIndex, editingSlot.itemIndex, field, value);
+                };
+                const editingAllergens = (editingItem?.allergens || '').split(',').map((s) => s.trim()).filter(Boolean);
+                const toggleAllergen = (label) => {
+                  const next = editingAllergens.includes(label)
+                    ? editingAllergens.filter((a) => a !== label)
+                    : [...editingAllergens, label];
+                  updateEditingField('allergens', next.join(', '));
+                };
+                const dayLabel = (dateKey) => {
+                  const [y, m, d] = String(dateKey).split('-').map(Number);
+                  if (!y || !m || !d) return { weekday: '', date: dateKey };
+                  const dt = new Date(y, m - 1, d);
+                  return {
+                    weekday: dt.toLocaleDateString('en-US', { weekday: 'short' }),
+                    date: `${d} ${dt.toLocaleDateString('en-US', { month: 'short' })}`
+                  };
+                };
 
-                  {(isBodybuilderMode ? weeklyItems.slice(0, 1) : weeklyItems).map((day, dayIndex) => (
-                    <div key={day.date} className="border border-gray-200 rounded-lg p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="font-semibold text-gray-900">{isBodybuilderMode ? 'All Days' : day.date}</div>
-                        <button
-                          type="button"
-                          onClick={() => handleAddItemForDay(dayIndex)}
-                          className="text-indigo-600 text-sm font-medium hover:text-indigo-700"
-                        >
-                          {isBodybuilderMode ? '+ Add Item' : '+ Add Meal'}
-                        </button>
-                      </div>
+                return (
+                  <div className="space-y-3">
+                    <div className="flex items-baseline justify-between gap-4">
+                      <h4 className="font-heading-menu text-lg font-bold text-matter-navy">The week</h4>
+                      <span className="text-xs text-matter-neutral-600">
+                        {weeklyItems.reduce((s, d) => s + d.items.length, 0)} meals across {weeklyItems.length} day{weeklyItems.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
 
-                      <div className="space-y-4">
-                        {day.items.map((item, itemIndex) => (
-                          <div key={`${day.date}-${itemIndex}`} className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-4">
-                            {/* Row 1: Meal Type, Price, and Meal Name (prominent) */}
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                              <div className="flex gap-3">
-                                <div className="flex-1">
-                                  <label className="block text-sm font-semibold text-gray-700 mb-2">Meal Type</label>
-                                  <select
-                                    value={item.mealType}
-                                    onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'mealType', e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-semibold"
+                    <div className="overflow-x-auto pb-2">
+                      <div className="grid gap-2.5" style={{ gridTemplateColumns: `repeat(${weeklyItems.length}, minmax(160px, 1fr))`, minWidth: `${weeklyItems.length * 170}px` }}>
+                        {weeklyItems.map((day, dayIndex) => {
+                          const { weekday, date } = dayLabel(day.date);
+                          return (
+                            <div key={day.date} className={`flex flex-col gap-2 rounded-2xl p-2.5 ${day.items.length ? 'bg-matter-neutral-100' : 'bg-transparent'}`}>
+                              <div className="px-1 pb-1">
+                                <div className="font-heading-menu text-sm text-matter-navy">{weekday}</div>
+                                <div className="text-[11px] text-matter-neutral-600 mt-0.5">{date}</div>
+                              </div>
+
+                              {day.items.map((item, itemIndex) => {
+                                const isOpen = editingSlot?.dayIndex === dayIndex && editingSlot?.itemIndex === itemIndex;
+                                const itemAllergens = (item.allergens || '').split(',').map((s) => s.trim()).filter(Boolean);
+                                return (
+                                  <div
+                                    key={itemIndex}
+                                    onClick={() => setEditingSlot({ dayIndex, itemIndex })}
+                                    className={`cursor-pointer bg-white rounded-lg p-2.5 border-[1.5px] transition-colors ${isOpen ? 'border-matter-accent' : 'border-matter-neutral-300 hover:border-matter-accent-400'}`}
                                   >
-                                    <option value="breakfast">Breakfast</option>
-                                    <option value="lunch">Lunch</option>
-                                    <option value="dinner">Dinner</option>
-                                    <option value="snack">Snack</option>
-                                  </select>
-                                </div>
-                                <div className="w-28">
-                                  <label className="block text-sm font-semibold text-gray-700 mb-2">Price (AED)</label>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    step="0.01"
-                                    value={item.price ?? 0}
-                                    onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'price', Number(e.target.value))}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-semibold"
-                                    placeholder="0.00"
-                                  />
-                                </div>
-                              </div>
-                              <div className="md:col-span-2">
-                                {isBodybuilderMode ? (
-                                  <div className="h-full rounded-lg border border-dashed border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700 flex items-center">
-                                    No meal name needed. It will be generated from ingredients.
+                                    <div className="text-[9.5px] uppercase tracking-wide text-matter-accent-700 mb-1">{item.mealType || 'lunch'}</div>
+                                    <div className="text-xs font-semibold text-matter-navy leading-snug">{item.mealName || 'Untitled meal'}</div>
+                                    {(item.carbs || item.veg) && (
+                                      <div className="text-[10.5px] text-matter-neutral-600 mt-1">
+                                        {[item.carbs, item.veg].filter(Boolean).join(' · ')}
+                                      </div>
+                                    )}
+                                    {(itemAllergens.length > 0 || item.intolerances) && (
+                                      <div className="flex flex-wrap gap-1 mt-1.5">
+                                        {itemAllergens.map((a) => (
+                                          <span key={a} className="text-[9.5px] px-1.5 py-0.5 rounded bg-matter-accent-100 text-matter-accent-800">{a}</span>
+                                        ))}
+                                        {item.intolerances && (
+                                          <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-matter-accent2-100 text-matter-accent2-800">Exclusions</span>
+                                        )}
+                                      </div>
+                                    )}
                                   </div>
-                                ) : (
-                                  <>
-                                    <label className="block text-sm font-semibold text-gray-700 mb-2">Meal Name</label>
-                                    <input
-                                      type="text"
-                                      value={item.mealName}
-                                      onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'mealName', e.target.value)}
-                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 font-semibold text-lg"
-                                      placeholder="Enter meal name"
-                                      required
-                                    />
-                                  </>
-                                )}
-                              </div>
-                            </div>
+                                );
+                              })}
 
-                            {/* Row 2: Intolerances + Allergens (prominent) */}
-                            {!isBodybuilderMode && (
-                            <div className="space-y-3">
-                              <div>
-                                <label className="block text-sm font-semibold text-gray-700 mb-2">Intolerances / Exclusions</label>
-                                <textarea
-                                  rows={3}
-                                  value={item.intolerances}
-                                  onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'intolerances', e.target.value)}
-                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-y font-semibold"
-                                  placeholder="Enter any intolerances or exclusions (comma-separated)"
-                                />
-                                <p className="text-xs text-gray-500 mt-1">Soft warning — customer can acknowledge and still select the meal.</p>
-                              </div>
-                              <div>
-                                <label className="block text-sm font-semibold text-red-700 mb-2">⛔ Allergens (Hard Block)</label>
-                                <textarea
-                                  rows={3}
-                                  value={item.allergens}
-                                  onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'allergens', e.target.value)}
-                                  className="w-full px-3 py-2 border border-red-300 rounded-lg focus:ring-2 focus:ring-red-500 resize-y font-semibold"
-                                  placeholder="e.g. gluten, dairy, peanuts (comma-separated)"
-                                />
-                                <p className="text-xs text-red-500 mt-1">Hard block — if a customer's allergies match any allergen, carb, or veg in this meal, the meal is completely blocked for them.</p>
-                              </div>
-                            </div>
-                            )}
-
-                            {/* Row 3: Ingredients, Carbs, Veg */}
-                            {isBodybuilderMode ? (
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div>
-                                  <label className="block text-sm font-semibold text-gray-700 mb-2">Protein</label>
-                                  <textarea
-                                    rows={3}
-                                    value={item.proteinSource}
-                                    onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'proteinSource', e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-y"
-                                    placeholder="e.g. Chicken breast, Salmon, Tofu"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-sm font-semibold text-gray-700 mb-2">Vegetables</label>
-                                  <textarea
-                                    rows={3}
-                                    value={item.veg}
-                                    onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'veg', e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-y"
-                                    placeholder="e.g. Broccoli, Spinach, Zucchini"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-sm font-semibold text-gray-700 mb-2">Carbs</label>
-                                  <textarea
-                                    rows={3}
-                                    value={item.carbs}
-                                    onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'carbs', e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-y"
-                                    placeholder="e.g. Rice, Sweet potato, Quinoa"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="block text-sm font-semibold text-gray-700 mb-2">Sauces</label>
-                                  <textarea
-                                    rows={3}
-                                    value={item.sauce}
-                                    onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'sauce', e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-y"
-                                    placeholder="e.g. Tahini, Pesto, Teriyaki"
-                                  />
-                                </div>
-                              </div>
-                            ) : (
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                              <div>
-                                <label className="block text-sm font-semibold text-gray-700 mb-2">Ingredients</label>
-                                <textarea
-                                  rows={3}
-                                  value={item.ingredients}
-                                  onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'ingredients', e.target.value)}
-                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-y"
-                                  placeholder="List ingredients"
-                                />
-                              </div>
-                              <div>
-                                <label className="block text-sm font-semibold text-gray-700 mb-2">CARB</label>
-                                <textarea
-                                  rows={3}
-                                  value={item.carbs}
-                                  onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'carbs', e.target.value)}
-                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-y"
-                                  placeholder="Carb type"
-                                />
-                              </div>
-                              <div>
-                                <label className="block text-sm font-semibold text-gray-700 mb-2">VEG</label>
-                                <textarea
-                                  rows={3}
-                                  value={item.veg}
-                                  onChange={(e) => handleWeeklyItemChange(dayIndex, itemIndex, 'veg', e.target.value)}
-                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 resize-y"
-                                  placeholder="Vegetables"
-                                />
-                              </div>
-                            </div>
-                            )}
-
-                            {/* Remove Button */}
-                            <div className="flex justify-end pt-2">
                               <button
                                 type="button"
-                                onClick={() => handleRemoveItemForDay(dayIndex, itemIndex)}
-                                className="bg-red-50 hover:bg-red-100 text-red-600 font-semibold py-2 px-4 rounded-lg transition text-sm"
+                                onClick={() => handleAddItemForDay(dayIndex)}
+                                className="text-xs border border-dashed border-matter-neutral-400 text-matter-neutral-700 rounded-lg py-2 hover:bg-matter-neutral-200 transition-colors"
                               >
-                                Remove Meal
+                                + Meal
                               </button>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
-                  ))}
-                </div>
-              )}
 
-              <div className="flex gap-4">
-                <button
-                  type="submit"
-                  className="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-2 rounded-lg transition"
-                >
-                  {editingMenuId ? 'Save Changes' : 'Create Menu'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowCreateForm(false);
-                    setEditingMenuId(null);
-                    setIsBodybuilderMode(false);
-                    setFormData({
-                      title: '',
-                      description: '',
-                      startDate: '',
-                      endDate: '',
-                      mealPlans: ['Standard'],
-                      enableCompletionMessage: false,
-                      completionMessage: 'Your meal selections have been saved successfully.',
-                      selectionDeadlines: []
-                    });
-                    setWeeklyItems([]);
-                  }}
-                  className="flex-1 border border-gray-300 text-gray-700 font-semibold py-2 rounded-lg hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
+                    {editingItem && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setEditingSlot(null)} />
+                        <div className="fixed top-0 right-0 bottom-0 w-full sm:w-[420px] z-50 overflow-y-auto bg-white border-l border-matter-neutral-300 shadow-2xl p-6">
+                          <div className="flex items-center justify-between gap-3 mb-1.5">
+                            <h6 className="text-xs font-semibold text-matter-neutral-600 uppercase tracking-wide">Editing meal</h6>
+                            <button type="button" onClick={() => setEditingSlot(null)} className="text-matter-accent-700 hover:text-matter-accent-800 text-sm font-semibold">
+                              Close
+                            </button>
+                          </div>
+                          <h4 className="font-heading-menu text-xl font-bold text-matter-navy mb-5">{editingItem.mealName || 'New meal'}</h4>
+
+                          <div className="flex flex-col gap-4">
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Meal type</label>
+                                <select
+                                  value={editingItem.mealType}
+                                  onChange={(e) => updateEditingField('mealType', e.target.value)}
+                                  className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
+                                >
+                                  <option value="breakfast">Breakfast</option>
+                                  <option value="lunch">Lunch</option>
+                                  <option value="dinner">Dinner</option>
+                                  <option value="snack">Snack</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Price (AED)</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={editingItem.price ?? 0}
+                                  onChange={(e) => updateEditingField('price', Number(e.target.value))}
+                                  className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
+                                />
+                              </div>
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Meal name</label>
+                              <input
+                                type="text"
+                                value={editingItem.mealName}
+                                onChange={(e) => updateEditingField('mealName', e.target.value)}
+                                className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
+                                placeholder="Grilled lemon chicken"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Ingredients</label>
+                              <textarea
+                                rows={3}
+                                value={editingItem.ingredients}
+                                onChange={(e) => updateEditingField('ingredients', e.target.value)}
+                                className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm resize-y"
+                                placeholder="Chicken breast, lemon, garlic, olive oil, thyme"
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">CARB</label>
+                                <input
+                                  type="text"
+                                  value={editingItem.carbs}
+                                  onChange={(e) => updateEditingField('carbs', e.target.value)}
+                                  className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
+                                  placeholder="Basmati rice 120g"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">VEG</label>
+                                <input
+                                  type="text"
+                                  value={editingItem.veg}
+                                  onChange={(e) => updateEditingField('veg', e.target.value)}
+                                  className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
+                                  placeholder="Broccoli, carrots"
+                                />
+                              </div>
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Allergens (hard block)</label>
+                              <div className="flex flex-wrap gap-1.5">
+                                {ALLERGEN_OPTIONS.map((label) => {
+                                  const on = editingAllergens.includes(label);
+                                  return (
+                                    <button
+                                      type="button"
+                                      key={label}
+                                      onClick={() => toggleAllergen(label)}
+                                      className={`text-xs px-3 py-1 rounded-full border transition-colors ${on ? 'bg-matter-accent-700 border-matter-accent-700 text-white' : 'bg-transparent border-matter-neutral-300 text-matter-neutral-800 hover:border-matter-accent-400'}`}
+                                    >
+                                      {label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <p className="text-[11px] text-matter-neutral-600 mt-1.5">If a customer's allergies match any of these, this meal is completely blocked for them.</p>
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Intolerances / exclusions</label>
+                              <textarea
+                                rows={2}
+                                value={editingItem.intolerances}
+                                onChange={(e) => updateEditingField('intolerances', e.target.value)}
+                                className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm resize-y"
+                                placeholder="e.g. dairy, gluten free flour, tahina (comma-separated)"
+                              />
+                              <p className="text-[11px] text-matter-neutral-600 mt-1.5">Soft warning — the customer can acknowledge and still pick the meal.</p>
+                            </div>
+                          </div>
+
+                          <div className="flex gap-2 mt-6 pt-5 border-t border-matter-navy/15">
+                            <button
+                              type="button"
+                              onClick={() => handleDuplicateItem(editingSlot.dayIndex, editingSlot.itemIndex)}
+                              className="px-3 py-2 text-sm border border-matter-neutral-300 rounded-lg text-matter-neutral-800 hover:bg-matter-neutral-100"
+                            >
+                              Duplicate
+                            </button>
+                            <div className="flex-1" />
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveItemForDay(editingSlot.dayIndex, editingSlot.itemIndex)}
+                              className="px-3 py-2 text-sm text-matter-red hover:opacity-80"
+                            >
+                              Remove meal
+                            </button>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
+              <div className="sticky bottom-0 -mx-6 mt-8 px-6 py-4 bg-white border-t border-matter-neutral-300 flex items-center justify-between gap-4">
+                <span className="text-xs text-matter-neutral-600 hidden sm:block">
+                  {weeklyItems.reduce((s, d) => s + d.items.length, 0)} meal{weeklyItems.reduce((s, d) => s + d.items.length, 0) !== 1 ? 's' : ''} planned
+                  {formData.selectionDeadlines?.length ? ` · ${formData.selectionDeadlines.length} deadline${formData.selectionDeadlines.length !== 1 ? 's' : ''} set` : ''}
+                </span>
+                <div className="flex gap-3 ml-auto">
+                  <button
+                    type="button"
+                    onClick={closeCreateForm}
+                    className="px-5 py-2 border border-matter-neutral-300 text-matter-neutral-800 font-semibold rounded-lg hover:bg-matter-neutral-100 transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveMenu({ publish: false })}
+                    className="px-5 py-2 border border-matter-accent-700 text-matter-accent-700 font-semibold rounded-lg hover:bg-matter-accent-100 transition"
+                  >
+                    Save draft
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveMenu({ publish: true })}
+                    className="px-5 py-2 bg-matter-green hover:opacity-90 text-matter-navy font-semibold rounded-lg transition"
+                  >
+                    Publish &amp; copy link
+                  </button>
+                </div>
               </div>
             </form>
           </div>
         )}
 
         {/* Menus List */}
-        <div className="space-y-4">
-          {menus.length === 0 ? (
-            <div className="bg-white rounded-lg shadow p-8 text-center">
-              <Calendar className="mx-auto text-gray-400 mb-3" size={48} />
-              <p className="text-gray-600">No menus yet. Create one to get started!</p>
-            </div>
-          ) : (
-            menus.map((menu) => (
+        {(() => {
+          const visibleMenus = statusFilter === 'All' ? menus : menus.filter((m) => getMenuStatus(m) === statusFilter);
+          if (menus.length === 0) {
+            return (
+              <div className="bg-white rounded-2xl border border-dashed border-matter-neutral-400 p-16 text-center">
+                <Calendar className="mx-auto text-matter-neutral-400 mb-3" size={48} />
+                <p className="text-matter-neutral-600">No menus yet. Create one to get started!</p>
+              </div>
+            );
+          }
+          if (visibleMenus.length === 0) {
+            return (
+              <div className="bg-white rounded-2xl border border-dashed border-matter-neutral-400 p-16 text-center">
+                <h3 className="font-heading-menu text-lg font-bold text-matter-navy mb-1">Nothing on this shelf</h3>
+                <p className="text-matter-neutral-600 text-sm">No menus match this filter.</p>
+              </div>
+            );
+          }
+          return (
+        <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(378px, 1fr))' }}>
+          {visibleMenus.map((menu) => {
+            const status = getMenuStatus(menu);
+            const dayStrip = getMenuDayStrip(menu);
+            return (
               <div
                 key={menu._id}
-                className="bg-white rounded-lg shadow-lg p-6 hover:shadow-xl transition"
+                className="bg-white rounded-2xl border border-matter-neutral-300 p-6"
               >
-                <div className="flex justify-between items-start mb-4">
-                  <div>
-                    <h3 className="text-xl font-bold text-gray-900">{menu.title}</h3>
-                    {menu.description && (
-                      <p className="text-gray-600 text-sm mt-1">{menu.description}</p>
-                    )}
-                    {Array.isArray(menu.mealPlans) && menu.mealPlans.includes('Bodybuilder') && (
-                      <span className="inline-flex mt-2 bg-rose-100 text-rose-700 px-2.5 py-1 rounded-full text-xs font-semibold">
-                        Bodybuilder
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex gap-2">
-                    {menu.isPublished ? (
-                      <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-sm font-semibold flex items-center gap-1">
-                        <Check size={16} />
-                        Published
-                      </span>
-                    ) : (
-                      <span className="bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full text-sm font-semibold">
-                        Draft
-                      </span>
-                    )}
-                    {menu.isPublished && (
-                      <span className={`px-3 py-1 rounded-full text-sm font-semibold ${menu.shareLink?.isActive === false ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
-                        {menu.shareLink?.isActive === false ? 'Link Expired' : 'Link Active'}
-                      </span>
-                    )}
-                  </div>
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${MENU_STATUS_STYLE[status]}`}>
+                    {status}
+                  </span>
+                  <span className="text-xs text-matter-neutral-500 font-mono tabular-nums">{String(menu._id).slice(-6).toUpperCase()}</span>
                 </div>
 
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 p-4 bg-gray-50 rounded-lg">
+                <h3 className="font-heading-menu text-xl font-bold text-matter-navy mb-1">{menu.title}</h3>
+                <p className="text-matter-neutral-600 text-sm mb-1">
+                  {menu.startDate ? new Date(menu.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''}
+                  {' — '}
+                  {menu.endDate ? new Date(menu.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
+                </p>
+                {menu.description && <p className="text-matter-neutral-600 text-sm mb-3 line-clamp-1">{menu.description}</p>}
+
+                <div className="flex gap-1 mb-5">
+                  {dayStrip.map((d, i) => (
+                    <div
+                      key={i}
+                      className={`flex-1 text-center py-1.5 rounded-md ${d.count ? 'bg-matter-accent2-200 text-matter-accent2-800' : 'bg-matter-neutral-200 text-matter-neutral-500'}`}
+                    >
+                      <div className="text-[10px] uppercase tracking-wide opacity-75">{d.label}</div>
+                      <div className="text-[13px] tabular-nums mt-0.5">{d.count}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-end gap-6 pt-4 border-t border-matter-navy/15 mb-4">
                   <div>
-                    <p className="text-gray-600 text-sm">Start Date</p>
-                    <p className="font-semibold">
-                      {new Date(menu.startDate).toLocaleDateString()}
-                    </p>
+                    <div className="font-heading-menu text-2xl font-bold text-matter-navy tabular-nums">{menu.selectionCount || 0}</div>
+                    <h6 className="text-[11px] text-matter-neutral-500 uppercase tracking-wide mt-1.5">Selections</h6>
                   </div>
                   <div>
-                    <p className="text-gray-600 text-sm">End Date</p>
-                    <p className="font-semibold">
-                      {new Date(menu.endDate).toLocaleDateString()}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-gray-600 text-sm">Views</p>
-                    <p className="font-semibold flex items-center gap-1">
+                    <div className="font-heading-menu text-2xl font-bold text-matter-neutral-500 tabular-nums flex items-center gap-1.5">
                       <Eye size={16} />
-                      {menu.viewCount}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-gray-600 text-sm">Selections</p>
-                    <p className="font-semibold flex items-center gap-1">
-                      <Users size={16} />
-                      {menu.selectionCount}
-                    </p>
+                      {menu.viewCount || 0}
+                    </div>
+                    <h6 className="text-[11px] text-matter-neutral-500 uppercase tracking-wide mt-1.5">Link opens</h6>
                   </div>
                 </div>
 
-                <div className="flex gap-3 flex-wrap">
+                <div className="flex flex-wrap items-center gap-1.5 pt-4 border-t border-matter-navy/15">
                   <button
                     onClick={() => handleEditMenu(menu._id)}
-                    className="flex items-center gap-2 bg-amber-100 text-amber-700 hover:bg-amber-200 px-4 py-2 rounded-lg transition text-sm"
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-matter-neutral-100 text-matter-neutral-800 hover:bg-matter-neutral-200 transition"
                   >
-                    <Edit size={16} />
-                    Edit Menu
-                  </button>
-
-                  {!menu.isPublished && (
-                    <button
-                      onClick={() => handlePublishMenu(menu._id)}
-                      className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition text-sm"
-                    >
-                      <Check size={16} />
-                      Publish
-                    </button>
-                  )}
-
-                  {menu.isPublished && (
-                    <button
-                      onClick={() => copyShareLink(menu._id)}
-                      disabled={menu.shareLink?.isActive === false}
-                      className={`flex items-center gap-2 px-4 py-2 rounded-lg transition text-sm ${
-                        copiedLink === menu._id
-                          ? 'bg-green-100 text-green-700'
-                          : menu.shareLink?.isActive === false
-                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                      }`}
-                    >
-                      {copiedLink === menu._id ? (
-                        <>
-                          <Check size={16} />
-                          Copied!
-                        </>
-                      ) : (
-                        <>
-                          <Copy size={16} />
-                          Copy Link
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {menu.isPublished && (
-                    <button
-                      onClick={() => handleToggleShareLink(menu._id, menu.shareLink?.isActive !== false)}
-                      className={`flex items-center gap-2 px-4 py-2 rounded-lg transition text-sm ${menu.shareLink?.isActive === false ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-orange-100 text-orange-700 hover:bg-orange-200'}`}
-                    >
-                      <LinkIcon size={16} />
-                      {menu.shareLink?.isActive === false ? 'Enable Link' : 'Stop Link'}
-                    </button>
-                  )}
-
-                  {menu.shareLink?.isActive === false ? (
-                    <span className="flex items-center gap-2 bg-gray-100 text-gray-400 px-4 py-2 rounded-lg text-sm cursor-not-allowed">
-                      <ExternalLink size={16} />
-                      Preview
-                    </span>
-                  ) : (
-                    <a
-                      href={`/menu-select/${menu.shareLink?.token}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-2 bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 py-2 rounded-lg transition text-sm"
-                    >
-                      <ExternalLink size={16} />
-                      Preview
-                    </a>
-                  )}
-
-                  <button
-                    onClick={() => handleDownloadMenuPDF(menu)}
-                    disabled={isDownloadingMenuPDF}
-                    className="flex items-center gap-2 bg-slate-100 text-slate-700 hover:bg-slate-200 px-4 py-2 rounded-lg transition text-sm disabled:opacity-50"
-                  >
-                    {isDownloadingMenuPDF ? (
-                      <Loader size={16} className="animate-spin" />
-                    ) : (
-                      <FileText size={16} />
-                    )}
-                    {isDownloadingMenuPDF ? 'Downloading...' : 'Menu PDF'}
-                  </button>
-
-                  <button
-                    onClick={() => handleDeleteMenu(menu._id)}
-                    className="flex items-center gap-2 bg-red-100 text-red-700 hover:bg-red-200 px-4 py-2 rounded-lg transition text-sm"
-                  >
-                    <Trash2 size={16} />
-                    Delete
+                    Edit
                   </button>
 
                   <button
                     onClick={() => handleViewSelections(menu._id)}
-                    className="flex items-center gap-2 bg-purple-100 text-purple-700 hover:bg-purple-200 px-4 py-2 rounded-lg transition text-sm"
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${selectionMenuId === menu._id ? 'bg-matter-navy text-white' : 'bg-matter-neutral-100 text-matter-neutral-800 hover:bg-matter-neutral-200'}`}
                   >
-                    <Users size={16} />
-                    {selectionMenuId === menu._id ? 'Hide Selections' : 'View Selections'}
+                    {selectionMenuId === menu._id ? 'Hide selections' : 'View selections'}
                   </button>
+
+                  {menu.isPublished ? (
+                    <button
+                      onClick={() => copyShareLink(menu._id)}
+                      disabled={menu.shareLink?.isActive === false}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                        copiedLink === menu._id
+                          ? 'bg-matter-accent2-300 text-matter-navy'
+                          : menu.shareLink?.isActive === false
+                            ? 'bg-matter-neutral-100 text-matter-neutral-400 cursor-not-allowed'
+                            : 'bg-matter-neutral-100 text-matter-neutral-800 hover:bg-matter-neutral-200'
+                      }`}
+                    >
+                      {copiedLink === menu._id ? 'Copied!' : 'Copy link'}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => handlePublishMenu(menu._id)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-matter-navy text-white hover:bg-matter-blueblack transition"
+                    >
+                      Publish
+                    </button>
+                  )}
+
+                  {menu.shareLink?.isActive !== false && (
+                    <a
+                      href={`/menu-select/${menu.shareLink?.token}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-matter-neutral-100 text-matter-neutral-800 hover:bg-matter-neutral-200 transition"
+                    >
+                      Preview
+                    </a>
+                  )}
+
+                  <div className="flex-1" />
+
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setOpenActionsMenuId(openActionsMenuId === menu._id ? null : menu._id)}
+                      className="w-8 h-8 flex items-center justify-center rounded-lg bg-matter-neutral-100 hover:bg-matter-neutral-200 text-matter-neutral-600 transition"
+                      title="More actions"
+                    >
+                      ⋯
+                    </button>
+                    {openActionsMenuId === menu._id && (
+                      <>
+                        <div className="fixed inset-0 z-10" onClick={() => setOpenActionsMenuId(null)} />
+                        <div className="absolute right-0 top-9 z-20 w-48 bg-white rounded-xl border border-matter-neutral-300 shadow-lg py-1.5">
+                          {menu.isPublished && (
+                            <button
+                              onClick={() => { handleToggleShareLink(menu._id, menu.shareLink?.isActive !== false); setOpenActionsMenuId(null); }}
+                              className="w-full text-left px-3.5 py-2 text-sm text-matter-neutral-800 hover:bg-matter-neutral-100"
+                            >
+                              {menu.shareLink?.isActive === false ? 'Reopen link' : 'Stop link'}
+                            </button>
+                          )}
+                          <button
+                            onClick={() => { handleDownloadMenuPDF(menu); setOpenActionsMenuId(null); }}
+                            disabled={isDownloadingMenuPDF}
+                            className="w-full text-left px-3.5 py-2 text-sm text-matter-neutral-800 hover:bg-matter-neutral-100 disabled:opacity-50"
+                          >
+                            {isDownloadingMenuPDF ? 'Downloading…' : 'Download menu PDF'}
+                          </button>
+                          <div className="my-1 border-t border-matter-neutral-200" />
+                          <button
+                            onClick={() => { setOpenActionsMenuId(null); handleDeleteMenu(menu._id); }}
+                            className="w-full text-left px-3.5 py-2 text-sm text-matter-red hover:bg-matter-red/5"
+                          >
+                            Delete menu
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
 
                 {selectionMenuId === menu._id && (
-                  <div className="mt-6 border-t border-gray-200 pt-4">
+                  <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={() => setSelectionMenuId(null)}>
+                  <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                     <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
-                      <h4 className="text-lg font-semibold text-gray-900">Customer Selections</h4>
-                      <button
-                        onClick={() => handleDownloadSelections(menu)}
-                        disabled={selectionLoading || menuSelections.length === 0}
-                        className="flex items-center gap-2 bg-emerald-100 text-emerald-700 hover:bg-emerald-200 px-3 py-2 rounded-lg transition text-sm disabled:opacity-50"
-                      >
-                        <Download size={16} />
-                        Download Excel
-                      </button>
+                      <h4 className="font-heading-menu text-lg font-bold text-matter-navy">Customer Selections — {menu.title}</h4>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => handleDownloadSelections(menu)}
+                          disabled={selectionLoading || menuSelections.length === 0}
+                          className="flex items-center gap-2 bg-matter-accent2-300 text-matter-navy hover:bg-matter-accent2-400 px-3 py-2 rounded-lg transition text-sm disabled:opacity-50"
+                        >
+                          <Download size={16} />
+                          Download Excel
+                        </button>
+                        <button
+                          onClick={() => setSelectionMenuId(null)}
+                          className="text-matter-neutral-600 hover:text-matter-navy p-2 rounded-lg hover:bg-matter-neutral-100"
+                          title="Close"
+                        >
+                          <X size={18} />
+                        </button>
+                      </div>
                     </div>
 
                     {selectionLoading && (
-                      <div className="flex items-center gap-2 text-gray-600">
+                      <div className="flex items-center gap-2 text-matter-neutral-700">
                         <Loader className="animate-spin" size={16} />
                         Loading selections...
                       </div>
@@ -2120,7 +2150,7 @@ const MenuManagement = () => {
                     )}
 
                     {!selectionLoading && !selectionError && menuSelections.length === 0 && (
-                      <div className="text-gray-500 text-sm">No selections yet.</div>
+                      <div className="text-matter-neutral-600 text-sm">No selections yet.</div>
                     )}
 
                     {menuSelections.length > 0 && (
@@ -2130,7 +2160,7 @@ const MenuManagement = () => {
                           placeholder="Search customers..."
                           value={selectionSearch}
                           onChange={(e) => setSelectionSearch(e.target.value)}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                          className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky focus:border-transparent"
                         />
                       </div>
                     )}
@@ -2149,11 +2179,11 @@ const MenuManagement = () => {
                           <div 
                             key={customer._id} 
                             onClick={() => setSelectedCustomerDetail(customer)}
-                            className="bg-white rounded-lg p-4 border-2 border-gray-200 shadow-sm hover:shadow-md transition-shadow cursor-pointer hover:border-indigo-300"
+                            className="bg-white rounded-lg p-4 border-2 border-matter-neutral-300 shadow-sm hover:shadow-md transition-shadow cursor-pointer hover:border-matter-accent-400"
                           >
                             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
                               <div className="flex items-start gap-3">
-                                <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-full flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
+                                <div className="w-10 h-10 bg-gradient-to-br from-matter-accent-500 to-matter-accent-800 rounded-full flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
                                   {(() => {
                                     const firstName = customer.firstName || '';
                                     const lastName = customer.lastName || '';
@@ -2161,14 +2191,14 @@ const MenuManagement = () => {
                                   })()}
                                 </div>
                                 <div>
-                                  <div className="font-bold text-base text-gray-900">
+                                  <div className="font-bold text-base text-matter-navy">
                                     {`${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Unnamed Customer'}
                                   </div>
-                                  <div className="text-sm text-gray-600">{customer.email || 'No email'}</div>
+                                  <div className="text-sm text-matter-neutral-700">{customer.email || 'No email'}</div>
                                 </div>
                               </div>
                               <div className="flex items-center gap-2">
-                                <div className="bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded-lg text-sm font-semibold">
+                                <div className="bg-matter-accent-200 text-matter-navy px-3 py-1.5 rounded-lg text-sm font-semibold">
                                   {(() => {
                                     // Calculate total meals accounting for quantity
                                     const total = (customer.selectedMeals || []).reduce((sum, meal) => 
@@ -2184,10 +2214,10 @@ const MenuManagement = () => {
                                 </div>
                                 {customer.lastMenuSelectionDate && (
                                   <div className="text-right">
-                                    <div className="text-xs text-gray-500">
+                                    <div className="text-xs text-matter-neutral-600">
                                       {new Date(customer.lastMenuSelectionDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                                     </div>
-                                    <div className="text-xs text-gray-400">
+                                    <div className="text-xs text-matter-neutral-500">
                                       {new Date(customer.lastMenuSelectionDate).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
                                     </div>
                                   </div>
@@ -2238,7 +2268,7 @@ const MenuManagement = () => {
                                   const submittedBeforeDeadline = submittedAt && deadlineForDay && submittedAt <= deadlineForDay;
                                   const dayLocked = dayIsLocked && !submittedBeforeDeadline;
                                   const dayClass = mealsFor.length === 0
-                                    ? (dayLocked ? 'bg-gray-50 border-gray-200' : 'bg-red-50 border-red-200')
+                                    ? (dayLocked ? 'bg-matter-neutral-100 border-matter-neutral-300' : 'bg-red-50 border-red-200')
                                     : 'bg-white';
                                   
                                   // Helper function to get meal type styling and icon
@@ -2246,10 +2276,10 @@ const MenuManagement = () => {
                                     const type = (mealType || '').toLowerCase();
                                     if (type.includes('breakfast')) {
                                       return {
-                                        bg: 'bg-amber-50',
-                                        border: 'border-amber-200',
-                                        text: 'text-amber-800',
-                                        badge: 'bg-amber-100 text-amber-700',
+                                        bg: 'bg-matter-dust/40',
+                                        border: 'border-matter-dust',
+                                        text: 'text-matter-charcoal',
+                                        badge: 'bg-matter-dust/60 text-matter-charcoal',
                                         icon: Coffee
                                       };
                                     } else if (type.includes('lunch')) {
@@ -2262,39 +2292,39 @@ const MenuManagement = () => {
                                       };
                                     } else if (type.includes('dinner')) {
                                       return {
-                                        bg: 'bg-blue-50',
-                                        border: 'border-blue-200',
-                                        text: 'text-blue-800',
-                                        badge: 'bg-blue-100 text-blue-700',
+                                        bg: 'bg-matter-accent-100',
+                                        border: 'border-matter-accent-300',
+                                        text: 'text-matter-navy',
+                                        badge: 'bg-matter-accent-200 text-matter-navy',
                                         icon: Pizza
                                       };
                                     } else if (type.includes('snack')) {
                                       return {
-                                        bg: 'bg-purple-50',
-                                        border: 'border-purple-200',
-                                        text: 'text-purple-800',
-                                        badge: 'bg-purple-100 text-purple-700',
+                                        bg: 'bg-matter-neutral-200',
+                                        border: 'border-matter-neutral-300',
+                                        text: 'text-matter-navy',
+                                        badge: 'bg-matter-accent-200 text-matter-navy',
                                         icon: Cookie
                                       };
                                     }
                                     return {
-                                      bg: 'bg-gray-50',
-                                      border: 'border-gray-200',
-                                      text: 'text-gray-800',
-                                      badge: 'bg-gray-100 text-gray-700',
+                                      bg: 'bg-matter-neutral-100',
+                                      border: 'border-matter-neutral-300',
+                                      text: 'text-matter-navy',
+                                      badge: 'bg-matter-neutral-200 text-matter-neutral-800',
                                       icon: Sandwich
                                     };
                                   };
                                   
                                   return (
                                     <div key={key} className={`${dayClass} rounded-lg border-2 p-3 shadow-sm`}> 
-                                      <div className="font-semibold text-sm text-gray-700 mb-2 flex items-center gap-2">
-                                        <Calendar className="w-4 h-4 text-gray-500" />
+                                      <div className="font-semibold text-sm text-matter-neutral-800 mb-2 flex items-center gap-2">
+                                        <Calendar className="w-4 h-4 text-matter-neutral-600" />
                                         {date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
                                       </div>
                                       {mealsFor.length === 0 ? (
                                         dayLocked ? (
-                                          <div className="text-sm text-gray-500 font-medium flex items-center gap-1 py-1">
+                                          <div className="text-sm text-matter-neutral-600 font-medium flex items-center gap-1 py-1">
                                             🔒 Closed Day
                                           </div>
                                         ) : (
@@ -2316,7 +2346,7 @@ const MenuManagement = () => {
                                                 <div className="flex items-start gap-2">
                                                   <MealIcon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${mealStyle.text}`} />
                                                   <div className="flex-1 min-w-0">
-                                                    <div className="font-semibold text-sm text-gray-900 break-words">
+                                                    <div className="font-semibold text-sm text-matter-navy break-words">
                                                       {meal.mealName || meal.menuItemId?.mealName || 'Meal'}
                                                     </div>
                                                     <div className="flex items-center gap-2 mt-1 flex-wrap">
@@ -2324,7 +2354,7 @@ const MenuManagement = () => {
                                                         {meal.mealType || meal.menuItemId?.mealType || 'meal'}
                                                       </span>
                                                       {meal.quantity > 1 && (
-                                                        <span className="text-xs font-bold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">
+                                                        <span className="text-xs font-bold bg-matter-accent-200 text-matter-navy px-2 py-0.5 rounded-full">
                                                           Qty: {meal.quantity}
                                                         </span>
                                                       )}
@@ -2345,7 +2375,7 @@ const MenuManagement = () => {
                                                       )}
                                                     </div>
                                                     {meal.carbVegConflict?.length > 0 && (
-                                                      <div className="text-xs text-gray-500 mt-1">
+                                                      <div className="text-xs text-matter-neutral-600 mt-1">
                                                         Conflicting: {meal.carbVegConflict.join(', ')}
                                                       </div>
                                                     )}
@@ -2366,11 +2396,14 @@ const MenuManagement = () => {
                       </div>
                     )}
                   </div>
+                  </div>
                 )}
               </div>
-            ))
-          )}
+            );
+          })}
         </div>
+          );
+        })()}
       </div>
 
       {/* Customer Detail Modal */}
@@ -2379,7 +2412,7 @@ const MenuManagement = () => {
           <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
             <div ref={modalContentRef}>
               {/* Modal Header */}
-              <div className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-6">
+              <div className="bg-gradient-to-r from-matter-navy to-matter-sky text-white p-6">
                 <div className="flex items-start justify-between">
                   <div className="flex items-center gap-4">
                     <div className="w-16 h-16 bg-white bg-opacity-20 rounded-full flex items-center justify-center text-white font-bold text-xl">
@@ -2393,9 +2426,9 @@ const MenuManagement = () => {
                       <h2 className="text-2xl font-bold mb-1">
                         {`${selectedCustomerDetail.firstName || ''} ${selectedCustomerDetail.lastName || ''}`.trim() || 'Unnamed Customer'}
                       </h2>
-                      <p className="text-indigo-100">{selectedCustomerDetail.email || 'No email'}</p>
+                      <p className="text-white/70">{selectedCustomerDetail.email || 'No email'}</p>
                       {selectedCustomerDetail.customerId && (
-                        <p className="text-indigo-200 text-sm mt-1">ID: {selectedCustomerDetail.customerId}</p>
+                        <p className="text-white/60 text-sm mt-1">ID: {selectedCustomerDetail.customerId}</p>
                       )}
                     </div>
                   </div>
@@ -2510,13 +2543,13 @@ const MenuManagement = () => {
                 </div>
                 <div className="mt-4 flex items-center gap-4">
                   <div className="bg-white bg-opacity-20 px-4 py-2 rounded-lg">
-                    <div className="text-sm text-indigo-100">Total Meals</div>
+                    <div className="text-sm text-white/70">Total Meals</div>
                     <div className="text-2xl font-bold">
                       {(selectedCustomerDetail.selectedMeals || []).reduce((sum, meal) => sum + (meal.quantity || 1), 0)}
                     </div>
                   </div>
                   <div className="bg-white bg-opacity-20 px-4 py-2 rounded-lg">
-                    <div className="text-sm text-indigo-100">Days with Selections</div>
+                    <div className="text-sm text-white/70">Days with Selections</div>
                     <div className="text-2xl font-bold">
                       {(() => {
                         const uniqueDates = new Set();
@@ -2530,11 +2563,11 @@ const MenuManagement = () => {
                   </div>
                   {selectedCustomerDetail.lastMenuSelectionDate && (
                     <div className="bg-white bg-opacity-20 px-4 py-2 rounded-lg">
-                      <div className="text-sm text-indigo-100">Submitted</div>
+                      <div className="text-sm text-white/70">Submitted</div>
                       <div className="text-sm font-semibold mt-0.5">
                         {new Date(selectedCustomerDetail.lastMenuSelectionDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
                       </div>
-                      <div className="text-xs text-indigo-200">
+                      <div className="text-xs text-white/60">
                         {new Date(selectedCustomerDetail.lastMenuSelectionDate).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
                       </div>
                     </div>
@@ -2547,10 +2580,10 @@ const MenuManagement = () => {
                 {isEditingSelections ? (
                   <div className="space-y-5" onClick={() => setEditOpenSlot(null)}>
                     <div className="flex items-center justify-between">
-                      <h3 className="text-lg font-bold text-gray-900">Edit Meal Selections</h3>
-                      <span className="text-xs text-gray-400">Bypasses allergen blocks</span>
+                      <h3 className="text-lg font-bold text-matter-navy">Edit Meal Selections</h3>
+                      <span className="text-xs text-matter-neutral-500">Bypasses allergen blocks</span>
                     </div>
-                    {editMenuLoading && <p className="text-sm text-gray-400 italic">Loading menu…</p>}
+                    {editMenuLoading && <p className="text-sm text-matter-neutral-500 italic">Loading menu…</p>}
                     {!editMenuLoading && (() => {
                       // Build date list from menu or existing selections
                       const mealPerDay = selectedCustomerDetail?.mealPerDay || 1;
@@ -2567,7 +2600,7 @@ const MenuManagement = () => {
                       });
                       const sortedDates = Array.from(allDates).sort();
 
-                      if (sortedDates.length === 0) return <p className="text-gray-400 italic text-sm">No dates found.</p>;
+                      if (sortedDates.length === 0) return <p className="text-matter-neutral-500 italic text-sm">No dates found.</p>;
 
                       // Build lookup: dateKey → { main: [items], breakfast: [items] } from menu
                       const menuItemsByDate = {};
@@ -2616,8 +2649,8 @@ const MenuManagement = () => {
                                 onClick={() => setEditOpenSlot(isOpen ? null : slotKey)}
                                 className={`rounded-xl border-2 p-3 cursor-pointer transition-all ${
                                   isEmpty
-                                    ? 'border-dashed border-gray-300 bg-gray-50 text-gray-400'
-                                    : 'border-indigo-200 bg-indigo-50 text-gray-800 hover:border-indigo-400'
+                                    ? 'border-dashed border-matter-neutral-300 bg-matter-neutral-100 text-matter-neutral-500'
+                                    : 'border-matter-accent-300 bg-matter-accent-100 text-matter-navy hover:border-matter-sky'
                                 }`}
                               >
                                 <div className="flex items-start justify-between gap-2 min-h-[48px]">
@@ -2627,7 +2660,7 @@ const MenuManagement = () => {
                                     ) : (
                                       <>
                                         <p className="text-sm font-bold leading-tight">{slotMeal.mealName}</p>
-                                        <p className="text-xs text-gray-500 mt-0.5 capitalize">{slotMeal.mealType}</p>
+                                        <p className="text-xs text-matter-neutral-600 mt-0.5 capitalize">{slotMeal.mealType}</p>
                                       </>
                                     )}
                                   </div>
@@ -2649,13 +2682,13 @@ const MenuManagement = () => {
                                     >✕</button>
                                   )}
                                 </div>
-                                <div className="text-xs text-indigo-500 mt-1">{isOpen ? '▲ close' : '▼ change'}</div>
+                                <div className="text-xs text-matter-sky mt-1">{isOpen ? '▲ close' : '▼ change'}</div>
                               </div>
 
                               {isOpen && (
-                                <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-xl max-h-64 overflow-y-auto">
+                                <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-matter-neutral-300 rounded-xl shadow-xl max-h-64 overflow-y-auto">
                                   {availableItems.length === 0 && (
-                                    <p className="text-sm text-gray-400 p-3 italic">No items in menu for this day</p>
+                                    <p className="text-sm text-matter-neutral-500 p-3 italic">No items in menu for this day</p>
                                   )}
                                   {availableItems.map(menuItem => (
                                     <button
@@ -2689,10 +2722,10 @@ const MenuManagement = () => {
                                         });
                                         setEditOpenSlot(null);
                                       }}
-                                      className="w-full text-left px-4 py-2.5 hover:bg-indigo-50 border-b border-gray-100 last:border-0"
+                                      className="w-full text-left px-4 py-2.5 hover:bg-matter-accent-100 border-b border-matter-neutral-200 last:border-0"
                                     >
-                                      <p className="text-sm font-semibold text-gray-800">{menuItem.mealName}</p>
-                                      <p className="text-xs text-gray-500 capitalize">{menuItem.mealType}</p>
+                                      <p className="text-sm font-semibold text-matter-navy">{menuItem.mealName}</p>
+                                      <p className="text-xs text-matter-neutral-600 capitalize">{menuItem.mealType}</p>
                                     </button>
                                   ))}
                                 </div>
@@ -2702,8 +2735,8 @@ const MenuManagement = () => {
                         };
 
                         return (
-                          <div key={dateKey} className="border border-gray-200 rounded-xl p-4">
-                            <h4 className="text-sm font-bold text-gray-700 mb-3">{dateLabel}</h4>
+                          <div key={dateKey} className="border border-matter-neutral-300 rounded-xl p-4">
+                            <h4 className="text-sm font-bold text-matter-neutral-800 mb-3">{dateLabel}</h4>
                             <div className="grid grid-cols-2 gap-2">
                               {mainSlots.map((slot, i) => renderSlot(slot, i, 'lunch', mainItems))}
                               {bfSlots.map((slot, i) => renderSlot(slot, i, 'breakfast', bfItems))}
@@ -2735,14 +2768,14 @@ const MenuManagement = () => {
                             setEditSaving(false);
                           }
                         }}
-                        className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg disabled:opacity-50"
+                        className="flex-1 bg-matter-navy hover:bg-matter-blueblack text-white font-bold py-2 px-4 rounded-lg disabled:opacity-50"
                       >
                         {editSaving ? 'Saving…' : 'Save Changes'}
                       </button>
                       <button
                         type="button"
                         onClick={() => { setIsEditingSelections(false); setEditOpenSlot(null); }}
-                        className="flex-1 border border-gray-300 text-gray-700 font-semibold py-2 px-4 rounded-lg hover:bg-gray-50"
+                        className="flex-1 border border-matter-neutral-300 text-matter-neutral-800 font-semibold py-2 px-4 rounded-lg hover:bg-matter-neutral-100"
                       >
                         Cancel
                       </button>
@@ -2762,7 +2795,7 @@ const MenuManagement = () => {
 
                     if (sourceDateKeys.length === 0) {
                       return (
-                        <div className="text-center py-8 text-gray-500">
+                        <div className="text-center py-8 text-matter-neutral-600">
                           <p>No date information available</p>
                         </div>
                       );
@@ -2802,10 +2835,10 @@ const MenuManagement = () => {
                         const type = (mealType || '').toLowerCase();
                         if (type.includes('breakfast')) {
                           return {
-                            bg: 'bg-amber-50',
-                            border: 'border-amber-200',
-                            text: 'text-amber-800',
-                            badge: 'bg-amber-100 text-amber-700',
+                            bg: 'bg-matter-dust/40',
+                            border: 'border-matter-dust',
+                            text: 'text-matter-charcoal',
+                            badge: 'bg-matter-dust/60 text-matter-charcoal',
                             icon: Coffee
                           };
                         } else if (type.includes('lunch')) {
@@ -2818,44 +2851,44 @@ const MenuManagement = () => {
                           };
                         } else if (type.includes('dinner')) {
                           return {
-                            bg: 'bg-blue-50',
-                            border: 'border-blue-200',
-                            text: 'text-blue-800',
-                            badge: 'bg-blue-100 text-blue-700',
+                            bg: 'bg-matter-accent-100',
+                            border: 'border-matter-accent-300',
+                            text: 'text-matter-navy',
+                            badge: 'bg-matter-accent-200 text-matter-navy',
                             icon: Pizza
                           };
                         } else if (type.includes('snack')) {
                           return {
-                            bg: 'bg-purple-50',
-                            border: 'border-purple-200',
-                            text: 'text-purple-800',
-                            badge: 'bg-purple-100 text-purple-700',
+                            bg: 'bg-matter-neutral-200',
+                            border: 'border-matter-neutral-300',
+                            text: 'text-matter-navy',
+                            badge: 'bg-matter-accent-200 text-matter-navy',
                             icon: Cookie
                           };
                         }
                         return {
-                          bg: 'bg-gray-50',
-                          border: 'border-gray-200',
-                          text: 'text-gray-800',
-                          badge: 'bg-gray-100 text-gray-700',
+                          bg: 'bg-matter-neutral-100',
+                          border: 'border-matter-neutral-300',
+                          text: 'text-matter-navy',
+                          badge: 'bg-matter-neutral-200 text-matter-neutral-800',
                           icon: Sandwich
                         };
                       };
                       
                       return (
-                        <div key={key} className="bg-white border-2 border-gray-200 rounded-xl p-4 shadow-sm"> 
-                          <div className="flex items-center gap-3 mb-4 pb-3 border-b border-gray-200">
-                            <Calendar className="w-5 h-5 text-indigo-600" />
-                            <h3 className="text-lg font-bold text-gray-900">
+                        <div key={key} className="bg-white border-2 border-matter-neutral-300 rounded-xl p-4 shadow-sm"> 
+                          <div className="flex items-center gap-3 mb-4 pb-3 border-b border-matter-neutral-300">
+                            <Calendar className="w-5 h-5 text-matter-sky" />
+                            <h3 className="text-lg font-bold text-matter-navy">
                               {new Date(`${key}T00:00:00`).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
                             </h3>
-                            <span className="ml-auto bg-indigo-100 text-indigo-700 px-3 py-1 rounded-full text-sm font-semibold">
+                            <span className="ml-auto bg-matter-accent-200 text-matter-navy px-3 py-1 rounded-full text-sm font-semibold">
                               {mealsFor.reduce((sum, m) => sum + (m.quantity || 1), 0)} meal{mealsFor.reduce((sum, m) => sum + (m.quantity || 1), 0) === 1 ? '' : 's'}
                             </span>
                           </div>
                           {mealsFor.length === 0 ? (
                             modalDayLocked ? (
-                              <div className="text-sm text-gray-500 font-medium flex items-center gap-1 py-1">
+                              <div className="text-sm text-matter-neutral-600 font-medium flex items-center gap-1 py-1">
                                 🔒 Closed Day
                               </div>
                             ) : (
@@ -2884,11 +2917,11 @@ const MenuManagement = () => {
                                     </div>
                                     <div className="flex-1 min-w-0">
                                       <div className="flex items-start justify-between gap-2 mb-2">
-                                        <h4 className="font-bold text-lg text-gray-900">
+                                        <h4 className="font-bold text-lg text-matter-navy">
                                           {meal.mealName || meal.menuItemId?.mealName || 'Meal'}
                                         </h4>
                                         {meal.quantity > 1 && (
-                                          <span className="bg-indigo-600 text-white px-3 py-1 rounded-full text-sm font-bold flex-shrink-0">
+                                          <span className="bg-matter-accent-100 text-matter-accent-800 px-3 py-1 rounded-full text-sm font-bold flex-shrink-0">
                                             Qty: {meal.quantity}
                                           </span>
                                         )}
@@ -2915,28 +2948,28 @@ const MenuManagement = () => {
                                       </div>
                                       {meal.carbVegConflict?.length > 0 && (
                                         <div className="flex gap-2 text-sm mb-2">
-                                          <span className="font-semibold text-gray-700 min-w-[80px]">Conflict:</span>
-                                          <span className="text-gray-600">{meal.carbVegConflict.join(', ')}</span>
+                                          <span className="font-semibold text-matter-neutral-800 min-w-[80px]">Conflict:</span>
+                                          <span className="text-matter-neutral-700">{meal.carbVegConflict.join(', ')}</span>
                                         </div>
                                       )}
                                       {(ingredients || carbs || veg) && (
                                         <div className="space-y-1.5 text-sm">
                                           {ingredients && (
                                             <div className="flex gap-2">
-                                              <span className="font-semibold text-gray-700 min-w-[80px]">Ingredients:</span>
-                                              <span className="text-gray-600">{ingredients}</span>
+                                              <span className="font-semibold text-matter-neutral-800 min-w-[80px]">Ingredients:</span>
+                                              <span className="text-matter-neutral-700">{ingredients}</span>
                                             </div>
                                           )}
                                           {carbs && (
                                             <div className="flex gap-2">
-                                              <span className="font-semibold text-gray-700 min-w-[80px]">Carbs:</span>
-                                              <span className="text-gray-600">{carbs}</span>
+                                              <span className="font-semibold text-matter-neutral-800 min-w-[80px]">Carbs:</span>
+                                              <span className="text-matter-neutral-700">{carbs}</span>
                                             </div>
                                           )}
                                           {veg && (
                                             <div className="flex gap-2">
-                                              <span className="font-semibold text-gray-700 min-w-[80px]">Vegetables:</span>
-                                              <span className="text-gray-600">{veg}</span>
+                                              <span className="font-semibold text-matter-neutral-800 min-w-[80px]">Vegetables:</span>
+                                              <span className="text-matter-neutral-700">{veg}</span>
                                             </div>
                                           )}
                                         </div>
@@ -2958,10 +2991,10 @@ const MenuManagement = () => {
             </div>
 
             {/* Modal Footer */}
-            <div className="bg-gray-50 px-6 py-4 border-t border-gray-200">
+            <div className="bg-matter-neutral-100 px-6 py-4 border-t border-matter-neutral-300">
               <button
                 onClick={() => setSelectedCustomerDetail(null)}
-                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors"
+                className="w-full bg-matter-navy hover:bg-matter-blueblack text-white font-semibold py-3 px-4 rounded-lg transition-colors"
               >
                 Close
               </button>
@@ -2974,7 +3007,7 @@ const MenuManagement = () => {
       {showPresetMacroModal && selectedCustomerDetail && (
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center p-4 z-[60]" onClick={() => setShowPresetMacroModal(false)}>
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-            <div className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-4 rounded-t-xl flex items-center justify-between">
+            <div className="bg-gradient-to-r from-matter-navy to-matter-sky text-white px-6 py-4 rounded-t-xl flex items-center justify-between">
               <h3 className="text-lg font-bold">Breakfast & Snack Presets</h3>
               <button onClick={() => setShowPresetMacroModal(false)} className="hover:bg-white hover:bg-opacity-20 rounded-full p-1 transition-colors">
                 <X className="w-5 h-5" />
@@ -2988,12 +3021,12 @@ const MenuManagement = () => {
                 <div key={key}>
                   <div className="flex items-center gap-2 mb-3">
                     {icon}
-                    <span className="font-semibold text-gray-800">{label}</span>
+                    <span className="font-semibold text-matter-navy">{label}</span>
                   </div>
                   <div className="grid grid-cols-3 gap-3">
                     {['C', 'P', 'F'].map((macro) => (
                       <div key={macro}>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">
+                        <label className="block text-xs font-medium text-matter-neutral-600 mb-1">
                           {macro === 'C' ? 'Carbs (g)' : macro === 'P' ? 'Protein (g)' : 'Fat (g)'}
                         </label>
                         <input
@@ -3004,7 +3037,7 @@ const MenuManagement = () => {
                             ...prev,
                             [key]: { ...prev[key], [macro]: e.target.value }
                           }))}
-                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                          className="w-full border border-matter-neutral-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-matter-sky focus:border-transparent"
                           placeholder="0"
                         />
                       </div>
@@ -3016,7 +3049,7 @@ const MenuManagement = () => {
             <div className="px-6 pb-6 flex gap-3">
               <button
                 onClick={() => setShowPresetMacroModal(false)}
-                className="flex-1 border border-gray-300 text-gray-700 rounded-lg py-2 text-sm font-medium hover:bg-gray-50 transition-colors"
+                className="flex-1 border border-matter-neutral-300 text-matter-neutral-800 rounded-lg py-2 text-sm font-medium hover:bg-matter-neutral-100 transition-colors"
               >
                 Cancel
               </button>
@@ -3054,7 +3087,7 @@ const MenuManagement = () => {
                     setSavingPresetMacros(false);
                   }
                 }}
-                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg py-2 text-sm font-medium transition-colors disabled:opacity-50"
+                className="flex-1 bg-matter-navy hover:bg-matter-blueblack text-white rounded-lg py-2 text-sm font-medium transition-colors disabled:opacity-50"
               >
                 {savingPresetMacros ? 'Saving…' : 'Save Presets'}
               </button>

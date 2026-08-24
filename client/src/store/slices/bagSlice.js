@@ -4,7 +4,7 @@ import api from '../../utils/api';
 // Async thunks
 export const fetchBags = createAsyncThunk(
   'bags/fetchBags',
-  async ({ page = 1, limit = 50, status, search, location, driverId } = {}, { rejectWithValue }) => {
+  async ({ page = 1, limit = 50, status, search, location, driverId, bagType } = {}, { rejectWithValue }) => {
     try {
       const MAX_BAGS_FETCH_LIMIT = 10000;
       const safePage = Number.isFinite(Number(page)) && Number(page) > 0 ? Number(page) : 1;
@@ -34,6 +34,10 @@ export const fetchBags = createAsyncThunk(
 
       if (driverId) {
         params.append('driverId', driverId);
+      }
+
+      if (bagType) {
+        params.append('bagType', bagType);
       }
 
       const response = await api.get(`/bags?${params}`);

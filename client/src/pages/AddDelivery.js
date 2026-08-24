@@ -1,10 +1,10 @@
 ﻿import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { Save, Upload, X, Download, FileText, CheckCircle, AlertCircle, Search, Plus, Trash2 } from 'lucide-react';
 import { useSelector } from 'react-redux';
 import api from '../utils/api';
 import * as XLSX from 'xlsx';
+import { parseGPSFromLink as enhancedParseGPSFromLink } from '../utils/gpsParsing';
 
 const MS_PER_MINUTE = 60 * 1000;
 const LOCAL_TIMEZONE_OFFSET_MINUTES = Number(
@@ -204,6 +204,78 @@ const applyPendingChanges = async (delivery) => {
   }
 };
 
+// The native browser <input type="datetime-local"> time-of-day picker (the
+// scroll-wheel hour/minute/AM-PM widget) is unreliable on mobile — the
+// committed value can end up several hours off from what was actually
+// scrolled to. Hour-only selects sidestep that entirely, and minutes are
+// always forced to :00 since deliveries are never scheduled to the minute.
+const HOUR_OPTIONS = Array.from({ length: 12 }, (_, i) => i + 1);
+
+const splitScheduledTimeLocal = (value) => {
+  if (!value) return { date: '', hour12: '', period: 'AM' };
+  const [datePart, timePart] = value.split('T');
+  const [hStr] = (timePart || '00:00').split(':');
+  const h = Number(hStr);
+  if (!Number.isFinite(h)) return { date: datePart || '', hour12: '', period: 'AM' };
+  const period = h >= 12 ? 'PM' : 'AM';
+  let hour12 = h % 12;
+  if (hour12 === 0) hour12 = 12;
+  return { date: datePart || '', hour12: String(hour12), period };
+};
+
+const buildScheduledTimeLocal = (date, hour12, period) => {
+  if (!date || !hour12) return '';
+  let h = parseInt(hour12, 10) % 12;
+  if (period === 'PM') h += 12;
+  return `${date}T${String(h).padStart(2, '0')}:00`;
+};
+
+const SCHEDULED_TIME_INPUT_CLS = 'w-full bg-gray-50 border border-gray-200 rounded py-2 px-3 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:bg-white transition-colors';
+const SCHEDULED_TIME_LABEL_CLS = 'block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5';
+
+function ScheduledTimeField({ value, onChange, label, hint, name = 'scheduledTime', required = true }) {
+  const { date, hour12, period } = splitScheduledTimeLocal(value);
+
+  const emit = (nextDate, nextHour, nextPeriod) => {
+    onChange({ target: { name, value: buildScheduledTimeLocal(nextDate, nextHour, nextPeriod) } });
+  };
+
+  return (
+    <div>
+      {label && <label className={SCHEDULED_TIME_LABEL_CLS}>{label}</label>}
+      <div className="grid grid-cols-3 gap-2">
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => emit(e.target.value, hour12, period)}
+          required={required}
+          className={SCHEDULED_TIME_INPUT_CLS}
+        />
+        <select
+          value={hour12}
+          onChange={(e) => emit(date, e.target.value, period)}
+          required={required}
+          className={`${SCHEDULED_TIME_INPUT_CLS} appearance-none`}
+        >
+          <option value="">Hour</option>
+          {HOUR_OPTIONS.map((h) => (
+            <option key={h} value={h}>{h}:00</option>
+          ))}
+        </select>
+        <select
+          value={period}
+          onChange={(e) => emit(date, hour12, e.target.value)}
+          className={`${SCHEDULED_TIME_INPUT_CLS} appearance-none`}
+        >
+          <option value="AM">AM</option>
+          <option value="PM">PM</option>
+        </select>
+      </div>
+      {hint && <p className="text-xs text-gray-400 mt-1">{hint}</p>}
+    </div>
+  );
+}
+
 const AddDelivery = () => {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState('manual');
@@ -223,7 +295,7 @@ const AddDelivery = () => {
   const { user } = useSelector(state => state.auth);
 
   const [formData, setFormData] = useState({
-    customerId: '',
+    customerId: 'CUST-',
     customerName: '',
     scheduledTime: '',
     driver: '',
@@ -274,93 +346,6 @@ const AddDelivery = () => {
       setDrivers(Array.isArray(driversList) ? driversList : []);
     } catch (error) {
       console.error('Error fetching drivers:', error);
-    }
-  };
-
-  const enhancedParseGPSFromLink = (link) => {
-    if (!link || typeof link !== 'string') return null;
-
-    const str = link.trim();
-
-    // Helper: extract lat,lng from arbitrary text
-    const extractFromText = (text) => {
-      const m = text.match(/(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)/);
-      if (m) {
-        const lat = parseFloat(m[1]);
-        const lng = parseFloat(m[2]);
-        if (!Number.isNaN(lat) && !Number.isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
-          return { lat, lng };
-        }
-      }
-      return null;
-    };
-
-    // If looks like plain coordinates, extract without URL
-    const direct = extractFromText(str);
-    if (direct) return direct;
-
-    // Normalize URL: add protocol if missing but domain-like
-    let normalized = str;
-    if (!/^https?:\/\//i.test(normalized) && /(google\.|goo\.gl|maps\.app\.goo\.gl|maps\.apple\.com)/i.test(normalized)) {
-      normalized = `https://${normalized}`;
-    }
-
-    try {
-      const url = new URL(normalized);
-      const host = url.hostname;
-
-      // Google Maps variants
-      if (/google\.com|goo\.gl|maps\.app\.goo\.gl/i.test(host)) {
-        // q param like "25.123,55.123"
-        const qParam = url.searchParams.get('q');
-        if (qParam) {
-          const parsed = extractFromText(qParam);
-          if (parsed) return parsed;
-        }
-
-        // query param
-        const queryParam = url.searchParams.get('query');
-        if (queryParam) {
-          const parsed = extractFromText(queryParam);
-          if (parsed) return parsed;
-        }
-
-        // ll param sometimes present
-        const llParam = url.searchParams.get('ll');
-        if (llParam) {
-          const parsed = extractFromText(llParam);
-          if (parsed) return parsed;
-        }
-
-        // Path with @lat,lng
-        const pathMatch = url.pathname.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
-        if (pathMatch) {
-          const lat = parseFloat(pathMatch[1]);
-          const lng = parseFloat(pathMatch[2]);
-          if (!Number.isNaN(lat) && !Number.isNaN(lng)) return { lat, lng };
-        }
-
-        // Fallback search whole URL
-        const fromWhole = extractFromText(normalized);
-        if (fromWhole) return fromWhole;
-      }
-
-      // Apple Maps
-      if (/maps\.apple\.com/i.test(host)) {
-        const llParam = url.searchParams.get('ll');
-        if (llParam) {
-          const parsed = extractFromText(llParam);
-          if (parsed) return parsed;
-        }
-        const fromWhole = extractFromText(normalized);
-        if (fromWhole) return fromWhole;
-      }
-
-      // Last resort: any URL containing coordinates
-      return extractFromText(normalized);
-    } catch {
-      // Not a valid URL; try extracting from raw text without logging errors
-      return extractFromText(str);
     }
   };
 
@@ -1038,168 +1023,171 @@ const AddDelivery = () => {
     importProgress.total > 0 && importProgress.inProgress && progressPercent < 5 && importProgress.processed < importProgress.total
       ? 5
       : progressPercent;
+  const inputCls = 'w-full bg-gray-50 border border-gray-200 rounded py-2 px-3 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:bg-white transition-colors';
+  const fieldLabelCls = 'block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5';
+
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-gray-900">Add Delivery</h1>
+    <div className="matter-analytics p-3 sm:p-6 max-w-5xl mx-auto w-full">
+      <div className="mb-4 sm:mb-6 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Add Delivery</h1>
+          <p className="text-sm text-gray-500 mt-1 hidden sm:block">Create a new delivery record or schedule a collection.</p>
+        </div>
         <button
           onClick={() => navigate(-1)}
-          className="flex items-center px-4 py-2 text-gray-600 hover:text-gray-900"
+          className="flex items-center gap-1.5 px-3 py-2 text-gray-500 hover:text-gray-800 transition-colors"
         >
-          <X className="w-5 h-5 mr-2" />
+          <span className="material-symbols-outlined text-[18px]">close</span>
           Cancel
         </button>
       </div>
 
-      <div className="flex space-x-4 border-b border-gray-200">
-        <button
-          onClick={() => handleTabChange('manual')}
-          className={`pb-4 px-2 font-medium ${
-            activeTab === 'manual'
-              ? 'border-b-2 border-blue-500 text-blue-600'
-              : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          Manual Entry
-        </button>
-        <button
-          onClick={() => handleTabChange('bulk')}
-          className={`pb-4 px-2 font-medium ${
-            activeTab === 'bulk'
-              ? 'border-b-2 border-blue-500 text-blue-600'
-              : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          Bulk Entry
-        </button>
-        <button
-          onClick={() => handleTabChange('task')}
-          className={`pb-4 px-2 font-medium ${
-            activeTab === 'task'
-              ? 'border-b-2 border-blue-500 text-blue-600'
-              : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          Task
-        </button>
-        <button
-          onClick={() => handleTabChange('collection')}
-          className={`pb-4 px-2 font-medium ${
-            activeTab === 'collection'
-              ? 'border-b-2 border-teal-500 text-teal-600'
-              : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          Collection
-        </button>
-      </div>
+      <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="flex border-b border-gray-200 bg-gray-50 overflow-x-auto no-scrollbar">
+          <button
+            onClick={() => handleTabChange('manual')}
+            className={`flex-shrink-0 sm:flex-1 py-3 px-4 sm:py-4 sm:px-6 text-sm font-semibold whitespace-nowrap transition-colors ${
+              activeTab === 'manual'
+                ? 'text-blue-600 border-b-2 border-blue-600'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
+            }`}
+          >
+            Single Delivery
+          </button>
+          <button
+            onClick={() => handleTabChange('bulk')}
+            className={`flex-shrink-0 sm:flex-1 py-3 px-4 sm:py-4 sm:px-6 text-sm font-semibold whitespace-nowrap transition-colors ${
+              activeTab === 'bulk'
+                ? 'text-blue-600 border-b-2 border-blue-600'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
+            }`}
+          >
+            Bulk Entry
+          </button>
+          <button
+            onClick={() => handleTabChange('task')}
+            className={`flex-shrink-0 sm:flex-1 py-3 px-4 sm:py-4 sm:px-6 text-sm font-semibold whitespace-nowrap transition-colors ${
+              activeTab === 'task'
+                ? 'text-blue-600 border-b-2 border-blue-600'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
+            }`}
+          >
+            Task
+          </button>
+          <button
+            onClick={() => handleTabChange('collection')}
+            className={`flex-shrink-0 sm:flex-1 py-3 px-4 sm:py-4 sm:px-6 text-sm font-semibold whitespace-nowrap transition-colors ${
+              activeTab === 'collection'
+                ? 'text-blue-600 border-b-2 border-blue-600'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800'
+            }`}
+          >
+            Collection
+          </button>
+        </div>
 
+      <div className="p-4 sm:p-8 pb-24 sm:pb-8">
       {activeTab === 'manual' ? (
         <motion.form
+          id="manual-delivery-form"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           onSubmit={handleSubmit}
-          className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-6"
+          className="space-y-6"
         >
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+            <div className="md:col-span-2 pb-2 border-b border-gray-100">
+              <h3 className="text-lg font-semibold text-gray-900">Customer Details</h3>
+            </div>
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Customer ID *
-              </label>
+              <label className={fieldLabelCls}>Customer ID *</label>
               <input
                 type="text"
                 name="customerId"
                 value={formData.customerId}
                 onChange={handleChange}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className={inputCls}
                 placeholder="CUST001"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Customer Name *
-              </label>
+              <label className={fieldLabelCls}>Customer Name *</label>
               <input
                 type="text"
                 name="customerName"
                 value={formData.customerName}
                 onChange={handleChange}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className={inputCls}
                 placeholder="John Doe"
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Scheduled Time * (Local Time)
-              </label>
-              <input
-                type="datetime-local"
-                name="scheduledTime"
-                value={formData.scheduledTime}
-                onChange={handleChange}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              />
-              <p className="text-xs text-gray-500 mt-1">Enter time in your local timezone</p>
+            <div className="md:col-span-2 pb-2 border-b border-gray-100 mt-2">
+              <h3 className="text-lg font-semibold text-gray-900">Logistics</h3>
             </div>
 
+            <ScheduledTimeField
+              value={formData.scheduledTime}
+              onChange={handleChange}
+              label="Scheduled Time * (Local Time)"
+              hint="Enter time in your local timezone"
+            />
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Delivery Zone
-              </label>
+              <label className={fieldLabelCls}>Delivery Zone</label>
               <input
                 type="text"
                 name="zone"
                 value={formData.zone}
                 onChange={handleChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className={inputCls}
+                placeholder="e.g., Dubai Marina"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                GPS Location Google Maps Link Recommended
-              </label>
-              <input
-                type="text"
-                name="gpsLocation.link"
-                value={formData.gpsLocation.link}
-                onChange={handleNestedChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                placeholder="https://maps.google.com/?q=40.7128,-74.0060"
-                onBlur={e => {
-                  const link = e.target.value;
-                  if (link) {
-                    const coords = enhancedParseGPSFromLink(link);
-                    if (coords) {
-                      setFormData(prev => ({
-                        ...prev,
-                        gpsLocation: {
-                          ...prev.gpsLocation,
-                          lat: coords.lat,
-                          lng: coords.lng,
-                          link
-                        }
-                      }));
+              <label className={fieldLabelCls}>GPS Location (Google Maps Link Recommended)</label>
+              <div className="relative">
+                <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-[18px]">location_on</span>
+                <input
+                  type="text"
+                  name="gpsLocation.link"
+                  value={formData.gpsLocation.link}
+                  onChange={handleNestedChange}
+                  className={`${inputCls} pl-10`}
+                  placeholder="https://maps.google.com/?q=40.7128,-74.0060"
+                  onBlur={e => {
+                    const link = e.target.value;
+                    if (link) {
+                      const coords = enhancedParseGPSFromLink(link);
+                      if (coords) {
+                        setFormData(prev => ({
+                          ...prev,
+                          gpsLocation: {
+                            ...prev.gpsLocation,
+                            lat: coords.lat,
+                            lng: coords.lng,
+                            link
+                          }
+                        }));
+                      }
                     }
-                  }
-                }}
-              />
+                  }}
+                />
+              </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Assign Driver (optional)
-              </label>
+              <label className={fieldLabelCls}>Assign Driver (optional)</label>
               <select
                 name="driver"
                 value={formData.driver}
                 onChange={handleChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className={`${inputCls} appearance-none`}
               >
                 <option value="">Unassigned</option>
                 {drivers.map(driver => (
@@ -1211,19 +1199,24 @@ const AddDelivery = () => {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Company *
-              </label>
-              <div className="space-y-2">
+              <label className={fieldLabelCls}>Company *</label>
+              <div className="flex flex-wrap gap-2">
                 {['Matter', 'Yellow Block', 'CookIt', 'Other'].map(company => (
-                  <label key={company} className="flex items-center">
+                  <label
+                    key={company}
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium border cursor-pointer transition-colors ${
+                      formData.company === company
+                        ? 'border-blue-600 bg-blue-50 text-blue-600'
+                        : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
                     <input
                       type="radio"
                       name="company"
                       value={company}
                       checked={formData.company === company}
                       onChange={handleChange}
-                      className="mr-2"
+                      className="sr-only"
                     />
                     {company}
                   </label>
@@ -1236,46 +1229,42 @@ const AddDelivery = () => {
                   value={formData.otherCompany}
                   onChange={handleChange}
                   placeholder="Specify company name"
-                  className="w-full mt-2 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  className={`${inputCls} mt-2`}
                 />
               )}
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Address *
-              </label>
+              <label className={fieldLabelCls}>Address *</label>
               <textarea
                 name="address"
                 value={formData.address}
                 onChange={handleChange}
                 rows={3}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className={`${inputCls} resize-none`}
                 placeholder="123 Main Street, City, State, ZIP Code"
               />
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Notes
-              </label>
+              <label className={fieldLabelCls}>Delivery Notes / Instructions</label>
               <textarea
                 name="notes"
                 value={formData.notes}
                 onChange={handleChange}
                 rows={2}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                placeholder="Special instructions for delivery..."
+                className={`${inputCls} resize-none`}
+                placeholder="e.g. Leave at back door, gate code 1234"
               />
             </div>
           </div>
 
-          <div className="flex justify-end space-x-3 pt-6 border-t border-gray-200">
+          <div className="hidden sm:flex justify-end gap-3 pt-6 border-t border-gray-100 mt-8">
             <button
               type="button"
               onClick={() => navigate(-1)}
-              className="px-4 py-2 text-gray-600 bg-gray-200 rounded-lg hover:bg-gray-300"
+              className="px-6 py-2 rounded border border-gray-200 bg-white text-gray-900 text-sm font-semibold hover:bg-gray-50 transition-colors"
               disabled={isSubmitting}
             >
               Cancel
@@ -1283,17 +1272,17 @@ const AddDelivery = () => {
             <button
               type="submit"
               disabled={isSubmitting}
-              className="flex items-center px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+              className="flex items-center gap-2 px-6 py-2 rounded bg-blue-600 text-white text-sm font-semibold hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               {isSubmitting ? (
                 <>
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
                   Creating...
                 </>
               ) : (
                 <>
-                  <Save className="w-5 h-5 mr-2" />
-                  Create Delivery
+                  <span className="material-symbols-outlined text-[18px]">save</span>
+                  Save Delivery
                 </>
               )}
             </button>
@@ -1303,37 +1292,37 @@ const AddDelivery = () => {
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-6"
+          className="space-y-6"
         >
           <div>
             <h3 className="text-lg font-semibold text-gray-900 mb-2">
               Import from Excel File
             </h3>
-            <p className="text-gray-600 mb-4">
+            <p className="text-sm text-gray-500 mb-4">
               Upload an Excel file (.xlsx, .xls) with delivery data. Download the template below for
               the correct format.
             </p>
 
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-              <div className="flex items-center justify-between">
+            <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 mb-4">
+              <div className="flex items-center justify-between gap-4">
                 <div>
-                  <h4 className="text-sm font-medium text-blue-900">Required Columns:</h4>
+                  <h4 className="text-sm font-semibold text-blue-900">Required Columns:</h4>
                   <p className="text-sm text-blue-700 mt-1">
                     Customer ID, Name, Delivery Time and Date, Location, Area, Driver, GPS, Company
                   </p>
                 </div>
                 <button
                   onClick={downloadTemplate}
-                  className="flex items-center px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:opacity-90 transition-opacity flex-shrink-0"
                 >
-                  <Download className="w-4 h-4 mr-2" />
+                  <span className="material-symbols-outlined text-[18px]">download</span>
                   Download Template
                 </button>
               </div>
             </div>
           </div>
 
-          <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
+          <div className="border-2 border-dashed border-gray-200 rounded-lg p-8 text-center bg-gray-50">
             <input
               type="file"
               id="file-upload"
@@ -1345,12 +1334,14 @@ const AddDelivery = () => {
             {!fileName ? (
               <label htmlFor="file-upload" className="cursor-pointer">
                 <div className="flex flex-col items-center justify-center">
-                  <Upload className="w-12 h-12 text-gray-400 mb-4" />
-                  <p className="text-lg font-medium text-gray-900 mb-2">Upload Excel File</p>
-                  <p className="text-gray-500 mb-4">
+                  <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center mb-4">
+                    <span className="material-symbols-outlined text-blue-600 text-[32px]">upload_file</span>
+                  </div>
+                  <p className="text-lg font-semibold text-gray-900 mb-2">Upload Excel File</p>
+                  <p className="text-sm text-gray-500 mb-4">
                     Drag and drop your file here or click to browse
                   </p>
-                  <span className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
+                  <span className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:opacity-90 transition-opacity">
                     Choose File
                   </span>
                   <p className="text-xs text-gray-400 mt-2">
@@ -1360,10 +1351,10 @@ const AddDelivery = () => {
               </label>
             ) : (
               <div className="flex flex-col items-center justify-center">
-                <FileText className="w-12 h-12 text-green-500 mb-4" />
-                <p className="text-lg font-medium text-gray-900 mb-2">{fileName}</p>
-                <p className="text-gray-500 mb-4">File uploaded successfully</p>
-                <button onClick={clearImport} className="text-blue-600 hover:text-blue-800">
+                <span className="material-symbols-outlined text-emerald-500 text-[48px] mb-4">description</span>
+                <p className="text-lg font-semibold text-gray-900 mb-2">{fileName}</p>
+                <p className="text-sm text-gray-500 mb-4">File uploaded successfully</p>
+                <button onClick={clearImport} className="text-blue-600 hover:underline text-sm font-medium">
                   Upload different file
                 </button>
               </div>
@@ -1371,7 +1362,7 @@ const AddDelivery = () => {
           </div>
 
           {showImportProgress && (
-            <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+            <div className="bg-white border border-gray-200 rounded-lg p-4">
               <div className="flex items-center justify-between text-sm font-medium text-gray-700">
                 <span>{importProgress.inProgress ? 'Importing deliveries...' : 'Import summary'}</span>
                 <span>
@@ -1379,16 +1370,16 @@ const AddDelivery = () => {
                   processed
                 </span>
               </div>
-              <div className="w-full bg-gray-200 rounded-full h-3 mt-3">
+              <div className="w-full bg-gray-100 rounded-full h-3 mt-3">
                 <div
                   className={`h-3 rounded-full transition-all duration-300 ${
-                    importProgress.inProgress ? 'bg-blue-500' : 'bg-green-500'
+                    importProgress.inProgress ? 'bg-blue-600' : 'bg-emerald-500'
                   }`}
                   style={{ width: `${displayPercent}%` }}
                 />
               </div>
               <div className="flex items-center justify-between text-xs mt-3">
-                <span className="text-green-600 font-semibold">
+                <span className="text-emerald-600 font-semibold">
                   Success: {importProgress.success}
                 </span>
                 <span className="text-red-600 font-semibold">Failed: {importProgress.error}</span>
@@ -1397,10 +1388,10 @@ const AddDelivery = () => {
           )}
 
           {validationErrors.length > 0 && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-              <div className="flex items-center mb-2">
-                <AlertCircle className="w-5 h-5 text-red-500 mr-2" />
-                <h4 className="text-sm font-medium text-red-800">
+            <div className="bg-red-50 border border-red-100 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="material-symbols-outlined text-red-500 text-[20px]">error</span>
+                <h4 className="text-sm font-semibold text-red-800">
                   Validation Errors ({validationErrors.length})
                 </h4>
               </div>
@@ -1415,9 +1406,9 @@ const AddDelivery = () => {
           {importData.length > 0 && (
             <div>
               <div className="flex items-center justify-between mb-4">
-                <h4 className="text-lg font-medium text-gray-900">Import Preview</h4>
-                <div className="flex items-center text-green-600">
-                  <CheckCircle className="w-5 h-5 mr-2" />
+                <h4 className="text-lg font-semibold text-gray-900">Import Preview</h4>
+                <div className="flex items-center gap-2 text-emerald-600 text-sm font-medium">
+                  <span className="material-symbols-outlined text-[20px]">check_circle</span>
                   <span>{importData.length} valid deliveries ready to import</span>
                 </div>
               </div>
@@ -1476,26 +1467,26 @@ const AddDelivery = () => {
           )}
 
           {(fileName || importData.length > 0) && (
-            <div className="flex justify-end space-x-3 pt-4 border-t border-gray-200">
+            <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">
               <button
                 onClick={clearImport}
-                className="px-4 py-2 text-gray-600 bg-gray-200 rounded-lg hover:bg-gray-300"
+                className="px-4 py-2 text-gray-700 bg-gray-100 rounded text-sm font-medium hover:bg-gray-200 transition-colors"
               >
                 Clear
               </button>
               <button
                 onClick={handleImportSubmit}
                 disabled={isSubmitting || importData.length === 0 || validationErrors.length > 0}
-                className="flex items-center px-6 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex items-center gap-2 px-6 py-2 bg-emerald-600 text-white rounded text-sm font-medium hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
               >
                 {isSubmitting ? (
                   <>
-                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
                     Importing...
                   </>
                 ) : (
                   <>
-                    <Upload className="w-5 h-5 mr-2" />
+                    <span className="material-symbols-outlined text-[18px]">upload_file</span>
                     Import {importData.length} Deliveries
                   </>
                 )}
@@ -1509,17 +1500,15 @@ const AddDelivery = () => {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           onSubmit={handleSubmit}
-          className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-6"
+          className="space-y-6"
         >
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
 
             {/* Customer Search */}
             <div className="md:col-span-2 relative">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Customer *
-              </label>
+              <label className={fieldLabelCls}>Customer *</label>
               <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-[20px] pointer-events-none">search</span>
                 <input
                   type="text"
                   value={customerSearch}
@@ -1530,7 +1519,7 @@ const AddDelivery = () => {
                   onFocus={() => customerSearch.length >= 2 && setShowCustomerDropdown(customerResults.length > 0)}
                   onBlur={() => setTimeout(() => setShowCustomerDropdown(false), 150)}
                   required={!formData.customerId}
-                  className="w-full pl-10 pr-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                  className={`${inputCls} pl-10`}
                   placeholder="Type customer name or ID to search..."
                 />
                 {customerSearchLoading && (
@@ -1557,30 +1546,20 @@ const AddDelivery = () => {
               )}
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Scheduled Date &amp; Time *
-              </label>
-              <input
-                type="datetime-local"
-                name="scheduledTime"
-                value={formData.scheduledTime}
-                onChange={handleChange}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
-              />
-              <p className="text-xs text-gray-500 mt-1">Enter time in your local timezone</p>
-            </div>
+            <ScheduledTimeField
+              value={formData.scheduledTime}
+              onChange={handleChange}
+              label="Scheduled Date & Time *"
+              hint="Enter time in your local timezone"
+            />
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Assign Driver (optional)
-              </label>
+              <label className={fieldLabelCls}>Assign Driver (optional)</label>
               <select
                 name="driver"
                 value={formData.driver}
                 onChange={handleChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                className={`${inputCls} appearance-none`}
               >
                 <option value="">Unassigned</option>
                 {drivers.map(driver => (
@@ -1592,15 +1571,13 @@ const AddDelivery = () => {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Company *
-              </label>
+              <label className={fieldLabelCls}>Company *</label>
               <select
                 name="company"
                 value={formData.company}
                 onChange={handleChange}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                className={`${inputCls} appearance-none`}
               >
                 <option value="Matter">Matter</option>
                 <option value="Yellow Block">Yellow Block</option>
@@ -1611,16 +1588,14 @@ const AddDelivery = () => {
 
             {formData.company === 'Other' && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Other Company Name *
-                </label>
+                <label className={fieldLabelCls}>Other Company Name *</label>
                 <input
                   type="text"
                   name="otherCompany"
                   value={formData.otherCompany}
                   onChange={handleChange}
                   required
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                  className={inputCls}
                   placeholder="Enter company name"
                 />
               </div>
@@ -1628,9 +1603,7 @@ const AddDelivery = () => {
 
             {/* Bag Numbers */}
             <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Bag Numbers to Collect
-              </label>
+              <label className={fieldLabelCls}>Bag Numbers to Collect</label>
               <div className="space-y-2">
                 {collectionBagIds.map((bagId, index) => (
                   <div key={index} className="flex items-center gap-2">
@@ -1639,7 +1612,7 @@ const AddDelivery = () => {
                       value={bagId}
                       onChange={e => updateBagId(index, e.target.value)}
                       placeholder={`Bag ID ${index + 1}`}
-                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                      className={`flex-1 ${inputCls}`}
                     />
                     {collectionBagIds.length > 1 && (
                       <button
@@ -1647,7 +1620,7 @@ const AddDelivery = () => {
                         onClick={() => removeBagIdField(index)}
                         className="p-2 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg"
                       >
-                        <Trash2 className="w-4 h-4" />
+                        <span className="material-symbols-outlined text-[18px]">delete</span>
                       </button>
                     )}
                   </div>
@@ -1655,24 +1628,22 @@ const AddDelivery = () => {
                 <button
                   type="button"
                   onClick={addBagIdField}
-                  className="flex items-center gap-2 px-3 py-2 text-teal-600 border border-teal-300 rounded-lg hover:bg-teal-50 text-sm"
+                  className="flex items-center gap-2 px-3 py-2 text-teal-600 border border-teal-200 rounded hover:bg-teal-50 text-sm font-medium transition-colors"
                 >
-                  <Plus className="w-4 h-4" />
+                  <span className="material-symbols-outlined text-[16px]">add</span>
                   Add another bag
                 </button>
               </div>
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Notes
-              </label>
+              <label className={fieldLabelCls}>Notes</label>
               <textarea
                 name="notes"
                 value={formData.notes}
                 onChange={handleChange}
                 rows={2}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500"
+                className={`${inputCls} resize-none`}
                 placeholder="Special instructions for collection..."
               />
             </div>
@@ -1684,29 +1655,29 @@ const AddDelivery = () => {
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="md:col-span-2">
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Address</label>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Address</label>
                   <textarea
                     name="address"
                     value={formData.address}
                     onChange={handleChange}
                     rows={2}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-sm"
+                    className={`${inputCls} text-sm resize-none`}
                     placeholder="Will be filled automatically after selecting a customer"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Zone / Area</label>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Zone / Area</label>
                   <input
                     type="text"
                     name="zone"
                     value={formData.zone}
                     onChange={handleChange}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-sm"
+                    className={`${inputCls} text-sm`}
                     placeholder="e.g., Dubai Marina"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">GPS Link</label>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">GPS Link</label>
                   <input
                     type="text"
                     name="gpsLocation.link"
@@ -1721,14 +1692,15 @@ const AddDelivery = () => {
                         }
                       }))
                     }
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 text-sm"
+                    className={`${inputCls} text-sm`}
                     placeholder="Google Maps link"
                   />
                 </div>
                 {formData.gpsLocation?.lat && formData.gpsLocation?.lng && (
                   <div className="md:col-span-2">
-                    <p className="text-xs text-teal-600">
-                      📍 GPS: {Number(formData.gpsLocation.lat).toFixed(6)}, {Number(formData.gpsLocation.lng).toFixed(6)}
+                    <p className="text-xs text-teal-600 flex items-center gap-1">
+                      <span className="material-symbols-outlined text-[14px]">location_on</span>
+                      GPS: {Number(formData.gpsLocation.lat).toFixed(6)}, {Number(formData.gpsLocation.lng).toFixed(6)}
                       {formData.gpsLocation.link && (
                         <a href={formData.gpsLocation.link} target="_blank" rel="noopener noreferrer" className="ml-2 underline">View on map</a>
                       )}
@@ -1739,11 +1711,11 @@ const AddDelivery = () => {
             </div>
           </div>
 
-          <div className="flex justify-end space-x-3 pt-6 border-t border-gray-200">
+          <div className="flex justify-end gap-3 pt-6 border-t border-gray-100">
             <button
               type="button"
               onClick={() => navigate(-1)}
-              className="px-4 py-2 text-gray-600 bg-gray-200 rounded-lg hover:bg-gray-300 disabled:opacity-50"
+              className="px-6 py-2 rounded border border-gray-200 bg-white text-gray-900 text-sm font-semibold hover:bg-gray-50 disabled:opacity-50 transition-colors"
               disabled={isSubmitting}
             >
               Cancel
@@ -1751,16 +1723,16 @@ const AddDelivery = () => {
             <button
               type="submit"
               disabled={isSubmitting || !formData.customerId}
-              className="flex items-center px-6 py-2 bg-teal-500 text-white rounded-lg hover:bg-teal-600 disabled:opacity-50"
+              className="flex items-center gap-2 px-6 py-2 bg-teal-600 text-white rounded text-sm font-semibold hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               {isSubmitting ? (
                 <>
-                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2" />
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
                   Creating...
                 </>
               ) : (
                 <>
-                  <Save className="w-5 h-5 mr-2" />
+                  <span className="material-symbols-outlined text-[18px]">save</span>
                   Create Collection
                 </>
               )}
@@ -1773,18 +1745,16 @@ const AddDelivery = () => {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           onSubmit={handleSubmit}
-          className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-6"
+          className="space-y-6"
         >
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Task Type *
-              </label>
+              <label className={fieldLabelCls}>Task Type *</label>
               <select
                 name="taskType"
                 value={formData.taskType}
                 onChange={handleChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                className={`${inputCls} appearance-none`}
                 required
               >
                 <option value="Purchase">Purchase</option>
@@ -1793,58 +1763,44 @@ const AddDelivery = () => {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Customer ID *
-              </label>
+              <label className={fieldLabelCls}>Customer ID *</label>
               <input
                 type="text"
                 name="customerId"
                 value={formData.customerId}
                 onChange={handleChange}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                className={inputCls}
                 placeholder="Enter customer ID"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Customer Name *
-              </label>
+              <label className={fieldLabelCls}>Customer Name *</label>
               <input
                 type="text"
                 name="customerName"
                 value={formData.customerName}
                 onChange={handleChange}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                className={inputCls}
                 placeholder="Enter customer name"
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Scheduled Time *
-              </label>
-              <input
-                type="datetime-local"
-                name="scheduledTime"
-                value={formData.scheduledTime}
-                onChange={handleChange}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
-              />
-            </div>
+            <ScheduledTimeField
+              value={formData.scheduledTime}
+              onChange={handleChange}
+              label="Scheduled Time *"
+            />
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Assign Driver
-              </label>
+              <label className={fieldLabelCls}>Assign Driver</label>
               <select
                 name="driver"
                 value={formData.driver}
                 onChange={handleChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                className={`${inputCls} appearance-none`}
               >
                 <option value="">Unassigned</option>
                 {drivers.map(driver => (
@@ -1856,30 +1812,26 @@ const AddDelivery = () => {
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Location / Address *
-              </label>
+              <label className={fieldLabelCls}>Location / Address *</label>
               <textarea
                 name="address"
                 value={formData.address}
                 onChange={handleChange}
                 rows={2}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                className={`${inputCls} resize-none`}
                 placeholder="Enter location or address"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Company *
-              </label>
+              <label className={fieldLabelCls}>Company *</label>
               <select
                 name="company"
                 value={formData.company}
                 onChange={handleChange}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                className={`${inputCls} appearance-none`}
               >
                 <option value="Matter">Matter</option>
                 <option value="Yellow Block">Yellow Block</option>
@@ -1890,39 +1842,33 @@ const AddDelivery = () => {
 
             {formData.company === 'Other' && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Other Company Name *
-                </label>
+                <label className={fieldLabelCls}>Other Company Name *</label>
                 <input
                   type="text"
                   name="otherCompany"
                   value={formData.otherCompany}
                   onChange={handleChange}
                   required
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                  className={inputCls}
                   placeholder="Enter company name"
                 />
               </div>
             )}
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Area
-              </label>
+              <label className={fieldLabelCls}>Area</label>
               <input
                 type="text"
                 name="zone"
                 value={formData.zone}
                 onChange={handleChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                className={inputCls}
                 placeholder="e.g., Dubai Marina"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                GPS Link
-              </label>
+              <label className={fieldLabelCls}>GPS Link</label>
               <input
                 type="text"
                 name="gpsLocation.link"
@@ -1937,15 +1883,13 @@ const AddDelivery = () => {
                     }
                   }))
                 }
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                className={inputCls}
                 placeholder="Paste Google Maps or Apple Maps link"
               />
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                To-Do List
-              </label>
+              <label className={fieldLabelCls}>To-Do List</label>
               <div className="space-y-2">
                 <div className="flex gap-2">
                   <input
@@ -1953,13 +1897,13 @@ const AddDelivery = () => {
                     value={todoInput}
                     onChange={(e) => setTodoInput(e.target.value)}
                     onKeyPress={(e) => e.key === 'Enter' && (e.preventDefault(), addTodoItem())}
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                    className={`flex-1 ${inputCls}`}
                     placeholder="Add a task item"
                   />
                   <button
                     type="button"
                     onClick={addTodoItem}
-                    className="px-4 py-2 bg-blue-500 text-white rounded-lg"
+                    className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:opacity-90 transition-opacity"
                   >
                     Add
                   </button>
@@ -1967,14 +1911,14 @@ const AddDelivery = () => {
                 {formData.todoList.length > 0 && (
                   <div className="space-y-2 mt-3">
                     {formData.todoList.map((item, index) => (
-                      <div key={index} className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg">
-                        <span className="flex-1">{item.text}</span>
+                      <div key={index} className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg border border-gray-100">
+                        <span className="flex-1 text-sm text-gray-700">{item.text}</span>
                         <button
                           type="button"
                           onClick={() => removeTodoItem(index)}
-                          className="text-red-600"
+                          className="text-red-500 hover:text-red-700"
                         >
-                          <X className="w-4 h-4" />
+                          <span className="material-symbols-outlined text-[18px]">close</span>
                         </button>
                       </div>
                     ))}
@@ -1997,25 +1941,23 @@ const AddDelivery = () => {
             </div>
 
             <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Notes
-              </label>
+              <label className={fieldLabelCls}>Notes</label>
               <textarea
                 name="notes"
                 value={formData.notes}
                 onChange={handleChange}
                 rows={3}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none"
+                className={`${inputCls} resize-none`}
                 placeholder="Additional notes or instructions..."
               />
             </div>
           </div>
 
-          <div className="flex justify-end space-x-3 pt-6 border-t border-gray-200">
+          <div className="flex justify-end gap-3 pt-6 border-t border-gray-100">
             <button
               type="button"
               onClick={() => navigate(-1)}
-              className="px-4 py-2 text-gray-600 bg-gray-200 rounded-lg disabled:opacity-50"
+              className="px-6 py-2 rounded border border-gray-200 bg-white text-gray-900 text-sm font-semibold hover:bg-gray-50 disabled:opacity-50 transition-colors"
               disabled={isSubmitting}
             >
               Cancel
@@ -2023,22 +1965,48 @@ const AddDelivery = () => {
             <button
               type="submit"
               disabled={isSubmitting}
-              className="flex items-center px-6 py-2 bg-blue-500 text-white rounded-lg disabled:opacity-50"
+              className="flex items-center gap-2 px-6 py-2 bg-blue-600 text-white rounded text-sm font-semibold hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               {isSubmitting ? (
                 <>
-                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2" />
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
                   Creating...
                 </>
               ) : (
                 <>
-                  <Save className="w-5 h-5 mr-2" />
+                  <span className="material-symbols-outlined text-[18px]">save</span>
                   Create Task
                 </>
               )}
             </button>
           </div>
         </motion.form>
+      )}
+      </div>
+      </div>
+
+      {/* Mobile fixed bottom action bar (Single Delivery tab only) */}
+      {activeTab === 'manual' && (
+        <div className="sm:hidden fixed bottom-0 left-0 w-full bg-white border-t border-gray-200 p-3 shadow-[0_-4px_12px_rgba(0,0,0,0.05)] z-20">
+          <button
+            type="submit"
+            form="manual-delivery-form"
+            disabled={isSubmitting}
+            className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white text-base font-semibold py-3 rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+          >
+            {isSubmitting ? (
+              <>
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
+                Creating...
+              </>
+            ) : (
+              <>
+                <span className="material-symbols-outlined text-[18px]">save</span>
+                Save Delivery
+              </>
+            )}
+          </button>
+        </div>
       )}
     </div>
   );

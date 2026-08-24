@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../utils/api';
 
-const WEEKDAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const WEEKDAY_LABELS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',
@@ -19,9 +19,15 @@ const toISODateLocal = (date) => {
   return `${y}-${m}-${d}`;
 };
 
+// Monday-first weekday index (0=Mon..6=Sun) instead of JS's Sunday-first getDay().
+const mondayFirstWeekday = (year, monthIndex, day = 1) => {
+  const jsDay = new Date(year, monthIndex, day).getDay();
+  return (jsDay + 6) % 7;
+};
+
 const buildMonth = (year, monthIndex) => {
   const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
-  const firstWeekday = new Date(year, monthIndex, 1).getDay();
+  const firstWeekday = mondayFirstWeekday(year, monthIndex);
   const days = [];
   for (let d = 1; d <= daysInMonth; d++) {
     days.push(`${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
@@ -29,19 +35,47 @@ const buildMonth = (year, monthIndex) => {
   return { firstWeekday, days };
 };
 
-export default function DeliveryCalendar({ cycleStartDate, pauses, deliverySchedule, customerId }) {
+const STATUS_STYLE = {
+  skipped: { cell: 'bg-matter-red/10', number: 'text-matter-red', dot: 'bg-matter-red' },
+  delivered: { cell: 'bg-matter-green/30', number: 'text-matter-navy', dot: 'bg-matter-charcoal' },
+  scheduled: { cell: 'bg-matter-sky/15', number: 'text-matter-navy', dot: 'bg-matter-sky' },
+  upcoming: { cell: 'bg-stone-100', number: 'text-gray-500', dot: 'bg-gray-300' },
+  none: { cell: '', number: 'text-gray-300', dot: '' },
+};
+
+const LEGEND = [
+  { key: 'delivered', label: 'Delivered', dot: 'bg-matter-charcoal' },
+  { key: 'scheduled', label: 'Scheduled', dot: 'bg-matter-sky' },
+  { key: 'upcoming', label: 'Upcoming', dot: 'bg-gray-300' },
+  { key: 'skipped', label: 'Skipped', dot: 'bg-matter-red' },
+];
+
+export default function DeliveryCalendar({ pauses, deliverySchedule, customerId }) {
   const navigate = useNavigate();
-  const year = cycleStartDate ? Number(String(cycleStartDate).slice(0, 4)) : new Date().getFullYear();
+  const today = new Date();
+  const todayISO = toISODateLocal(today);
+
+  const [viewYear, setViewYear] = useState(today.getFullYear());
+  const [viewMonth, setViewMonth] = useState(today.getMonth());
   const [deliveredDates, setDeliveredDates] = useState(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const pausedDates = new Set((pauses?.paused_days || []).map((d) => String(d).slice(0, 10)));
-  const resumedDates = new Set((pauses?.resumed_days || []).map((d) => String(d).slice(0, 10)));
-  const scheduledActiveDates = new Set(
-    (deliverySchedule || [])
-      .filter((entry) => entry.status === 'active')
-      .map((entry) => String(entry.date).slice(0, 10))
+  const pausedDates = useMemo(
+    () => new Set((pauses?.paused_days || []).map((d) => String(d).slice(0, 10))),
+    [pauses]
+  );
+  const resumedDates = useMemo(
+    () => new Set((pauses?.resumed_days || []).map((d) => String(d).slice(0, 10))),
+    [pauses]
+  );
+  const scheduledActiveDates = useMemo(
+    () => new Set(
+      (deliverySchedule || [])
+        .filter((entry) => entry.status === 'active')
+        .map((entry) => String(entry.date).slice(0, 10))
+    ),
+    [deliverySchedule]
   );
 
   useEffect(() => {
@@ -53,7 +87,7 @@ export default function DeliveryCalendar({ cycleStartDate, pauses, deliverySched
     setLoading(true);
     setError('');
     api.get('/deliveries', {
-      params: { customerId, dateFrom: `${year}-01-01`, dateTo: `${year}-12-31`, limit: 500 },
+      params: { customerId, dateFrom: `${viewYear}-01-01`, dateTo: `${viewYear}-12-31`, limit: 500 },
     })
       .then((res) => {
         if (!mounted) return;
@@ -71,77 +105,105 @@ export default function DeliveryCalendar({ cycleStartDate, pauses, deliverySched
       })
       .finally(() => mounted && setLoading(false));
     return () => { mounted = false; };
-  }, [customerId, year]);
+  }, [customerId, viewYear]);
 
   const dayStatus = (iso) => {
-    if (pausedDates.has(iso)) return 'paused';
-    if (deliveredDates.has(iso)) {
-      const { deliveryType } = deliveredDates.get(iso);
-      if (deliveryType === 'late') return 'late';
-      if (deliveryType === 'early') return 'early';
-      return 'delivered';
-    }
+    if (pausedDates.has(iso)) return 'skipped';
+    if (deliveredDates.has(iso)) return 'delivered';
     if (scheduledActiveDates.has(iso) || resumedDates.has(iso)) return 'scheduled';
+    if (iso > todayISO) return 'upcoming';
     return 'none';
   };
 
-  const colorFor = (status) => {
-    if (status === 'paused') return 'bg-amber-400';
-    if (status === 'late') return 'bg-red-500';
-    if (status === 'early') return 'bg-yellow-400';
-    if (status === 'delivered') return 'bg-emerald-700';
-    if (status === 'scheduled') return 'bg-emerald-400';
-    return 'bg-gray-100';
+  const goToPrevMonth = () => {
+    if (viewMonth === 0) { setViewMonth(11); setViewYear((y) => y - 1); }
+    else setViewMonth((m) => m - 1);
   };
+  const goToNextMonth = () => {
+    if (viewMonth === 11) { setViewMonth(0); setViewYear((y) => y + 1); }
+    else setViewMonth((m) => m + 1);
+  };
+
+  const { firstWeekday, days } = buildMonth(viewYear, viewMonth);
+  const cells = [...Array(firstWeekday).fill(null), ...days];
+
+  const legendCounts = useMemo(() => {
+    const counts = { delivered: 0, scheduled: 0, upcoming: 0, skipped: 0 };
+    days.forEach((iso) => {
+      const status = dayStatus(iso);
+      if (counts[status] !== undefined) counts[status] += 1;
+    });
+    return counts;
+  }, [days, deliveredDates, pausedDates, scheduledActiveDates, resumedDates, todayISO]);
 
   return (
     <div>
       {loading && <p className="text-xs text-gray-400 mb-2">Loading delivery history…</p>}
-      {error && <p className="text-xs text-rose-500 mb-2">{error}</p>}
+      {error && <p className="text-xs text-matter-red mb-2">{error}</p>}
       {!customerId && (
         <p className="text-xs text-gray-400 mb-2">No internal customer match — showing scheduled/paused/resumed days from Matter only, no confirmed delivery history.</p>
       )}
-      <div className="overflow-x-auto">
-        <div className="grid grid-cols-3 sm:grid-cols-4 gap-3 min-w-[560px]">
-          {MONTH_NAMES.map((name, monthIndex) => {
-            const { firstWeekday, days } = buildMonth(year, monthIndex);
-            const cells = [...Array(firstWeekday).fill(null), ...days];
-            return (
-              <div key={name} className="border border-gray-100 rounded-lg p-2">
-                <p className="text-[11px] font-semibold text-gray-600 mb-1 text-center">{name}</p>
-                <div className="grid grid-cols-7 gap-0.5">
-                  {WEEKDAYS.map((w, i) => (
-                    <div key={`${name}-wd-${i}`} className="text-[8px] text-gray-300 text-center">{w}</div>
-                  ))}
-                  {cells.map((iso, idx) => {
-                    if (!iso) return <div key={`${name}-blank-${idx}`} />;
-                    const status = dayStatus(iso);
-                    const day = Number(iso.slice(8, 10));
-                    const deliveryId = deliveredDates.get(iso)?.id;
-                    return (
-                      <div
-                        key={iso}
-                        title={`${iso}${status !== 'none' ? ` · ${status}` : ''}${deliveryId ? ' · click to view delivery' : ''}`}
-                        onClick={deliveryId ? () => navigate(`/deliveries/${deliveryId}`) : undefined}
-                        className={`w-4 h-4 rounded-sm text-[7px] flex items-center justify-center ${colorFor(status)} ${status === 'none' ? 'text-gray-400' : 'text-white'} ${deliveryId ? 'cursor-pointer hover:ring-2 hover:ring-offset-1 hover:ring-purple-400' : ''}`}
-                      >
-                        {day}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+
+      <div className="flex items-center justify-between mb-4">
+        <button
+          type="button"
+          onClick={goToPrevMonth}
+          className="w-8 h-8 flex items-center justify-center rounded-full bg-stone-100 hover:bg-stone-200 text-gray-600 transition-colors"
+        >
+          <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+        </button>
+        <p className="font-serif-mgmt text-base font-bold text-gray-900">{MONTH_NAMES[viewMonth]} {viewYear}</p>
+        <button
+          type="button"
+          onClick={goToNextMonth}
+          className="w-8 h-8 flex items-center justify-center rounded-full bg-stone-100 hover:bg-stone-200 text-gray-600 transition-colors"
+        >
+          <span className="material-symbols-outlined text-[18px]">chevron_right</span>
+        </button>
       </div>
-      <div className="flex items-center gap-4 mt-3 text-xs text-gray-500 flex-wrap">
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-700 inline-block" /> Delivered on time</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-yellow-400 inline-block" /> Delivered early</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-red-500 inline-block" /> Delivered late</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-emerald-400 inline-block" /> Scheduled</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-amber-400 inline-block" /> Paused</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-gray-100 border border-gray-200 inline-block" /> No delivery</span>
+
+      <div className="grid grid-cols-7 gap-2 mb-2">
+        {WEEKDAY_LABELS.map((w) => (
+          <div key={w} className="text-[10px] font-semibold text-gray-400 text-center tracking-wide">{w}</div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-7 gap-2">
+        {cells.map((iso, idx) => {
+          if (!iso) return <div key={`blank-${idx}`} />;
+          const status = dayStatus(iso);
+          const style = STATUS_STYLE[status] || STATUS_STYLE.none;
+          const day = Number(iso.slice(8, 10));
+          const isToday = iso === todayISO;
+          const entry = deliveredDates.get(iso);
+          const deliveryId = entry?.id;
+          const tooltip = `${iso}${status !== 'none' ? ` · ${status}${entry?.deliveryType && status === 'delivered' ? ` (${entry.deliveryType})` : ''}` : ''}${deliveryId ? ' · click to view delivery' : ''}`;
+
+          return (
+            <button
+              type="button"
+              key={iso}
+              title={tooltip}
+              onClick={deliveryId ? () => navigate(`/deliveries/${deliveryId}`) : undefined}
+              disabled={!deliveryId}
+              className={`aspect-square rounded-xl flex flex-col items-center justify-center gap-1 transition-colors ${style.cell || 'bg-stone-50'} ${
+                isToday ? 'ring-2 ring-matter-sky' : ''
+              } ${deliveryId ? 'cursor-pointer hover:brightness-95' : 'cursor-default'}`}
+            >
+              <span className={`text-sm font-semibold ${isToday ? 'text-gray-900' : style.number}`}>{day}</span>
+              {status !== 'none' && <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} />}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="flex items-center gap-4 mt-4 text-xs text-gray-500 flex-wrap">
+        {LEGEND.map((l) => (
+          <span key={l.key} className="flex items-center gap-1.5">
+            <span className={`w-2.5 h-2.5 rounded-full inline-block ${l.dot}`} />
+            {l.label} ({legendCounts[l.key]})
+          </span>
+        ))}
       </div>
     </div>
   );

@@ -9,26 +9,25 @@ import { refreshCurrentUser } from './store/slices/authSlice';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Drivers from './pages/Drivers';
+import FleetManagement from './pages/FleetManagement';
 import DriverDetail from './pages/DriverDetail';
 import Deliveries from './pages/Deliveries';
 import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
 import BagTracking from './pages/BagTracking';
-import LateDeliveries from './pages/LateDeliveries';
 import Reports from './pages/Reports';
 import CreateDriver from './pages/CreateDriver';
-import LiveMap from './pages/LiveMap';
 import DriverMobile from './pages/DriverMobile';
 import Users from './pages/Users'
 import Employees from './pages/Employees'
 import DeliveryChanges from './pages/DeliveryChanges';
+import AddDeliveryChange from './pages/AddDeliveryChange';
 import DispatcherMobile from './pages/DispatcherMobile';
 import DispatcherDesktop from './pages/DispatcherDesktop';
 import StoreKeeper from './pages/StoreKeeper';
 import Customers from './pages/Customers';
 import Events from './pages/Events';
 import Complaints from './pages/Complaints';
-import Communication from './pages/Communication';
 import BatchAutoAssign from './pages/BatchAutoAssign';
 import TestAPI from './pages/TestAPI';
 import MenuManagement from './pages/MenuManagement';
@@ -43,7 +42,7 @@ import PartnerPortal from './pages/PartnerPortal';
 import AdminPartners from './pages/AdminPartners';
 import Subscription from './pages/Subscription';
 import WebsiteSubscription from './pages/WebsiteSubscription';
-import WebsiteSubscriptionProfile from './pages/WebsiteSubscriptionProfile';
+import CustomerAnalytics from './pages/CustomerAnalytics';
 import Renewal from './pages/Renewal';
 
 // Layout
@@ -123,9 +122,7 @@ const getFirstAvailablePath = (user) => {
     { path: '/customers', permission: 'customers', roles: ['super_admin', 'admin', 'manager'] },
     { path: '/events', permission: 'events', roles: ['super_admin', 'admin'] },
     { path: '/bags', permission: 'bags', roles: ['super_admin', 'admin', 'manager'] },
-    { path: '/late-deliveries', permission: 'late_deliveries', roles: ['super_admin', 'admin', 'manager'] },
     { path: '/complaints', permission: 'complaints', roles: ['super_admin', 'admin'] },
-    { path: '/map', permission: 'live_map', roles: ['super_admin', 'admin', 'manager'] },
     { path: '/delivery-changes', permission: 'delivery_changes', roles: ['super_admin', 'admin'] },
     { path: '/users', permission: 'users', roles: ['super_admin', 'admin'] },
     { path: '/reports', permission: 'reports', roles: ['super_admin', 'admin', 'manager', 'viewer'] },
@@ -237,16 +234,6 @@ function App() {
               </ProtectedRoute>
             } />
 
-            <Route path="/map" element={
-  <ProtectedRoute>
-    <PermissionBasedRoute permission="live_map">
-      <Layout>
-        <LiveMap />
-      </Layout>
-    </PermissionBasedRoute>
-  </ProtectedRoute>
-} />
-            
             <Route path="/drivers" element={
               <ProtectedRoute>
                 <RoleBasedRoute allowedRoles={['admin']}>
@@ -258,7 +245,19 @@ function App() {
                 </RoleBasedRoute>
               </ProtectedRoute>
             } />
-            
+
+            <Route path="/fleet" element={
+              <ProtectedRoute>
+                <RoleBasedRoute allowedRoles={['admin']}>
+                  <PermissionBasedRoute permission="fleet">
+                    <Layout>
+                      <FleetManagement />
+                    </Layout>
+                  </PermissionBasedRoute>
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+
             <Route path="/drivers/create" element={
               <ProtectedRoute>
                 <RoleBasedRoute allowedRoles={['admin']}>
@@ -415,16 +414,6 @@ function App() {
               </ProtectedRoute>
             } />
             
-            <Route path="/late-deliveries" element={
-              <ProtectedRoute>
-                <PermissionBasedRoute permission="late_deliveries">
-                  <Layout>
-                    <LateDeliveries />
-                  </Layout>
-                </PermissionBasedRoute>
-              </ProtectedRoute>
-            } />
-            
             <Route path="/reports" element={
               <ProtectedRoute>
                 <PermissionBasedRoute permission="reports">
@@ -456,7 +445,16 @@ function App() {
               <ProtectedRoute>
                 <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
                   <Layout>
-                    <WebsiteSubscriptionProfile />
+                    <WebsiteSubscription />
+                  </Layout>
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+            <Route path="/customer-analytics" element={
+              <ProtectedRoute>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
+                  <Layout>
+                    <CustomerAnalytics />
                   </Layout>
                 </RoleBasedRoute>
               </ProtectedRoute>
@@ -470,21 +468,24 @@ function App() {
                 </RoleBasedRoute>
               </ProtectedRoute>
             } />
-            <Route path="/communications" element={
-              <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'dispatcher', 'manager']}>
-                  <Layout>
-                    <Communication />
-                  </Layout>
-                </RoleBasedRoute>
-              </ProtectedRoute>
-            } />
              <Route path="/delivery-changes" element={
               <ProtectedRoute>
                 <RoleBasedRoute allowedRoles={['super_admin', 'admin']}>
                   <PermissionBasedRoute permission="delivery_changes">
                     <Layout>
                       <DeliveryChanges />
+                    </Layout>
+                  </PermissionBasedRoute>
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+
+            <Route path="/delivery-changes/add" element={
+              <ProtectedRoute>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin']}>
+                  <PermissionBasedRoute permission="delivery_changes">
+                    <Layout>
+                      <AddDeliveryChange />
                     </Layout>
                   </PermissionBasedRoute>
                 </RoleBasedRoute>

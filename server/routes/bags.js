@@ -88,12 +88,17 @@ router.get('/', protect, async (req, res) => {
     const isFlagged = req.query.isFlagged;
     const location = req.query.location;
     const driverId = req.query.driverId;
+    const bagType = req.query.bagType;
 
     let query = {};
 
     // Add isFlagged filter if provided
     if (isFlagged === 'true') {
       query.isFlagged = true;
+    }
+
+    if (bagType && ['standard', 'on_time_use'].includes(bagType)) {
+      query.bagType = bagType;
     }
 
     // Add status filter if provided and not 'all'
@@ -186,7 +191,7 @@ router.get('/', protect, async (req, res) => {
 // Create single bag
 router.post('/', authorize(['admin', 'super_admin', 'dispatcher']), async (req, res) => {
   try {
-    const { bagId, condition, location, notes } = req.body;
+    const { bagId, condition, location, notes, bagType } = req.body;
 
     // Check if bag already exists
     const existingBag = await Bag.findOne({ bagId });
@@ -201,7 +206,8 @@ router.post('/', authorize(['admin', 'super_admin', 'dispatcher']), async (req, 
       bagId,
       condition,
       location,
-      notes
+      notes,
+      bagType
     });
 
     await bag.save();

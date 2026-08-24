@@ -26,6 +26,7 @@ const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) 
     dashboard: false,
     users: false,
     drivers: false,
+    fleet: false,
     deliveries: false,
     customers: false,
     events: false,
@@ -91,6 +92,7 @@ const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) 
         permissions.dashboard = true;
         permissions.users = true;
         permissions.drivers = true;
+        permissions.fleet = true;
         permissions.deliveries = true;
         permissions.customers = true;
         permissions.events = true;
@@ -167,6 +169,7 @@ const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) 
       dashboard: 'Access to dashboard and overview statistics',
       users: 'Manage users and their permissions (Admin only)',
       drivers: 'View and manage driver accounts and performance',
+      fleet: 'View and manage vehicles, assignments, and fleet status',
       deliveries: 'Create, view, and manage deliveries',
       customers: 'View and manage customer accounts',
       events: 'Create and manage events',

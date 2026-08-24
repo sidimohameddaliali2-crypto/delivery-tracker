@@ -78,6 +78,17 @@ const Reports = () => {
   const [monthlyLoading, setMonthlyLoading] = useState(false);
   const [monthlyGenerated, setMonthlyGenerated] = useState(false);
 
+  // Multi-Month Excel Export state (one worksheet per day)
+  const [multiExportRange, setMultiExportRange] = useState(() => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth() - 2, 1); // 3 months back, incl. current
+    return {
+      startDate: formatDateKeyLocal(start),
+      endDate: formatDateKeyLocal(now),
+    };
+  });
+  const [multiExportLoading, setMultiExportLoading] = useState(false);
+
   const normalizeStatus = (delivery) => {
     const rawStatus = (delivery.status || '').toString().trim().toLowerCase();
     const isDriverMissing = !delivery.driverName && !delivery.driver?.profile?.name;
@@ -606,6 +617,106 @@ const generatePDF = (data) => {
   
 
   // Format date for display
+  const generateMultiMonthExcel = async () => {
+    setMultiExportLoading(true);
+    try {
+      const start = parseDateInput(multiExportRange.startDate);
+      start.setHours(0, 0, 0, 0);
+      const end = parseDateInput(multiExportRange.endDate);
+      end.setHours(23, 59, 59, 999);
+
+      if (start > end) {
+        alert('Start date must be before end date.');
+        return;
+      }
+
+      const response = await api.get('/reports', {
+        params: { startDate: start.toISOString(), endDate: end.toISOString() }
+      });
+      const deliveries = response.data?.data?.allDeliveries || [];
+
+      if (deliveries.length === 0) {
+        alert('No deliveries found for the selected date range.');
+        return;
+      }
+
+      const offsetMinutes = Number(process.env.REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES || 0);
+      const formatTime = (d) => {
+        const local = new Date(new Date(d).getTime() + offsetMinutes * 60 * 1000);
+        return `${String(local.getUTCHours()).padStart(2, '0')}:${String(local.getUTCMinutes()).padStart(2, '0')}`;
+      };
+
+      // Group deliveries by calendar day (scheduled date), one worksheet per day
+      const byDay = new Map();
+      deliveries.forEach((delivery) => {
+        if (!delivery.scheduledTime) return;
+        const dayKey = formatDateKeyLocal(new Date(delivery.scheduledTime));
+        if (!byDay.has(dayKey)) byDay.set(dayKey, []);
+        byDay.get(dayKey).push(delivery);
+      });
+
+      const sortedDays = Array.from(byDay.keys()).sort();
+
+      const workbook = XLSX.utils.book_new();
+      sortedDays.forEach((dayKey) => {
+        const dayDeliveries = byDay.get(dayKey)
+          .slice()
+          .sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime));
+
+        const sheetData = [
+          ['Matter Delivery Tracker'],
+          [`Deliveries for ${dayKey}`],
+          [`Total: ${dayDeliveries.length}`],
+          [],
+          ['Customer', 'Address', 'Scheduled Time', 'Delivered Time', 'Status', 'Driver'],
+        ];
+
+        dayDeliveries.forEach((delivery) => {
+          const driverName = delivery.driverName || delivery.driver?.profile?.name || 'Unassigned';
+          const deliveredTimeStr = delivery.deliveredTime ? formatTime(delivery.deliveredTime) : 'Not delivered';
+
+          let statusLabel;
+          if (!delivery.deliveredTime) {
+            statusLabel = 'Not delivered';
+          } else if (delivery.lateMinutes > 0) {
+            statusLabel = `Late (${delivery.lateMinutes} min)`;
+          } else if (delivery.earlyMinutes > 0) {
+            statusLabel = `Early (${delivery.earlyMinutes} min)`;
+          } else {
+            statusLabel = 'On time';
+          }
+
+          sheetData.push([
+            delivery.customerName || '-',
+            delivery.address || '-',
+            formatTime(delivery.scheduledTime),
+            deliveredTimeStr,
+            statusLabel,
+            driverName,
+          ]);
+        });
+
+        const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
+        worksheet['!cols'] = [24, 32, 14, 14, 16, 20].map((w) => ({ wch: w }));
+        // Sheet names can't exceed 31 chars or contain : \ / ? * [ ] — "YYYY-MM-DD" is safe
+        XLSX.utils.book_append_sheet(workbook, worksheet, dayKey);
+      });
+
+      const workbookArray = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+      downloadFile(
+        workbookArray,
+        `deliveries-${multiExportRange.startDate}-to-${multiExportRange.endDate}.xlsx`,
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      );
+    } catch (error) {
+      console.error('Multi-month export error:', error);
+      alert('Failed to generate the Excel export. Please try again.');
+    } finally {
+      setMultiExportLoading(false);
+    }
+  };
+
+  // Format date for display
   const formatDate = (date) => {
     return date.toLocaleDateString();
   };
@@ -666,8 +777,60 @@ const generatePDF = (data) => {
           >
             📅 Monthly Sales Report
           </button>
+          <button
+            onClick={() => setViewMode('multi-month-export')}
+            className={`px-6 py-3 rounded-lg font-semibold transition-all ${
+              viewMode === 'multi-month-export'
+                ? 'bg-indigo-600 text-white shadow-lg'
+                : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
+            }`}
+          >
+            🗂️ Multi-Month Excel Export
+          </button>
         </div>
       </div>
+
+      {/* Multi-Month Excel Export View */}
+      {viewMode === 'multi-month-export' && (
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">Multi-Month Excel Export</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            Download deliveries across a date range as a single Excel workbook — one worksheet per day,
+            with customer, address, scheduled time, delivered time, on-time/late/early status, and assigned driver.
+          </p>
+          <div className="flex flex-wrap gap-4 items-end">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">From</label>
+              <input
+                type="date"
+                value={multiExportRange.startDate}
+                onChange={(e) => setMultiExportRange((r) => ({ ...r, startDate: e.target.value }))}
+                className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">To</label>
+              <input
+                type="date"
+                value={multiExportRange.endDate}
+                onChange={(e) => setMultiExportRange((r) => ({ ...r, endDate: e.target.value }))}
+                className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <button
+              onClick={generateMultiMonthExcel}
+              disabled={multiExportLoading}
+              className="inline-flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700 disabled:opacity-50 transition"
+            >
+              <Download className="w-4 h-4" />
+              {multiExportLoading ? 'Generating…' : 'Download Excel'}
+            </button>
+          </div>
+          <p className="mt-3 text-xs text-gray-400">
+            Large ranges can produce a workbook with many worksheets — only days with at least one delivery are included.
+          </p>
+        </div>
+      )}
 
       {/* Monthly Sales Report View */}
       {viewMode === 'monthly-sales' && (() => {

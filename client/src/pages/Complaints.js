@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import * as XLSX from 'xlsx';
-import { AlertTriangle, Search, Filter, Eye, CheckCircle, Clock, User, ChevronLeft, ChevronRight, Download, Plus, X } from 'lucide-react';
+import { AlertTriangle, Download, X } from 'lucide-react';
 import api from '../utils/api';
 
 const Complaints = () => {
   const [complaints, setComplaints] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [complaintTypeFilter, setComplaintTypeFilter] = useState('all');
@@ -130,7 +131,9 @@ const Complaints = () => {
 
   const fetchComplaints = useCallback(async () => {
     try {
-      setIsLoading(true);
+      const isFirstPage = currentPage === 1;
+      if (isFirstPage) setIsLoading(true);
+      else setIsLoadingMore(true);
       setError(null);
 
       const params = {
@@ -165,14 +168,17 @@ const Complaints = () => {
       console.log('Fetching complaints with params:', params);
       const response = await api.get('/deliveries/complaints/all', { params });
       console.log('Complaints response:', response.data);
-      
-      setComplaints(response.data.data.complaints);
+
+      setComplaints((prev) =>
+        currentPage === 1 ? response.data.data.complaints : [...prev, ...response.data.data.complaints]
+      );
       setTotalPages(response.data.data.pagination.pages);
     } catch (err) {
       console.error('Fetch complaints error:', err);
       setError(err.response?.data?.message || 'Failed to fetch complaints');
     } finally {
       setIsLoading(false);
+      setIsLoadingMore(false);
     }
   }, [currentPage, complaintTypeFilter, resolvedFilter, searchTerm, sortBy, sortOrder, selectedDate]);
 
@@ -180,10 +186,10 @@ const Complaints = () => {
     fetchComplaints();
   }, [fetchComplaints]);
 
-  // Clear selections when complaints change
+  // Clear selections when filters change (not when "Load More" appends to the list)
   useEffect(() => {
     setSelectedComplaints([]);
-  }, [complaints]);
+  }, [complaintTypeFilter, resolvedFilter, searchTerm, sortBy, sortOrder, selectedDate]);
 
   const toggleSelectComplaint = (complaintId) => {
     setSelectedComplaints(prev => 
@@ -267,6 +273,50 @@ const Complaints = () => {
     
     return `${month}/${day}/${year} ${hours}:${minutes}`;
   };
+
+  const formatRelativeDate = (dateString) => {
+    if (!dateString) return 'N/A';
+    const offsetMinutes = Number(process.env.REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES || 0);
+    const date = new Date(new Date(dateString).getTime() + offsetMinutes * 60 * 1000);
+    const now = new Date(Date.now() + offsetMinutes * 60 * 1000);
+
+    const dayKey = (d) => `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    if (dayKey(date) === dayKey(now)) {
+      const hours = date.getUTCHours();
+      const minutes = String(date.getUTCMinutes()).padStart(2, '0');
+      const period = hours >= 12 ? 'PM' : 'AM';
+      const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+      return `Today, ${hour12}:${minutes} ${period}`;
+    }
+    if (dayKey(date) === dayKey(oneDayAgo)) return 'Yesterday';
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  };
+
+  const getComplaintTypeDotColor = (type) => {
+    const colors = {
+      late: 'bg-red-500',
+      early: 'bg-yellow-500',
+      missed: 'bg-purple-500',
+      wrong_address: 'bg-orange-500',
+      delivery_issue: 'bg-pink-500',
+      food_quality: 'bg-amber-500',
+      major_incident: 'bg-rose-500',
+      damaged_food: 'bg-red-500',
+      macros_inaccuracy: 'bg-indigo-500',
+      late_delivery_transcorp: 'bg-orange-500',
+      wrong_food: 'bg-yellow-500',
+      other: 'bg-gray-400'
+    };
+    return colors[type] || 'bg-gray-400';
+  };
+
+  const getStatusMeta = (resolved) => (
+    resolved
+      ? { label: 'Resolved', icon: 'check_circle', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' }
+      : { label: 'Pending', icon: 'schedule', cls: 'bg-amber-50 text-amber-700 border-amber-200' }
+  );
 
   const exportToExcel = () => {
     if (exportSelectedTypes.length === 0) {
@@ -467,57 +517,28 @@ const Complaints = () => {
 
   return (
     <>
-    <div className="min-h-screen bg-gray-50 p-4 sm:p-6">
+    <div className="matter-analytics min-h-screen bg-gray-50 p-4 sm:p-6">
       <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <AlertTriangle className="w-8 h-8 text-red-600" />
-              <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Complaints Management</h1>
-            </div>
-            {selectedComplaints.length > 0 && (
-              <span className="text-sm text-gray-600 bg-blue-50 px-3 py-2 rounded-lg w-fit">
-                {selectedComplaints.length} selected
-              </span>
-            )}
-          </div>
-          <div className="flex flex-col sm:flex-row gap-3 w-full mb-3">
-            <button
-              onClick={() => setIsManualOpen(true)}
-              className="flex items-center justify-center gap-2 px-4 py-2 w-full sm:w-auto bg-white border border-gray-300 text-gray-800 rounded-lg hover:bg-gray-50 transition text-sm"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add Complaint</span>
-            </button>
-            <button
-              onClick={exportToPDF}
-              disabled={complaints.length === 0}
-              className="flex items-center justify-center gap-2 px-4 py-2 w-full sm:w-auto bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition text-sm"
-            >
-              <Download className="w-4 h-4" />
-              <span>{selectedComplaints.length > 0 ? 'Export Selected' : 'Export All'}</span>
-            </button>
-            <button
-              onClick={() => setIsExportModalOpen(true)}
-              disabled={complaints.length === 0}
-              className="flex items-center justify-center gap-2 px-4 py-2 w-full sm:w-auto bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition text-sm"
-            >
-              <Download className="w-4 h-4" />
-              <span>{selectedComplaints.length > 0 ? 'Excel Selected' : 'Excel All'}</span>
-            </button>
-          </div>
-          <p className="text-gray-600 text-sm">View and manage all reported delivery issues</p>
+        {/* Search */}
+        <div className="relative mb-4 max-w-md">
+          <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-[20px]">search</span>
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setCurrentPage(1);
+            }}
+            placeholder="Search complaints, IDs, or customers..."
+            className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          />
         </div>
 
-        {/* Filters */}
-        <div className="bg-white rounded-lg shadow-sm p-3 sm:p-4 mb-6 space-y-3 sm:space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 sm:gap-4">
-            {/* Date Filter */}
-            <div>
-              <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
-                Date
-              </label>
+        {/* Toolbar */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 text-[18px] pointer-events-none">calendar_today</span>
               <input
                 type="date"
                 value={selectedDate}
@@ -525,42 +546,19 @@ const Complaints = () => {
                   setSelectedDate(e.target.value);
                   setCurrentPage(1);
                 }}
-                className="w-full px-2 sm:px-3 py-2 text-xs sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="pl-8 pr-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
             </div>
 
-            {/* Search */}
-            <div>
-              <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
-                Search Customer
-              </label>
-              <div className="relative">
-                <Search className="absolute left-3 top-3 w-4 h-4 text-gray-400" />
-                <input
-                  type="text"
-                  value={searchTerm}
-                  onChange={(e) => {
-                    setSearchTerm(e.target.value);
-                    setCurrentPage(1);
-                  }}
-                  placeholder="Name or ID"
-                  className="w-full pl-10 pr-3 py-2 text-xs sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-            </div>
-
-            {/* Complaint Type Filter */}
-            <div>
-              <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
-                Type
-              </label>
+            <div className="relative">
+              <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 text-[18px] pointer-events-none">category</span>
               <select
                 value={complaintTypeFilter}
                 onChange={(e) => {
                   setComplaintTypeFilter(e.target.value);
                   setCurrentPage(1);
                 }}
-                className="w-full px-2 sm:px-3 py-2 text-xs sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="appearance-none pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               >
                 {complaintTypes.map((type) => (
                   <option key={type.value} value={type.value}>
@@ -568,41 +566,82 @@ const Complaints = () => {
                   </option>
                 ))}
               </select>
+              <span className="material-symbols-outlined absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-400 text-[18px] pointer-events-none">arrow_drop_down</span>
             </div>
 
-            {/* Resolved Filter */}
-            <div>
-              <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
-                Status
-              </label>
+            <div className="relative">
+              <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 text-[18px] pointer-events-none">filter_list</span>
               <select
                 value={resolvedFilter}
                 onChange={(e) => {
                   setResolvedFilter(e.target.value);
                   setCurrentPage(1);
                 }}
-                className="w-full px-2 sm:px-3 py-2 text-xs sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="appearance-none pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               >
                 <option value="all">All Status</option>
                 <option value="unresolved">Unresolved</option>
                 <option value="resolved">Resolved</option>
               </select>
+              <span className="material-symbols-outlined absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-400 text-[18px] pointer-events-none">arrow_drop_down</span>
             </div>
 
-            {/* Sort */}
-            <div>
-              <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
-                Sort By
-              </label>
+            <div className="relative">
+              <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 text-[18px] pointer-events-none">sort</span>
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value)}
-                className="w-full px-2 sm:px-3 py-2 text-xs sm:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="appearance-none pl-8 pr-7 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               >
                 <option value="reportedAt">Recent First</option>
                 <option value="customerName">Customer Name</option>
               </select>
+              <span className="material-symbols-outlined absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-400 text-[18px] pointer-events-none">arrow_drop_down</span>
             </div>
+
+            {resolvedFilter !== 'all' && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-gray-100 rounded-full border border-gray-200">
+                <span className="text-xs text-gray-600">Status: {resolvedFilter === 'resolved' ? 'Resolved' : 'Unresolved'}</span>
+                <button
+                  onClick={() => { setResolvedFilter('all'); setCurrentPage(1); }}
+                  className="text-gray-400 hover:text-gray-700 flex items-center justify-center rounded-full p-0.5 hover:bg-gray-200 transition-colors"
+                >
+                  <span className="material-symbols-outlined text-[14px]">close</span>
+                </button>
+              </div>
+            )}
+
+            {selectedComplaints.length > 0 && (
+              <span className="text-xs text-blue-700 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-full">
+                {selectedComplaints.length} selected
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              onClick={exportToPDF}
+              disabled={complaints.length === 0}
+              className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-blue-600 text-sm font-medium hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+            >
+              <Download className="w-4 h-4" />
+              {selectedComplaints.length > 0 ? 'PDF Selected' : 'PDF Report'}
+            </button>
+            <button
+              onClick={() => setIsExportModalOpen(true)}
+              disabled={complaints.length === 0}
+              className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-emerald-600 text-sm font-medium hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+            >
+              <Download className="w-4 h-4" />
+              {selectedComplaints.length > 0 ? 'Excel Selected' : 'Excel Report'}
+            </button>
+            <button
+              onClick={() => setIsManualOpen(true)}
+              className="flex items-center justify-center gap-2 px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:opacity-90 transition-opacity shadow-sm"
+            >
+              <span className="material-symbols-outlined text-[18px]">add_circle</span>
+              Add Complaint
+            </button>
           </div>
         </div>
 
@@ -623,139 +662,130 @@ const Complaints = () => {
           </div>
         ) : (
           <>
-            {/* Complaints Table */}
-            <div className="bg-white rounded-lg shadow-sm overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-gray-200 bg-gray-50">
-                      <th className="px-4 py-3 text-center">
-                        <input
-                          type="checkbox"
-                          checked={selectedComplaints.length === complaints.length && complaints.length > 0}
-                          onChange={toggleSelectAll}
-                          className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                        />
-                      </th>
-                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Customer</th>
-                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Complaint Type</th>
-                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Remarks</th>
-                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Compensation</th>
-                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Status</th>
-                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Date</th>
-                      <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {complaints.map((complaint) => (
-                      <tr key={complaint._id} className="border-b border-gray-200 hover:bg-gray-50">
-                        <td className="px-4 py-3 text-center">
-                          <input
-                            type="checkbox"
-                            checked={selectedComplaints.includes(complaint._id)}
-                            onChange={() => toggleSelectComplaint(complaint._id)}
-                            className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                          />
-                        </td>
-                        <td className="px-4 py-3">
-                          <div>
-                            <p className="font-medium text-gray-900">{complaint.customerName}</p>
-                            <p className="text-sm text-gray-600">{complaint.customerId}</p>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          {complaint.complaint?.complaintType ? (
-                            <span className={`inline-block px-3 py-1 rounded-full text-xs font-medium ${getComplaintTypeColor(complaint.complaint.complaintType)}`}>
-                              {getComplaintTypeLabel(complaint.complaint.complaintType)}
-                            </span>
-                          ) : (
-                            <span className="inline-block px-3 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-                              No Type
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          <p className="text-sm text-gray-700 max-w-xs truncate">
-                            {complaint.complaint?.remarks || '-'}
-                          </p>
-                        </td>
-                        <td className="px-4 py-3">
-                          {complaint.complaint?.compensation ? (
-                            <div className="text-sm">
-                              {complaint.complaint.compensation.type === 'refund' ? (
-                                <p className="text-green-700 font-medium">
-                                  💰 AED {complaint.complaint.compensation.amount}
-                                </p>
-                              ) : (
-                                <p className="text-blue-700 font-medium">
-                                  📅 {complaint.complaint.compensation.days} day(s)
-                                </p>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-gray-500 text-sm">-</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            {complaint.complaint?.resolved ? (
-                              <>
-                                <CheckCircle className="w-4 h-4 text-green-600" />
-                                <span className="text-sm font-medium text-green-700">Resolved</span>
-                              </>
-                            ) : (
-                              <>
-                                <Clock className="w-4 h-4 text-yellow-600" />
-                                <span className="text-sm font-medium text-yellow-700">Pending</span>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <p className="text-sm text-gray-600">
-                            {formatDate(complaint.complaint?.reportedAt || complaint.updatedAt)}
-                          </p>
-                        </td>
-                        <td className="px-4 py-3">
-                          <Link
-                            to={`/deliveries/${complaint._id}`}
-                            className="inline-flex items-center gap-2 px-3 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition"
-                          >
-                            <Eye className="w-4 h-4" />
-                            <span className="text-sm font-medium">View</span>
-                          </Link>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+            <div className="flex items-center justify-between mb-3">
+              <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer w-fit">
+                <input
+                  type="checkbox"
+                  checked={selectedComplaints.length === complaints.length && complaints.length > 0}
+                  onChange={toggleSelectAll}
+                  className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                />
+                Select all loaded
+              </label>
             </div>
 
-            {/* Pagination */}
-            {totalPages > 1 && (
-              <div className="mt-6 flex items-center justify-between">
-                <p className="text-sm text-gray-600">
-                  Page {currentPage} of {totalPages}
-                </p>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                    disabled={currentPage === 1}
-                    className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            {/* Bento Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {complaints.map((complaint) => {
+                const resolved = !!complaint.complaint?.resolved;
+                const status = getStatusMeta(resolved);
+                const complaintType = complaint.complaint?.complaintType;
+                const shortId = `CMP-${(complaint._id || '').slice(-6).toUpperCase()}`;
+                const driverName = complaint.driver?.profile
+                  ? `${complaint.driver.profile.firstName || ''} ${complaint.driver.profile.lastName || ''}`.trim()
+                  : complaint.driver?.name;
+                const isSelected = selectedComplaints.includes(complaint._id);
+
+                return (
+                  <div
+                    key={complaint._id}
+                    className={`bg-white border rounded-xl p-5 flex flex-col relative overflow-hidden shadow-sm transition-colors ${
+                      resolved ? 'border-gray-200 opacity-80 hover:opacity-100' : 'border-red-200 hover:border-red-300'
+                    }`}
                   >
-                    <ChevronLeft className="w-4 h-4" />
-                    Previous
-                  </button>
-                  <button
-                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                    disabled={currentPage === totalPages}
-                    className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Next
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
+                    {!resolved && <div className="absolute top-0 left-0 w-full h-1 bg-red-500" />}
+
+                    <div className="flex justify-between items-start mb-4 gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectComplaint(complaint._id)}
+                          className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500 flex-shrink-0"
+                        />
+                        <span className="font-mono text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">{shortId}</span>
+                        <span className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold border ${status.cls}`}>
+                          <span className="material-symbols-outlined text-[14px]">{status.icon}</span>
+                          {status.label.toUpperCase()}
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-gray-400 whitespace-nowrap flex-shrink-0">
+                        {formatRelativeDate(complaint.complaint?.reportedAt || complaint.updatedAt)}
+                      </span>
+                    </div>
+
+                    <div className="mb-4 flex-1">
+                      <h3 className="text-base font-semibold text-gray-900 mb-1 line-clamp-1">{complaint.customerName || 'Unknown Customer'}</h3>
+                      <p className="text-sm text-gray-500 line-clamp-2">{complaint.complaint?.remarks || 'No remarks provided.'}</p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-3 mb-4">
+                      {complaintType ? (
+                        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-gray-50 rounded-md border border-gray-200">
+                          <span className={`w-2 h-2 rounded-full ${getComplaintTypeDotColor(complaintType)}`} />
+                          <span className="text-[11px] text-gray-600">{getComplaintTypeLabel(complaintType)}</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-gray-50 rounded-md border border-gray-200">
+                          <span className="text-[11px] text-gray-500">No Type</span>
+                        </div>
+                      )}
+                      {complaint.zone && (
+                        <div className="flex items-center gap-1.5 text-gray-400">
+                          <span className="material-symbols-outlined text-[16px]">map</span>
+                          <span className="text-xs">{complaint.zone}</span>
+                        </div>
+                      )}
+                      {complaint.complaint?.compensation && (
+                        <div className="flex items-center gap-1.5 text-emerald-700">
+                          <span className="text-xs font-medium">
+                            {complaint.complaint.compensation.type === 'refund'
+                              ? `💰 AED ${complaint.complaint.compensation.amount}`
+                              : `📅 ${complaint.complaint.compensation.days} day(s)`}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="pt-4 border-t border-gray-100 flex justify-between items-center">
+                      {driverName ? (
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 rounded-full bg-blue-50 flex items-center justify-center text-[10px] font-bold text-blue-600">
+                            {driverName.slice(0, 2).toUpperCase()}
+                          </div>
+                          <span className="text-[11px] text-gray-500">Assigned to {driverName}</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 rounded-full border border-dashed border-gray-300 flex items-center justify-center text-gray-400">
+                            <span className="material-symbols-outlined text-[14px]">person_add</span>
+                          </div>
+                          <span className="text-[11px] text-gray-400 italic">Unassigned</span>
+                        </div>
+                      )}
+                      <Link
+                        to={`/deliveries/${complaint._id}`}
+                        className="text-sm font-medium text-blue-600 hover:text-blue-700 flex items-center gap-1 transition-colors"
+                      >
+                        View Details
+                        <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
+                      </Link>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Load More */}
+            {currentPage < totalPages && (
+              <div className="mt-8 flex justify-center">
+                <button
+                  onClick={() => setCurrentPage((p) => p + 1)}
+                  disabled={isLoadingMore}
+                  className="px-4 py-2 border border-gray-200 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 disabled:opacity-60 transition-colors bg-white shadow-sm"
+                >
+                  {isLoadingMore ? 'Loading…' : 'Load More Complaints'}
+                </button>
               </div>
             )}
           </>

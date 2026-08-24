@@ -13,6 +13,11 @@ const bagSchema = new mongoose.Schema({
     enum: ['available', 'assigned', 'in_use', 'maintenance', 'retired'],
     default: 'available'
   },
+  bagType: {
+    type: String,
+    enum: ['standard', 'on_time_use'],
+    default: 'standard'
+  },
   returnLocation: {
     lat: Number,
     lng: Number,

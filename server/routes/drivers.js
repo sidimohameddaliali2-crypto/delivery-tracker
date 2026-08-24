@@ -232,6 +232,7 @@ router.get('/:id', protect, async (req, res) => {
         date: d.scheduledTime,
         customer: d.customerName,
         status: d.status,
+        lateMinutes: d.lateMinutes || 0,
         proof: d.proof?.images || []
       })),
       kpi: {
@@ -451,7 +452,13 @@ router.get('/:id/stats', protect, async (req, res) => {
 // Create new driver
 router.post('/', protect, admin, async (req, res) => {
   try {
-    const { email, password, firstName, lastName, phone, status, colorCode } = req.body;
+    const {
+      email, password, firstName, lastName, phone, status, colorCode, picture,
+      licenseNumber, licenseExpiry, nationalId,
+      assignedZone, shiftTiming,
+      vehicleId, vehicleType, vehiclePaper,
+      baseSalary, contractType, joiningDate
+    } = req.body;
 
     // Check if user already exists
     const existingUser = await User.findOne({ email });
@@ -468,7 +475,19 @@ router.post('/', protect, admin, async (req, res) => {
         lastName,
         phone,
         status: status ?? 'offline',
-        colorCode: colorCode ?? '#000000'
+        colorCode: colorCode ?? '#000000',
+        picture,
+        licenseNumber,
+        licenseExpiry,
+        nationalId,
+        assignedZone,
+        shiftTiming,
+        vehicleId,
+        vehicleType,
+        vehiclePaper,
+        baseSalary,
+        contractType,
+        joiningDate
       }
     });
 

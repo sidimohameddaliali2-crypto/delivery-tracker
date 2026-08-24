@@ -71,7 +71,7 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground overflow-x-hidden;
   }
 }
 
@@ -116,4 +116,103 @@
 
 .scrollbar-thumb-blue-300::-webkit-scrollbar-thumb:hover {
   background: #60a5fa;
+}
+
+/* Matter Analytics dashboard: Inter + Material Symbols, scoped to this page only */
+.matter-analytics {
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+}
+
+.matter-analytics .material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
+}
+
+.matter-analytics .no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.matter-analytics .no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Customer Management (website subscriptions): Lora serif headings, Matter
+   Brand Guidelines colors, scoped to this page only */
+.customer-mgmt {
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  background-color: #ffffff;
+}
+
+.customer-mgmt .font-serif-mgmt {
+  font-family: 'Lora', Georgia, serif;
+}
+
+.customer-mgmt .material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
+}
+
+.customer-mgmt .no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.customer-mgmt .no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Weekly Menu management page: this design's real fonts are Caprasimo
+   (headings) + Figtree (body), per its imported "organic" design-system
+   styles.css — not the Lora/Inter used by the other matter-brand pages.
+   Layered on top of .customer-mgmt (same element) purely for the shared
+   color tokens; this block wins on font-family since it's declared after. */
+.menu-mgmt {
+  font-family: 'Figtree', ui-sans-serif, system-ui, sans-serif;
+}
+
+.menu-mgmt .font-heading-menu {
+  font-family: 'Caprasimo', system-ui, serif;
+  font-weight: 400;
+}
+
+/* The app shell (Layout.js) uses a fixed h-screen + overflow-y-auto scroll
+   region for the main content, so printing would otherwise only capture
+   whatever portion happened to be scrolled into view. Release those height/
+   overflow constraints for print so the full page content flows and
+   paginates normally instead of being clipped to the on-screen viewport. */
+@media print {
+  html, body {
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .h-screen {
+    height: auto !important;
+  }
+  .overflow-y-auto,
+  .overflow-x-hidden,
+  .overflow-hidden,
+  .overflow-auto {
+    overflow: visible !important;
+  }
 }

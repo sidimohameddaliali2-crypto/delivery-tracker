@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useImperativeHandle, useMemo, useState, forwardRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { X, Printer, RefreshCw, Palette, Grid } from 'lucide-react';
 
@@ -186,8 +186,8 @@ const buildStickerData = (delivery) => {
   };
 };
 
-const StickerDesignerModal = ({ isOpen, onClose, deliveries = [] }) => {
-  const [config, setConfig] = useState(DEFAULT_CONFIG);
+const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], initialConfig = null }, ref) => {
+  const [config, setConfig] = useState(() => ({ ...DEFAULT_CONFIG, ...(initialConfig || {}) }));
   const [selectedStickerIds, setSelectedStickerIds] = useState(new Set());
   const [logoDataUrl, setLogoDataUrl] = useState(null);
   const [showLogo, setShowLogo] = useState(true);
@@ -750,6 +750,11 @@ const StickerDesignerModal = ({ isOpen, onClose, deliveries = [] }) => {
     localStorage.setItem(DESIGN_STORAGE_KEY, JSON.stringify(config));
     alert('Sticker design saved. It will load automatically next time.');
   };
+
+  // Lets a parent (e.g. PrintConfigModal) trigger printing synchronously from its own
+  // click handler, using this instance's current config, without showing this
+  // component's own designer UI (isOpen can stay false).
+  useImperativeHandle(ref, () => ({ print: handlePrint }));
 
   if (!isOpen) return null;
 
@@ -1335,6 +1340,6 @@ const StickerDesignerModal = ({ isOpen, onClose, deliveries = [] }) => {
       </motion.div>
     </AnimatePresence>
   );
-};
+});
 
 export default StickerDesignerModal;

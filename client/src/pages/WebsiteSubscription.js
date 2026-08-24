@@ -1,345 +1,972 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Search, RefreshCw, ChevronLeft, ChevronRight, Package, Download } from 'lucide-react';
-import * as XLSX from 'xlsx';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { Search, Package, PauseCircle, Receipt, CheckCircle2, X } from 'lucide-react';
 import api from '../utils/api';
-import { StatusBadge, CycleEndBadge } from '../components/subscriptionUi';
-import { formatDate, isCycleEnded } from '../utils/subscriptionFormat';
+import DeliveryCalendar from '../components/DeliveryCalendar';
+import { matchLabels } from '../components/subscriptionUi';
+import { formatDate, formatMoney, isCycleEnded, daysUntil } from '../utils/subscriptionFormat';
 
-const WebsiteSubscription = () => {
-  const navigate = useNavigate();
-  const [subscriptions, setSubscriptions] = useState([]);
-  const [meta, setMeta] = useState(null);
-  const [page, setPage] = useState(1);
-  const [pageSize] = useState(24);
-  const [emailFilter, setEmailFilter] = useState('');
-  const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(false);
+// "Due for renewal" = fewer than 6 days left until renewal_due_date, and the
+// cycle hasn't already ended (a cycle-ended customer belongs in that tab
+// instead, not "due for renewal").
+const isDueForRenewal = (s) => {
+  if (isCycleEnded(s.cycle_end_date)) return false;
+  const d = daysUntil(s.renewal_due_date);
+  return d !== null && d < 6;
+};
+
+const PAGE_STEP = 60;
+
+// Real subscription_status values are active/paused/cancelled/expired.
+// renewal_eligible is a separate real flag layered on top of that.
+const STATUS_PILL = {
+  active: 'bg-matter-green/25 text-matter-navy',
+  paused: 'bg-matter-dust/60 text-matter-charcoal',
+  cancelled: 'bg-matter-red/10 text-matter-red',
+  expired: 'bg-matter-red/10 text-matter-red',
+};
+
+function StatusPill({ status }) {
+  return (
+    <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full capitalize whitespace-nowrap ${STATUS_PILL[status] || 'bg-gray-100 text-gray-600'}`}>
+      {status || 'unknown'}
+    </span>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
+/* Left panel: searchable / filterable customer list                      */
+/* ---------------------------------------------------------------------- */
+
+function CustomerListPanel({ selectedId, onSelect }) {
+  const [allSubscriptions, setAllSubscriptions] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [hideEnded, setHideEnded] = useState(false);
-  const [showUnmatchedOnly, setShowUnmatchedOnly] = useState(false);
-  const [matchResults, setMatchResults] = useState({});
-  const [deliveryDateFilter, setDeliveryDateFilter] = useState('');
-  const [deliveryFilterResults, setDeliveryFilterResults] = useState(null);
-  const [checkingDeliveryFilter, setCheckingDeliveryFilter] = useState(false);
-  const [downloadingActiveContacts, setDownloadingActiveContacts] = useState(false);
+  const [search, setSearch] = useState('');
+  const [statusTab, setStatusTab] = useState('all');
+  const [visibleCount, setVisibleCount] = useState(PAGE_STEP);
 
-  const downloadActiveCustomersExcel = async () => {
-    setDownloadingActiveContacts(true);
-    setError('');
-    try {
-      // If a delivery-date filter is active, export just those matches
-      // (already have phone/address from that check) instead of refetching
-      // every active customer.
-      const contacts = deliveryFilterResults !== null
-        ? deliveryFilterResults
-        : (await api.get('/matter/subscriptions/active-contacts')).data?.data || [];
-
-      const worksheet = XLSX.utils.json_to_sheet(
-        contacts.map((c) => ({ Name: c.name, Email: c.email, Phone: c.phone, Address: c.address }))
-      );
-      worksheet['!cols'] = [{ wch: 24 }, { wch: 28 }, { wch: 16 }, { wch: 50 }];
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, worksheet, 'Active Customers');
-      const filenameSuffix = deliveryFilterResults !== null ? `delivery-${deliveryDateFilter}` : new Date().toISOString().slice(0, 10);
-      XLSX.writeFile(workbook, `active-customers-${filenameSuffix}.xlsx`);
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to download active customers.');
-    } finally {
-      setDownloadingActiveContacts(false);
-    }
-  };
-
-  const fetchList = useCallback(async () => {
+  const fetchAll = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const res = await api.get('/matter/subscriptions', {
-        params: { page, page_size: pageSize, email: emailFilter || undefined },
-      });
-      const payload = res.data?.data || {};
-      setSubscriptions(payload.data || []);
-      setMeta(payload.meta || null);
+      const res = await api.get('/matter/subscriptions/all');
+      const list = res.data?.data || [];
+      setAllSubscriptions(list);
+      if (!selectedId && list.length > 0) onSelect(list[0].subscription_id, { replace: true });
     } catch (err) {
       console.error('Failed to load subscriptions:', err);
       setError(err.response?.data?.message || 'Failed to load subscriptions.');
-      setSubscriptions([]);
+      setAllSubscriptions([]);
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, emailFilter]);
+  }, []);
 
-  useEffect(() => { fetchList(); }, [fetchList]);
+  useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  // The active list is either the normal paginated subscriptions, or — when
-  // a delivery-date filter has been run — that filter's results instead.
-  const activeList = deliveryFilterResults !== null ? deliveryFilterResults : subscriptions;
-
-  // The list endpoint doesn't return phone, so this only checks email/name —
-  // matches the profile page's cascade minus the phone tier.
-  useEffect(() => {
-    const toCheck = activeList.filter((s) => matchResults[s.subscription_id] === undefined);
-    if (toCheck.length === 0) return;
-    let cancelled = false;
-    Promise.all(
-      toCheck.map((s) =>
-        api.get('/customers/match', { params: { email: s.email, name: s.name } })
-          .then((res) => ({ id: s.subscription_id, matched: !!res.data?.data?.customer }))
-          .catch(() => ({ id: s.subscription_id, matched: null }))
-      )
-    ).then((results) => {
-      if (cancelled) return;
-      setMatchResults((prev) => {
-        const next = { ...prev };
-        results.forEach((r) => { next[r.id] = r.matched; });
-        return next;
-      });
+  const statusCounts = useMemo(() => {
+    const counts = { all: allSubscriptions.length, active: 0, renewal: 0, cycleEnded: 0 };
+    allSubscriptions.forEach((s) => {
+      const cycleEnded = isCycleEnded(s.cycle_end_date);
+      if (cycleEnded) counts.cycleEnded += 1;
+      else if (s.subscription_status === 'active') counts.active += 1;
+      if (isDueForRenewal(s)) counts.renewal += 1;
     });
-    return () => { cancelled = true; };
-  }, [activeList, matchResults]);
+    return counts;
+  }, [allSubscriptions]);
 
-  const submitSearch = (e) => {
-    e.preventDefault();
-    setDeliveryFilterResults(null);
-    setPage(1);
-    setEmailFilter(search.trim());
-  };
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return allSubscriptions.filter((s) => {
+      const cycleEnded = isCycleEnded(s.cycle_end_date);
+      if (statusTab === 'active' && (s.subscription_status !== 'active' || cycleEnded)) return false;
+      if (statusTab === 'renewal' && !isDueForRenewal(s)) return false;
+      if (statusTab === 'cycleEnded' && !cycleEnded) return false;
+      if (term) {
+        const haystack = `${s.name || ''} ${s.email || ''} ${s.subscription_id || ''} ${s.customer_id || ''}`.toLowerCase();
+        if (!haystack.includes(term)) return false;
+      }
+      return true;
+    });
+  }, [allSubscriptions, statusTab, search]);
 
-  const runDeliveryDateFilter = async () => {
-    if (!deliveryDateFilter) return;
-    setCheckingDeliveryFilter(true);
-    setError('');
-    try {
-      const res = await api.get('/matter/subscriptions/delivery-on-date', {
-        params: { date: deliveryDateFilter },
-      });
-      const subs = res.data?.data || [];
-      setDeliveryFilterResults(subs.map((s) => ({
-        subscription_id: s.subscription_id,
-        customer_id: s.customer_id,
-        name: s.name,
-        email: s.email,
-        phone: s.phone,
-        address: s.address,
-        subscription_status: s.subscription_status || 'active',
-        plan: { name: s.plan_name },
-        cycle_end_date: s.cycle_end_date,
-        renewal_eligible: s.renewal_eligible,
-        renewal_due_date: s.renewal_due_date,
-      })));
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to check deliveries for that date.');
-    } finally {
-      setCheckingDeliveryFilter(false);
+  useEffect(() => { setVisibleCount(PAGE_STEP); }, [statusTab, search]);
+
+  const visible = filtered.slice(0, visibleCount);
+
+  const tabs = [
+    { key: 'all', label: 'All', count: statusCounts.all },
+    { key: 'active', label: 'Active', count: statusCounts.active },
+    { key: 'renewal', label: 'Due for renewal', count: statusCounts.renewal },
+    { key: 'cycleEnded', label: 'Cycle ended', count: statusCounts.cycleEnded },
+  ];
+
+  return (
+    <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-4 flex flex-col lg:sticky lg:top-6 lg:max-h-[calc(100vh-140px)]">
+      <div className="relative mb-3 flex-shrink-0">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+        <input
+          type="text"
+          placeholder="Search name, email or ID"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-matter-sky focus:border-matter-sky"
+        />
+      </div>
+
+      <div className="flex flex-wrap gap-1.5 mb-4 flex-shrink-0">
+        {tabs.map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setStatusTab(tab.key)}
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${
+              statusTab === tab.key ? 'bg-matter-sky text-matter-navy' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto no-scrollbar space-y-2 min-h-[200px]">
+        {loading ? (
+          <div className="text-center py-12 text-gray-400 animate-pulse text-sm">Loading…</div>
+        ) : error ? (
+          <div className="text-center py-12 text-matter-red text-sm px-2">{error}</div>
+        ) : visible.length === 0 ? (
+          <div className="text-center py-12">
+            <Package className="w-10 h-10 mx-auto mb-2 text-gray-300" />
+            <p className="text-gray-400 text-sm">No subscriptions found</p>
+          </div>
+        ) : (
+          <>
+            {visible.map((s) => {
+              const isSelected = String(s.subscription_id) === String(selectedId);
+              return (
+                <button
+                  key={s.subscription_id}
+                  onClick={() => onSelect(s.subscription_id)}
+                  className={`w-full text-left rounded-xl p-3 border transition-colors ${
+                    isSelected ? 'bg-matter-green border-matter-green' : 'bg-white border-gray-100 hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 mb-0.5">
+                    <p className="font-semibold text-gray-900 truncate">{s.name}</p>
+                    <StatusPill status={s.subscription_status} />
+                  </div>
+                  <p className="text-xs text-gray-500 truncate">
+                    CUS-{s.customer_id} · {s.plan?.name || 'No plan'}
+                  </p>
+                </button>
+              );
+            })}
+            {visibleCount < filtered.length && (
+              <button
+                onClick={() => setVisibleCount((c) => c + PAGE_STEP)}
+                className="w-full text-center py-2 text-xs font-medium text-gray-500 hover:text-gray-800"
+              >
+                Load more ({filtered.length - visibleCount} remaining)
+              </button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
+/* Right panel: selected customer's profile                               */
+/* ---------------------------------------------------------------------- */
+
+function MiniField({ label, value }) {
+  return (
+    <div>
+      <p className="text-[10px] text-gray-400 uppercase tracking-wider mb-0.5">{label}</p>
+      <p className="text-sm text-gray-900 font-medium break-words">{value ?? '—'}</p>
+    </div>
+  );
+}
+
+function ActionIcon({ href, icon, title }) {
+  if (!href) return null;
+  return (
+    <a
+      href={href}
+      target={href.startsWith('http') ? '_blank' : undefined}
+      rel={href.startsWith('http') ? 'noreferrer' : undefined}
+      title={title}
+      className="flex items-center justify-center w-10 h-10 rounded-lg bg-gray-50 border border-gray-200 text-gray-700 hover:bg-gray-100 transition-colors"
+    >
+      <span className="material-symbols-outlined text-[18px]">{icon}</span>
+    </a>
+  );
+}
+
+const MACRO_BLOCKS = [
+  { key: 'carbohydrates', label: 'Carbs', box: 'bg-matter-dust/60', track: 'bg-matter-dust', fill: 'bg-matter-charcoal', text: 'text-matter-charcoal' },
+  { key: 'protein', label: 'Protein', box: 'bg-matter-purple/20', track: 'bg-matter-purple/30', fill: 'bg-matter-purple', text: 'text-matter-navy' },
+  { key: 'fat', label: 'Fat', box: 'bg-matter-green/25', track: 'bg-matter-green/40', fill: 'bg-matter-charcoal', text: 'text-matter-navy' },
+];
+
+function MacroBlock({ label, grams, max, box, track, fill, text }) {
+  const pct = max > 0 ? Math.min(100, Math.round(((grams || 0) / max) * 100)) : 0;
+  return (
+    <div className={`rounded-xl p-3 ${box}`}>
+      <div className={`flex items-center justify-between text-xs font-semibold uppercase tracking-wide mb-2 ${text}`}>
+        <span>{label}</span>
+        <span className="text-base font-bold">{grams !== undefined ? `${grams}g` : '—'}</span>
+      </div>
+      <div className={`h-1.5 rounded-full overflow-hidden ${track}`}>
+        <div className={`h-full rounded-full ${fill}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+const addDaysToDateStr = (dateStr, days) => {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+
+const buildMonthDays = (year, monthIndex) => {
+  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+  const firstWeekday = new Date(year, monthIndex, 1).getDay();
+  const days = [];
+  for (let d = 1; d <= daysInMonth; d += 1) {
+    days.push(`${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
+  }
+  return { firstWeekday, days };
+};
+
+const PAUSE_CALENDAR_WEEKDAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+function PauseModal({ subscriptionId, cycleEndDate, onClose, onSuccess }) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const minPauseDate = addDaysToDateStr(todayStr, 2);
+  const minReturnDate = addDaysToDateStr(todayStr, 1);
+
+  const [mode, setMode] = useState('pause');
+  const [pauseDates, setPauseDates] = useState([]);
+  const [returnDates, setReturnDates] = useState([]);
+  const [reason, setReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const today = new Date();
+  const monthsToShow = [0, 1, 2].map((offset) => {
+    const d = new Date(today.getFullYear(), today.getMonth() + offset, 1);
+    return { year: d.getFullYear(), monthIndex: d.getMonth(), label: d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) };
+  });
+
+  const isDisabled = (iso) => (mode === 'pause' ? iso < minPauseDate : iso < minReturnDate);
+
+  const toggleDate = (iso) => {
+    if (isDisabled(iso)) return;
+    if (mode === 'pause') {
+      setReturnDates((prev) => prev.filter((d) => d !== iso));
+      setPauseDates((prev) => (prev.includes(iso) ? prev.filter((d) => d !== iso) : [...prev, iso].sort()));
+    } else {
+      setPauseDates((prev) => prev.filter((d) => d !== iso));
+      setReturnDates((prev) => (prev.includes(iso) ? prev.filter((d) => d !== iso) : [...prev, iso].sort()));
     }
   };
 
-  const clearDeliveryFilter = () => {
-    setDeliveryFilterResults(null);
-    setDeliveryDateFilter('');
+  const removePauseDate = (iso) => setPauseDates((prev) => prev.filter((d) => d !== iso));
+  const removeReturnDate = (iso) => setReturnDates((prev) => prev.filter((d) => d !== iso));
+
+  const dayClassName = (iso) => {
+    if (pauseDates.includes(iso)) return 'bg-matter-purple text-white hover:opacity-90';
+    if (returnDates.includes(iso)) return 'bg-matter-green text-matter-navy hover:opacity-90';
+    if (isDisabled(iso)) return 'text-gray-300 cursor-not-allowed';
+    return 'text-gray-700 hover:bg-matter-sky/15 cursor-pointer';
   };
 
-  const visibleSubscriptions = activeList.filter((s) => {
-    if (hideEnded && isCycleEnded(s.cycle_end_date)) return false;
-    if (showUnmatchedOnly && matchResults[s.subscription_id] !== false) return false;
-    return true;
-  });
+  const handleSubmit = async () => {
+    setError('');
+    if (pauseDates.length === 0) {
+      setError('Select at least one day to pause.');
+      return;
+    }
+    if (returnDates.length > pauseDates.length) {
+      setError(`You've selected ${returnDates.length} return days but only ${pauseDates.length} pause day(s) — remove ${returnDates.length - pauseDates.length} return day(s).`);
+      return;
+    }
+
+    const finalReturnDates = [...returnDates];
+    const usedReturnDates = new Set(returnDates);
+    let cursor = cycleEndDate ? addDaysToDateStr(cycleEndDate, 1) : null;
+    while (finalReturnDates.length < pauseDates.length) {
+      if (!cursor) {
+        setError('No cycle end date on file to auto-assign the remaining return day(s) — please pick them manually on the calendar.');
+        return;
+      }
+      while (usedReturnDates.has(cursor)) cursor = addDaysToDateStr(cursor, 1);
+      usedReturnDates.add(cursor);
+      finalReturnDates.push(cursor);
+      cursor = addDaysToDateStr(cursor, 1);
+    }
+    finalReturnDates.sort();
+
+    setSubmitting(true);
+    try {
+      await api.post(`/matter/subscriptions/${subscriptionId}/pauses`, {
+        paused_days: pauseDates,
+        chosen_days: finalReturnDates,
+        reason: reason.trim() || undefined
+      });
+      onSuccess();
+    } catch (err) {
+      console.error('Failed to create pause:', err);
+      setError(err.response?.data?.message || 'Failed to create pause.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Website Subscription</h1>
-          <p className="text-gray-500 text-sm mt-0.5">Live subscriptions from Matter's website API</p>
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={downloadActiveCustomersExcel}
-            disabled={downloadingActiveContacts}
-            title={deliveryFilterResults !== null
-              ? `Downloads the ${deliveryFilterResults.length} customer(s) shown for ${deliveryDateFilter}`
-              : 'Fetches full contact details for every active subscription from Matter — can take 15-30 seconds'}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50 transition"
-          >
-            <Download className={`w-4 h-4 ${downloadingActiveContacts ? 'animate-pulse' : ''}`} />
-            {downloadingActiveContacts
-              ? 'Preparing…'
-              : deliveryFilterResults !== null
-                ? `Download Customers for ${deliveryDateFilter}`
-                : 'Download Active Customers'}
-          </button>
-          <button
-            onClick={fetchList}
-            disabled={loading}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg text-sm font-semibold hover:bg-purple-700 disabled:opacity-50 transition"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl border border-matter-dust/40 shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="sticky top-0 bg-white border-b border-gray-100 px-6 py-4 flex items-center justify-between rounded-t-2xl">
+          <h3 className="font-serif-mgmt text-lg font-semibold text-matter-navy">Pause Delivery</h3>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500">
+            <X className="w-5 h-5" />
           </button>
         </div>
-      </div>
 
-      <form onSubmit={submitSearch} className="flex items-center gap-3">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-          <input
-            type="text"
-            placeholder="Search by email…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500"
-          />
-        </div>
-        <button type="submit" className="px-4 py-2 bg-gray-900 text-white rounded-lg text-sm font-semibold hover:bg-gray-800 transition">
-          Search
-        </button>
-        {emailFilter && (
-          <button
-            type="button"
-            onClick={() => { setSearch(''); setEmailFilter(''); setPage(1); }}
-            className="text-sm text-gray-500 hover:text-gray-700"
-          >
-            Clear
-          </button>
-        )}
-        <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={hideEnded}
-            onChange={(e) => setHideEnded(e.target.checked)}
-            className="rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-          />
-          Hide ended cycles
-        </label>
-        <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={showUnmatchedOnly}
-            onChange={(e) => setShowUnmatchedOnly(e.target.checked)}
-            className="rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-          />
-          Show only unmatched
-        </label>
-        {deliveryFilterResults === null && meta && (
-          <p className="text-xs text-gray-400 ml-auto">
-            {(hideEnded || showUnmatchedOnly) ? `${visibleSubscriptions.length} of ${subscriptions.length} shown on this page · ` : ''}
-            {meta.total_records} total subscriptions
+        <div className="px-6 py-5 space-y-4">
+          <p className="text-xs text-matter-charcoal bg-matter-dust/30 border border-matter-dust rounded-lg px-3 py-2">
+            This reschedules real deliveries on the customer's live subscription. Any pause day left without a
+            matching return day is auto-assigned one right after their cycle ends{cycleEndDate ? ` (${formatDate(cycleEndDate)})` : ''}.
           </p>
-        )}
-      </form>
 
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-        <h3 className="text-sm font-semibold text-gray-700 mb-1">Filter by delivery date</h3>
-        <p className="text-xs text-gray-400 mb-3">
-          Shows active, non-cycle-ended subscriptions with a scheduled delivery on the chosen date — checks every
-          active subscription's delivery schedule directly from Matter, so it can take 10–30 seconds.
-        </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <input
-            type="date"
-            value={deliveryDateFilter}
-            onChange={(e) => setDeliveryDateFilter(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500"
-          />
-          <button
-            type="button"
-            onClick={runDeliveryDateFilter}
-            disabled={checkingDeliveryFilter || !deliveryDateFilter}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg text-sm font-semibold hover:bg-purple-700 disabled:opacity-50 transition"
-          >
-            <Search className={`w-4 h-4 ${checkingDeliveryFilter ? 'animate-pulse' : ''}`} />
-            {checkingDeliveryFilter ? 'Checking…' : 'Filter by Delivery Date'}
-          </button>
-          {deliveryFilterResults !== null && (
+          <div className="inline-flex rounded-lg border border-gray-200 p-1 bg-gray-50">
             <button
               type="button"
-              onClick={clearDeliveryFilter}
-              className="text-sm text-gray-500 hover:text-gray-700"
+              onClick={() => setMode('pause')}
+              className={`px-3 py-1.5 rounded-md text-sm font-semibold transition ${mode === 'pause' ? 'bg-matter-purple text-white' : 'text-gray-600 hover:bg-gray-100'}`}
             >
-              Clear filter
+              Select pause days
             </button>
-          )}
-          {deliveryFilterResults !== null && (
-            <p className="text-xs text-gray-400 ml-auto">
-              {visibleSubscriptions.length} of {deliveryFilterResults.length} customer(s) with a delivery on {deliveryDateFilter}
-            </p>
+            <button
+              type="button"
+              onClick={() => setMode('return')}
+              className={`px-3 py-1.5 rounded-md text-sm font-semibold transition ${mode === 'return' ? 'bg-matter-green text-matter-navy' : 'text-gray-600 hover:bg-gray-100'}`}
+            >
+              Select return days
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {monthsToShow.map(({ year, monthIndex, label }) => {
+              const { firstWeekday, days } = buildMonthDays(year, monthIndex);
+              const cells = [...Array(firstWeekday).fill(null), ...days];
+              return (
+                <div key={label} className="border border-gray-100 rounded-lg p-2">
+                  <p className="text-xs font-semibold text-gray-600 mb-1 text-center">{label}</p>
+                  <div className="grid grid-cols-7 gap-0.5">
+                    {PAUSE_CALENDAR_WEEKDAYS.map((w, i) => (
+                      <div key={`${label}-wd-${i}`} className="text-[9px] text-gray-300 text-center">{w}</div>
+                    ))}
+                    {cells.map((iso, idx) => {
+                      if (!iso) return <div key={`${label}-blank-${idx}`} />;
+                      const day = Number(iso.slice(8, 10));
+                      return (
+                        <button
+                          type="button"
+                          key={iso}
+                          onClick={() => toggleDate(iso)}
+                          disabled={isDisabled(iso)}
+                          title={iso}
+                          className={`w-full aspect-square rounded text-[10px] flex items-center justify-center font-medium transition ${dayClassName(iso)}`}
+                        >
+                          {day}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-4 text-xs text-gray-500">
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-matter-purple inline-block" /> Pause</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-matter-green inline-block" /> Return</span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Pause days ({pauseDates.length})</p>
+              {pauseDates.length === 0 ? (
+                <p className="text-sm text-gray-400">None selected</p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {pauseDates.map((iso) => (
+                    <span key={iso} className="inline-flex items-center gap-1 text-xs bg-matter-purple/10 text-matter-purple rounded-full px-2 py-1">
+                      {formatDate(iso)}
+                      <button type="button" onClick={() => removePauseDate(iso)}><X className="w-3 h-3" /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Return days ({returnDates.length})</p>
+              {returnDates.length === 0 ? (
+                <p className="text-sm text-gray-400">
+                  {pauseDates.length > 0 ? 'Will auto-assign after cycle end' : 'None selected'}
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {returnDates.map((iso) => (
+                    <span key={iso} className="inline-flex items-center gap-1 text-xs bg-matter-green/20 text-matter-navy rounded-full px-2 py-1">
+                      {formatDate(iso)}
+                      <button type="button" onClick={() => removeReturnDate(iso)}><X className="w-3 h-3" /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Reason (optional)</label>
+            <input
+              type="text"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. Customer travel"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-matter-sky"
+            />
+          </div>
+
+          {error && <p className="text-sm text-matter-red">{error}</p>}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-medium text-gray-600 hover:bg-gray-100 rounded-lg">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={submitting}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-matter-sky text-matter-navy rounded-lg text-sm font-semibold hover:opacity-90 disabled:opacity-50"
+            >
+              <PauseCircle className={`w-4 h-4 ${submitting ? 'animate-pulse' : ''}`} />
+              {submitting ? 'Submitting…' : 'Confirm Pause'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CustomerProfilePanel({ subscriptionId }) {
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [match, setMatch] = useState(null);
+  const [matchLoading, setMatchLoading] = useState(false);
+  const [invoice, setInvoice] = useState(null);
+  const [invoiceLoading, setInvoiceLoading] = useState(false);
+  const [invoiceError, setInvoiceError] = useState('');
+  const [mealProfile, setMealProfile] = useState(null);
+  const [mealLoading, setMealLoading] = useState(false);
+  const [mealError, setMealError] = useState('');
+  const [showPauseModal, setShowPauseModal] = useState(false);
+  const [activeTab, setActiveTab] = useState('logistics');
+
+  const loadProfile = useCallback(() => {
+    if (!subscriptionId) return undefined;
+    let mounted = true;
+    setLoading(true);
+    setError('');
+    setInvoice(null);
+    setInvoiceError('');
+    api.get(`/matter/subscriptions/${subscriptionId}`)
+      .then((res) => {
+        if (!mounted) return;
+        setProfile(res.data?.data?.data || null);
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        console.error('Failed to load subscription profile:', err);
+        setError(err.response?.data?.message || 'Failed to load this subscription.');
+      })
+      .finally(() => mounted && setLoading(false));
+    return () => { mounted = false; };
+  }, [subscriptionId]);
+
+  useEffect(() => { setActiveTab('logistics'); return loadProfile(); }, [loadProfile]);
+
+  useEffect(() => {
+    if (!profile) return;
+    let mounted = true;
+    setMatchLoading(true);
+    api.get('/customers/match', { params: { email: profile.email, phone: profile.phone, name: profile.name } })
+      .then((res) => { if (mounted) setMatch(res.data?.data || null); })
+      .catch((err) => {
+        console.error('Customer match failed:', err);
+        if (mounted) setMatch(null);
+      })
+      .finally(() => mounted && setMatchLoading(false));
+    return () => { mounted = false; };
+  }, [profile]);
+
+  useEffect(() => {
+    const customerId = match?.customer?.customerId;
+    if (!customerId) {
+      setMealProfile(null);
+      return;
+    }
+    let mounted = true;
+    setMealLoading(true);
+    setMealError('');
+    api.get(`/menus/customers/${customerId}/meal-profile`)
+      .then((res) => { if (mounted) setMealProfile(res.data?.data || null); })
+      .catch((err) => {
+        console.error('Failed to load meal selections:', err);
+        if (mounted) setMealError('Could not load meal selections.');
+      })
+      .finally(() => mounted && setMealLoading(false));
+    return () => { mounted = false; };
+  }, [match]);
+
+  const handleCreateInvoice = async () => {
+    setInvoiceLoading(true);
+    setInvoiceError('');
+    try {
+      const res = await api.post(`/xero/invoices/from-subscription/${subscriptionId}`);
+      setInvoice(res.data?.data || null);
+    } catch (err) {
+      console.error('Failed to create Xero invoice:', err);
+      setInvoiceError(err.response?.data?.message || 'Failed to create invoice in Xero.');
+    } finally {
+      setInvoiceLoading(false);
+    }
+  };
+
+  const websiteExclusions = profile?.exclusions || [];
+  const internalExclusionNames = (match?.customer?.mealExclusion || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const websiteTitlesLower = new Set(websiteExclusions.map((ex) => ex.title.toLowerCase()));
+  const missingFromWebsite = internalExclusionNames.filter((name) => !websiteTitlesLower.has(name.toLowerCase()));
+
+  const mealsByDate = (mealProfile?.selectedMeals || []).reduce((acc, meal) => {
+    const key = meal.date ? String(meal.date).slice(0, 10) : 'Unknown date';
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(meal);
+    return acc;
+  }, {});
+  const groupedMealDates = Object.entries(mealsByDate).sort((a, b) => b[0].localeCompare(a[0]));
+
+  const macroMax = Math.max(profile?.macros?.protein || 0, profile?.macros?.carbohydrates || 0, profile?.macros?.fat || 0, 1);
+  const whatsappHref = profile?.whatsapp ? `https://wa.me/${String(profile.whatsapp).replace(/[^\d]/g, '')}` : null;
+  const clientSince = profile?.created_at || profile?.starting_date;
+
+  const durationDays = profile?.cycle_start_date && profile?.cycle_end_date
+    ? Math.round((new Date(profile.cycle_end_date) - new Date(profile.cycle_start_date)) / 86400000) + 1
+    : null;
+  const daysRemaining = profile?.cycle_end_date
+    ? Math.max(0, Math.round((new Date(profile.cycle_end_date) - new Date(new Date().toDateString())) / 86400000))
+    : null;
+
+  if (!subscriptionId) {
+    return (
+      <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-10 text-center text-gray-400">
+        Select a customer from the list to view their profile.
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-16 text-center text-gray-400 animate-pulse">Loading profile…</div>;
+  }
+
+  if (error) {
+    return <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-16 text-center text-matter-red">{error}</div>;
+  }
+
+  if (!profile) return null;
+
+  return (
+    <div>
+      {/* Header */}
+      <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-6 mb-4 flex flex-col md:flex-row md:items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-3 mb-1 flex-wrap">
+            <h2 className="font-serif-mgmt text-2xl font-bold text-matter-navy">{profile.name}</h2>
+            <StatusPill status={profile.subscription_status} />
+            {profile.renewal_eligible && (
+              <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-matter-dustedblue/40 text-matter-navy whitespace-nowrap">
+                Renews {formatDate(profile.renewal_due_date)}
+              </span>
+            )}
+            {isCycleEnded(profile.cycle_end_date) && (
+              <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-gray-100 text-gray-500 whitespace-nowrap">
+                Cycle ended
+              </span>
+            )}
+          </div>
+          <p className="text-xs font-mono text-gray-400 mb-3">CUS-{profile.customer_id} · SUB-{profile.subscription_id}</p>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-sm text-gray-500">
+            {profile.email && (
+              <span className="flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[16px]">mail</span>
+                {profile.email}
+              </span>
+            )}
+            {profile.phone && (
+              <span className="flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[16px]">call</span>
+                {profile.phone}
+              </span>
+            )}
+            {clientSince && (
+              <span className="flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[16px]">calendar_today</span>
+                Joined {formatDate(clientSince)}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <ActionIcon href={profile.email ? `mailto:${profile.email}` : null} icon="mail" title="Email" />
+          <ActionIcon href={profile.phone ? `tel:${profile.phone}` : null} icon="call" title="Call" />
+          <ActionIcon href={whatsappHref} icon="chat" title="WhatsApp" />
+        </div>
+      </div>
+
+      {/* Subscription details + Macro profile */}
+      <div className="grid grid-cols-12 gap-4 mb-4">
+        <div className="col-span-12 lg:col-span-7 bg-white rounded-2xl border border-matter-dust/40 shadow-md p-6">
+          <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-1">Subscription</p>
+          <h3 className="font-serif-mgmt text-xl font-bold text-matter-navy mb-4">{profile.plan?.name || 'No plan'}</h3>
+          <div className="grid grid-cols-2 gap-y-4 gap-x-3 mb-4">
+            <MiniField label="Meals / Day" value={profile.total_meals} />
+            <MiniField label="Snacks / Day" value={profile.snacks_per_day} />
+            <MiniField label="Duration" value={durationDays !== null ? `${durationDays} days` : '—'} />
+            <MiniField label="Days Remaining" value={daysRemaining !== null ? daysRemaining : '—'} />
+            <MiniField label="Start" value={formatDate(profile.cycle_start_date)} />
+            <MiniField label="End" value={formatDate(profile.cycle_end_date)} />
+          </div>
+          <div className="flex justify-between items-center pt-4 border-t border-gray-100">
+            <span className="text-sm text-gray-500">Plan value</span>
+            <span className="font-serif-mgmt text-lg font-bold text-matter-navy">{formatMoney(profile.gross_paid, profile.currency)}</span>
+          </div>
+          <p className="text-xs text-gray-400 mt-2">
+            Remaining deliveries: {profile.remaining_deliveries ?? '—'} / {profile.total_deliveries ?? '—'}
+          </p>
+        </div>
+
+        <div className="col-span-12 lg:col-span-5 bg-white rounded-2xl border border-matter-dust/40 shadow-md p-6">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">Macro Profile · Daily Target</p>
+            {profile.total_calories && (
+              <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full bg-gray-100 text-gray-700 whitespace-nowrap">
+                <span className="material-symbols-outlined text-[14px]">local_fire_department</span>
+                {profile.total_calories} kcal
+              </span>
+            )}
+          </div>
+          <div className="space-y-3">
+            {MACRO_BLOCKS.map((m) => (
+              <MacroBlock key={m.key} label={m.label} grams={profile.macros?.[m.key]} max={macroMax} box={m.box} track={m.track} fill={m.fill} text={m.text} />
+            ))}
+          </div>
+          {(websiteExclusions.length > 0 || missingFromWebsite.length > 0) && (
+            <div className="mt-4 pt-4 border-t border-gray-100">
+              <p className="flex items-center gap-1.5 text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-2">
+                <span className="material-symbols-outlined text-[14px]">eco</span>
+                Dietary Restrictions
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {websiteExclusions.map((ex) => (
+                  <span key={ex.title} className="text-xs font-medium bg-matter-dust/40 text-matter-charcoal border border-matter-dust rounded-full px-2.5 py-1">
+                    {ex.title}
+                  </span>
+                ))}
+                {missingFromWebsite.map((name) => (
+                  <span key={name} className="text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200 rounded-full px-2.5 py-1" title="On file internally but not synced to the website subscription">
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        {loading ? (
-          <div className="text-center py-16 text-gray-400 animate-pulse">Loading…</div>
-        ) : error ? (
-          <div className="text-center py-16 text-rose-600">{error}</div>
-        ) : visibleSubscriptions.length === 0 ? (
-          <div className="text-center py-16">
-            <Package className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-            <p className="text-gray-500">
-              {deliveryFilterResults !== null
-                ? 'No matching subscriptions found for this date'
-                : showUnmatchedOnly
-                  ? 'No unmatched subscriptions on this page'
-                  : hideEnded
-                    ? 'No subscriptions with an active cycle on this page'
-                    : 'No subscriptions found'}
-            </p>
+      {/* Tabs */}
+      <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-5">
+        <div className="inline-flex p-1 bg-gray-100 rounded-full mb-5">
+          {[
+            { key: 'logistics', label: 'Logistics' },
+            { key: 'meals', label: 'Meal history' },
+            { key: 'financials', label: 'Financials' },
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`px-4 py-1.5 rounded-full text-sm font-semibold transition-colors ${
+                activeTab === tab.key ? 'bg-white shadow-sm text-gray-900' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {activeTab === 'logistics' && (
+          <div className="space-y-5">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+              <div>
+                <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3">Delivery Addresses</p>
+                {profile.customer_addresses?.length > 0 ? (
+                  <div className="flex flex-col gap-3">
+                    {profile.customer_addresses.map((addr) => (
+                      <div
+                        key={addr.id}
+                        className={`rounded-xl p-3.5 border ${addr.status === 'active' ? 'bg-matter-green/25 border-matter-green/50' : 'bg-gray-50 border-gray-100'}`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">
+                            <span className="material-symbols-outlined text-[18px] text-gray-700">
+                              {addr.type === 'work' ? 'work' : 'home'}
+                            </span>
+                            {addr.label || addr.type || 'Address'}
+                          </span>
+                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${addr.status === 'active' ? 'bg-white/70 text-gray-700' : 'bg-white text-gray-500'}`}>
+                            {addr.status === 'active' ? 'Active' : 'Previous'}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-600 mt-1.5">
+                          {[addr.building, addr.unit ? `Unit ${addr.unit}` : null, addr.floor, addr.area, addr.emirate].filter(Boolean).join(', ') || '—'}
+                        </p>
+                        {addr.area && <p className="text-xs text-gray-500 mt-1">Zone · {addr.area}</p>}
+                        {profile.delivery_window && (
+                          <p className="flex items-center gap-1 text-xs text-gray-500 mt-1">
+                            <span className="material-symbols-outlined text-[14px]">schedule</span>
+                            Delivery window · {profile.delivery_window.label}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400">No address on file.</p>
+                )}
+
+                <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3 mt-5">Internal Customer Match</p>
+                {matchLoading ? (
+                  <p className="text-sm text-gray-400">Checking…</p>
+                ) : match?.customer ? (
+                  <div className="bg-matter-green/15 border border-matter-green/40 rounded-xl p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-sm font-semibold text-gray-900">{match.customer.firstName} {match.customer.lastName}</p>
+                      <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-matter-green/30 text-matter-navy">
+                        {matchLabels[match.matchedBy] || 'Matched'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <MiniField label="Internal ID" value={match.customer.customerId} />
+                      <MiniField label="Email" value={match.customer.email} />
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400">No matching internal customer found.</p>
+                )}
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest">Delivery Calendar</p>
+                  <button
+                    type="button"
+                    onClick={() => setShowPauseModal(true)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-matter-sky text-matter-navy rounded-lg text-xs font-semibold hover:opacity-90 transition"
+                  >
+                    <PauseCircle className="w-3.5 h-3.5" />
+                    Pause Delivery
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4 pb-4 border-b border-gray-100">
+                  <MiniField label="Cycle Start" value={formatDate(profile.cycle_start_date)} />
+                  <MiniField label="Cycle End" value={formatDate(profile.cycle_end_date)} />
+                  <MiniField label="Next Delivery" value={formatDate(profile.next_delivery_date)} />
+                  <MiniField label="Renewal Due" value={profile.renewal_eligible ? formatDate(profile.renewal_due_date) : 'Not eligible'} />
+                </div>
+                <DeliveryCalendar
+                  cycleStartDate={profile.cycle_start_date}
+                  pauses={profile.pauses}
+                  deliverySchedule={profile.delivery_schedule}
+                  customerId={match?.customer?.customerId}
+                />
+              </div>
+            </div>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-4">
-            {visibleSubscriptions.map((s) => (
-              <button
-                key={s.subscription_id}
-                onClick={() => navigate(`/website-subscriptions/${s.subscription_id}`)}
-                className="text-left bg-gray-50 hover:bg-gray-100 border border-gray-200 rounded-xl p-4 transition"
-              >
-                <div className="flex items-center justify-between mb-2 gap-2">
-                  <p className="font-semibold text-gray-900 truncate">{s.name}</p>
-                  <div className="flex items-center gap-1 flex-wrap justify-end">
-                    <StatusBadge status={s.subscription_status} />
-                    {isCycleEnded(s.cycle_end_date) && <CycleEndBadge cycleEndDate={s.cycle_end_date} />}
+        )}
+
+        {activeTab === 'meals' && (
+          !match?.customer ? (
+            <p className="text-sm text-gray-400">No internal customer match — meal selections unavailable.</p>
+          ) : mealLoading ? (
+            <p className="text-sm text-gray-400">Loading meal selections…</p>
+          ) : mealError ? (
+            <p className="text-sm text-matter-red">{mealError}</p>
+          ) : groupedMealDates.length === 0 ? (
+            <p className="text-sm text-gray-400">No meal selections found for this customer.</p>
+          ) : (
+            <div className="space-y-3">
+              {groupedMealDates.map(([date, meals]) => (
+                <div key={date} className="border border-gray-100 rounded-xl p-4">
+                  <p className="flex items-center gap-2 text-sm font-semibold text-gray-800 mb-3">
+                    <span className="material-symbols-outlined text-[18px] text-gray-400">restaurant</span>
+                    {formatDate(date)}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {meals.map((meal, idx) => (
+                      <span key={`${date}-${idx}`} className="text-sm font-medium bg-matter-dust/40 text-matter-charcoal border border-matter-dust rounded-full px-3 py-1.5">
+                        {meal.mealName}{meal.quantity > 1 ? ` ×${meal.quantity}` : ''}
+                      </span>
+                    ))}
                   </div>
                 </div>
-                <p className="text-xs text-gray-400 truncate">{s.email}</p>
-                <div className="mt-3 flex items-center justify-between text-xs text-gray-500">
-                  <span>{s.plan?.name}</span>
-                  <span>#{s.subscription_id}</span>
+              ))}
+            </div>
+          )
+        )}
+
+        {activeTab === 'financials' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div className="border border-gray-100 rounded-xl p-4">
+              <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3">Pricing</p>
+              <div className="flex flex-col gap-2 text-sm font-mono mb-3">
+                <div className="flex justify-between"><span className="text-gray-500">Base Price</span><span className="text-gray-900">{formatMoney(profile.base_price, profile.currency)}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">Bag Price</span><span className="text-gray-900">{formatMoney(profile.bag_price, profile.currency)}</span></div>
+                <div className="flex justify-between"><span className="text-gray-500">VAT ({profile.vat_percentage ?? 0}%)</span><span className="text-gray-900">{formatMoney(profile.vat, profile.currency)}</span></div>
+                <div className="flex justify-between pt-2 mt-1 border-t border-gray-100 font-semibold">
+                  <span className="text-gray-900">Gross Total</span>
+                  <span className="text-matter-navy text-base">{formatMoney(profile.gross_paid, profile.currency)}</span>
                 </div>
-                <div className="flex items-center justify-between mt-1">
-                  <p className="text-xs text-gray-400">Renews {formatDate(s.renewal_due_date)}</p>
-                  {matchResults[s.subscription_id] === undefined ? (
-                    <span className="text-[10px] text-gray-300">Checking…</span>
-                  ) : matchResults[s.subscription_id] ? (
-                    <span className="text-[10px] font-semibold text-emerald-600">Matched</span>
-                  ) : (
-                    <span className="text-[10px] font-semibold text-rose-500">No match</span>
-                  )}
+              </div>
+              {invoice ? (
+                <div className="flex items-start gap-2 bg-matter-green/15 border border-matter-green/40 text-matter-navy rounded-lg px-3 py-2 text-xs">
+                  <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span>
+                    Invoice {invoice.InvoiceNumber} created in Xero
+                    {invoice.InvoiceID && (
+                      <>
+                        {' · '}
+                        <a href={`https://go.xero.com/AccountsReceivable/View.aspx?InvoiceID=${invoice.InvoiceID}`} target="_blank" rel="noreferrer" className="underline font-medium">
+                          View in Xero
+                        </a>
+                      </>
+                    )}
+                  </span>
                 </div>
-              </button>
-            ))}
+              ) : (
+                <button
+                  onClick={handleCreateInvoice}
+                  disabled={invoiceLoading}
+                  className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 bg-matter-sky text-matter-navy rounded-lg text-xs font-semibold hover:opacity-90 disabled:opacity-50 transition"
+                >
+                  <Receipt className={`w-3.5 h-3.5 ${invoiceLoading ? 'animate-pulse' : ''}`} />
+                  {invoiceLoading ? 'Creating invoice…' : 'Create Xero Invoice'}
+                </button>
+              )}
+              {invoiceError && <p className="text-xs text-matter-red mt-2">{invoiceError}</p>}
+            </div>
+
+            <div className="border border-gray-100 rounded-xl p-4">
+              <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-3">Recent Transactions</p>
+              {profile.payments?.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-[10px] text-gray-400 uppercase tracking-wide">
+                        <th className="text-left font-semibold pb-2">Ref</th>
+                        <th className="text-left font-semibold pb-2">Date</th>
+                        <th className="text-right font-semibold pb-2">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50">
+                      {profile.payments.slice(0, 6).map((p) => (
+                        <tr key={p.id}>
+                          <td className="py-2 font-mono text-xs text-gray-700">TRX-{p.transaction_id}</td>
+                          <td className="py-2 text-gray-500">{formatDate(p.date)}</td>
+                          <td className="py-2 text-right font-mono text-gray-900">{formatMoney(p.amount, p.currency)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-sm text-gray-400">No transactions on file.</p>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      {deliveryFilterResults === null && meta && meta.total_pages > 1 && (
-        <div className="flex items-center justify-center gap-3">
-          <button
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-            disabled={page <= 1}
-            className="p-2 rounded-lg border border-gray-200 disabled:opacity-40 hover:bg-gray-50"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <span className="text-sm text-gray-500">Page {meta.page} of {meta.total_pages}</span>
-          <button
-            onClick={() => setPage((p) => (meta.total_pages ? Math.min(meta.total_pages, p + 1) : p + 1))}
-            disabled={page >= meta.total_pages}
-            className="p-2 rounded-lg border border-gray-200 disabled:opacity-40 hover:bg-gray-50"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
+      <p className="text-xs text-gray-300 text-center mt-4">Last updated {formatDate(profile.updated_at)}</p>
+
+      {showPauseModal && (
+        <PauseModal
+          subscriptionId={subscriptionId}
+          cycleEndDate={profile.cycle_end_date}
+          onClose={() => setShowPauseModal(false)}
+          onSuccess={() => {
+            setShowPauseModal(false);
+            loadProfile();
+          }}
+        />
       )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- */
+/* Page: Customer Management                                              */
+/* ---------------------------------------------------------------------- */
+
+const WebsiteSubscription = () => {
+  const { id } = useParams();
+  const navigate = useNavigate();
+
+  const handleSelect = (subscriptionId, opts) => {
+    navigate(`/website-subscriptions/${subscriptionId}`, opts);
+  };
+
+  return (
+    <div className="customer-mgmt min-h-screen p-6">
+      <div className="flex items-start justify-between mb-6 pb-6 border-b border-black/10 flex-wrap gap-3">
+        <div>
+          <h1 className="font-serif-mgmt text-3xl font-bold text-matter-navy">Customer Management</h1>
+          <p className="text-gray-500 text-sm mt-1">Every subscriber, their plan, logistics and financial record.</p>
+        </div>
+        <button
+          onClick={() => navigate('/customers')}
+          title="Add a new internal customer record"
+          className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-matter-sky text-matter-navy rounded-lg text-sm font-semibold hover:opacity-90 transition"
+        >
+          <span className="material-symbols-outlined text-[18px]">add</span>
+          New customer
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-5 items-start">
+        <CustomerListPanel selectedId={id} onSelect={handleSelect} />
+        <CustomerProfilePanel subscriptionId={id} />
+      </div>
     </div>
   );
 };

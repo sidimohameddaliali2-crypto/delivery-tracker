@@ -2,36 +2,22 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { motion } from 'framer-motion';
-import { 
-  ArrowLeft, 
-  Phone, 
-  Mail, 
-  MapPin, 
-  Clock, 
-  Target, 
-  AlertTriangle,
-  Image as ImageIcon,
+import {
+  Clock,
   User,
-  Calendar,
-  Package,
   Truck,
   CheckCircle,
   XCircle,
-  Tag,
-  Map,
-  FlagTriangleRight,
   ArrowDownCircle,
   ArrowUpCircle,
   Timer,
-  Archive,
-  Upload
+  Archive
 } from 'lucide-react';
 import { fetchDeliveryById } from '../store/slices/deliverySlice';
 import api from '../utils/api';
-import DriverSelectModal from '../components/DriverSelectModal';
 import UserAvatar from '../components/users/UserAvatar';
-import IssueReportModal from '../components/IssueReportModal';
-import AutoAssignButton from '../components/AutoAssignButton';
+import LocationPinPicker from '../components/LocationPinPicker';
+import { parseGPSFromLink } from '../utils/gpsParsing';
 
 const API_BASE_URL = (api.defaults.baseURL || '').replace(/\/api\/?$/, '');
 const FALLBACK_IMAGE =
@@ -97,123 +83,14 @@ const resolveImageUrl = (imageEntry) => {
   return preferHttps(trimmedUrl);
 };
 
-// Inline sub-component: handles "Mark as Collected" with photo upload
-const CollectButton = ({ deliveryId, actionLoading, setActionLoading, onSuccess }) => {
-  const [showModal, setShowModal] = useState(false);
-  const [notes, setNotes] = useState('');
-  const [photoFile, setPhotoFile] = useState(null);
-  const [photoPreview, setPhotoPreview] = useState(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const handlePhotoChange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setPhotoFile(file);
-    setPhotoPreview(URL.createObjectURL(file));
-  };
-
-  const handleSubmit = async () => {
-    setIsSubmitting(true);
-    setActionLoading(true);
-    try {
-      const formData = new FormData();
-      if (photoFile) formData.append('proofImage', photoFile);
-      if (notes) formData.append('notes', notes);
-      await api.post(`/deliveries/${deliveryId}/collect`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
-      setShowModal(false);
-      onSuccess();
-      alert('Collection marked as collected');
-    } catch (err) {
-      console.error('Collect error:', err);
-      alert(err?.response?.data?.message || 'Failed to mark as collected');
-    } finally {
-      setIsSubmitting(false);
-      setActionLoading(false);
-    }
-  };
-
-  return (
-    <>
-      <button
-        onClick={() => setShowModal(true)}
-        disabled={actionLoading}
-        className={`w-full flex items-center justify-center px-4 py-2 rounded-lg ${actionLoading ? 'bg-gray-300 text-gray-700' : 'bg-teal-500 text-white hover:bg-teal-600'}`}
-      >
-        <Archive className="w-4 h-4 mr-2" />
-        Mark as Collected
-      </button>
-
-      {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg w-full max-w-md p-6 space-y-4">
-            <h3 className="text-lg font-semibold text-gray-900">Mark as Collected</h3>
-            <p className="text-sm text-gray-500">Upload a photo as proof of collection (required).</p>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Photo Proof *</label>
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={handlePhotoChange}
-                className="w-full text-sm text-gray-700 border border-gray-300 rounded-lg px-3 py-2"
-              />
-              {photoPreview && (
-                <img src={photoPreview} alt="Preview" className="mt-2 w-full h-40 object-cover rounded-lg border border-gray-200" />
-              )}
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Notes (optional)</label>
-              <textarea
-                value={notes}
-                onChange={e => setNotes(e.target.value)}
-                rows={2}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-teal-500"
-                placeholder="Any notes about the collection..."
-              />
-            </div>
-
-            <div className="flex gap-3 justify-end pt-2">
-              <button
-                onClick={() => setShowModal(false)}
-                disabled={isSubmitting}
-                className="px-4 py-2 text-gray-600 bg-gray-200 rounded-lg hover:bg-gray-300"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSubmit}
-                disabled={isSubmitting || !photoFile}
-                className="flex items-center px-4 py-2 bg-teal-500 text-white rounded-lg hover:bg-teal-600 disabled:opacity-50"
-              >
-                {isSubmitting ? (
-                  <><div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />Submitting...</>
-                ) : (
-                  <><Upload className="w-4 h-4 mr-2" />Confirm Collected</>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  );
-};
-
 const DeliveryDetail = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
   const dispatch = useDispatch();
   const { currentDelivery, currentDeliveryBags, isLoading, error } = useSelector(state => state.delivery);
-  const [activeTab, setActiveTab] = useState('details');
   const [actionLoading, setActionLoading] = useState(false);
-  const [showDriverModal, setShowDriverModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
-  const [showIssueReportModal, setShowIssueReportModal] = useState(false);
   const [editForm, setEditForm] = useState({
     customerName: '',
     customerPhone: '',
@@ -222,7 +99,10 @@ const DeliveryDetail = () => {
     notes: '',
     zone: '',
     date: '',
-    time: ''
+    time: '',
+    gpsLink: '',
+    gpsLat: null,
+    gpsLng: null
   });
   const [customerLocation, setCustomerLocation] = useState(null);
   const auth = useSelector(state => state.auth);
@@ -282,7 +162,10 @@ const DeliveryDetail = () => {
         notes: currentDelivery.notes || '',
         zone: currentDelivery.zone || '',
         date: localDate,
-        time: localTime
+        time: localTime,
+        gpsLink: currentDelivery.gpsLocation?.link || '',
+        gpsLat: Number.isFinite(currentDelivery.gpsLocation?.lat) ? currentDelivery.gpsLocation.lat : null,
+        gpsLng: Number.isFinite(currentDelivery.gpsLocation?.lng) ? currentDelivery.gpsLocation.lng : null
       });
     }
   }, [currentDelivery]);
@@ -470,62 +353,43 @@ const DeliveryDetail = () => {
   const timingStatus = getTimingStatus(currentDelivery);
   const TimingIcon = timingStatus?.icon;
 
-  // Handler to perform reassignment when a driver id is selected from the modal
-  const handleReassignDriver = async (newDriverId) => {
-    if (!newDriverId) return;
+  const shipmentIdLabel = `${currentDelivery.type === 'Collection' ? 'Collection' : 'Shipment'} ID: ${(currentDelivery._id || '').slice(-8).toUpperCase()}`;
+  const gpsLat = currentDelivery.gpsLocation?.lat ?? customerLocation?.gpsLocation?.lat;
+  const gpsLng = currentDelivery.gpsLocation?.lng ?? customerLocation?.gpsLocation?.lng;
+  const gpsLink = currentDelivery.gpsLocation?.link || customerLocation?.gpsLocation?.link;
+  const associatedBagIds = (currentDeliveryBags && currentDeliveryBags.length > 0)
+    ? currentDeliveryBags.map((bag) => bag.bagId).filter(Boolean)
+    : [
+        ...(currentDelivery.bagAssignment?.bagId ? [currentDelivery.bagAssignment.bagId] : []),
+        ...(currentDelivery.collectionDetails?.bagIds || []),
+      ];
 
-    // Basic client-side validation: ensure value looks like a Mongo ObjectId
-    const objectIdRegex = /^[0-9a-fA-F]{24}$/;
-    if (!objectIdRegex.test(newDriverId)) {
-      alert('Selected driver id is invalid. Reassignment cancelled.');
-      console.warn('Reassign aborted: invalid driver id format:', newDriverId);
-      return;
-    }
-
-    setActionLoading(true);
+  const handleShare = async () => {
     try {
-      const resp = await api.put(`/deliveries/${id}`, { driver: newDriverId });
-      console.log('Reassign driver response:', resp?.data);
-      await dispatch(fetchDeliveryById(id));
-      alert('Driver reassigned');
-    } catch (err) {
-      console.error('Reassign driver error (axios):', err);
-      const serverMessage = err?.response?.data?.message;
-      const status = err?.response?.status;
-      if (serverMessage) {
-        alert(`Failed to reassign driver: ${serverMessage}`);
-      } else if (status) {
-        alert(`Failed to reassign driver (status ${status}). Check console for details.`);
-      } else {
-        alert(err?.message || 'Failed to reassign driver');
-      }
-    } finally {
-      setActionLoading(false);
+      await navigator.clipboard.writeText(window.location.href);
+      alert('Link copied to clipboard');
+    } catch {
+      alert(window.location.href);
     }
   };
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <button
-            onClick={handleBackNavigation}
-            className="p-2 hover:bg-gray-100 rounded-lg"
-          >
-            <ArrowLeft className="w-5 h-5" />
+    <div className="matter-analytics p-4 sm:p-6 max-w-7xl mx-auto w-full">
+      {/* Sub-header */}
+      <div className="flex items-center justify-between mb-4">
+        <button
+          onClick={handleBackNavigation}
+          className="p-2 hover:bg-gray-100 rounded-lg text-gray-600 transition-colors flex items-center justify-center"
+        >
+          <span className="material-symbols-outlined">arrow_back</span>
+        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => window.print()} title="Print" className="p-2 text-gray-500 hover:bg-gray-100 rounded transition-colors flex items-center justify-center">
+            <span className="material-symbols-outlined">print</span>
           </button>
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">
-              Delivery #{currentDelivery._id?.substring(0, 8)}...
-            </h1>
-            <p className="text-gray-500">{currentDelivery.customerName}</p>
-          </div>
-        </div>
-        <div className="flex items-center space-x-3">
-          <span className={`px-3 py-1 rounded-full text-sm font-medium ${statusInfo.color}`}>
-            {statusInfo.label}
-          </span>
+          <button onClick={handleShare} title="Share" className="p-2 text-gray-500 hover:bg-gray-100 rounded transition-colors flex items-center justify-center">
+            <span className="material-symbols-outlined">share</span>
+          </button>
           <button
             onClick={() => {
               if (!['admin','super_admin','dispatcher','manager'].includes(auth.user?.role)) {
@@ -534,301 +398,408 @@ const DeliveryDetail = () => {
               }
               setShowEditModal(true);
             }}
-            className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+            disabled={currentDelivery.status === 'delivered'}
+            title={currentDelivery.status === 'delivered' ? 'Delivered deliveries cannot be edited' : undefined}
+            className="px-4 py-2 border border-gray-200 rounded text-sm font-medium text-gray-900 hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
           >
-            Edit Delivery
+            Edit
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left Column - Delivery Details */}
-        <div className="lg:col-span-2 space-y-6">
-          {/* Delivery Information Card */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
-          >
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Delivery Information</h2>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Customer Name
-                </label>
-                <p className="text-gray-900">{currentDelivery.customerName}</p>
-              </div>
+      {/* Page header (desktop only — covered by the mobile Header Status card below) */}
+      <div className="hidden lg:flex mb-6 flex-col md:flex-row md:items-end justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2 mb-1 text-gray-500">
+            <span className="text-xs font-semibold uppercase tracking-wider">{shipmentIdLabel}</span>
+            <span className="w-1 h-1 rounded-full bg-gray-300" />
+            <span className="text-xs">{formatDateTime(currentDelivery.scheduledTime)}</span>
+          </div>
+          <h1 className="text-2xl font-semibold text-gray-900">Delivery Details</h1>
+        </div>
+        <div className="flex items-center gap-3 flex-wrap">
+          {timingStatus && timingStatus.label !== 'Timing Pending' && (
+            <div className={`px-3 py-1.5 rounded-full flex items-center gap-1.5 border ${timingStatus.containerClass}`}>
+              {TimingIcon && <TimingIcon className={`w-4 h-4 ${timingStatus.iconClass}`} />}
+              <span className="text-xs font-bold">{timingStatus.label}</span>
+            </div>
+          )}
+          <span className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 ${statusInfo.color}`}>
+            {statusInfo.icon && <statusInfo.icon className="w-4 h-4" />}
+            {statusInfo.label}
+          </span>
+        </div>
+      </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Customer ID
-                </label>
-                <p className="text-gray-900">{currentDelivery.customerId}</p>
-              </div>
+      {/* Mobile-only single-column layout, matching the mobile Delivery Details design */}
+      <div className="flex flex-col gap-3 lg:hidden">
+        {/* Header Status Card */}
+        <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-col gap-3">
+          <div className="flex justify-end items-start">
+            <span className={`px-2.5 py-1 rounded-full text-xs font-bold flex items-center gap-1.5 ${statusInfo.color}`}>
+              {statusInfo.icon && <statusInfo.icon className="w-3.5 h-3.5" />}
+              {statusInfo.label}
+            </span>
+          </div>
+          <div className="h-px bg-gray-100 w-full" />
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[10px] text-gray-400 uppercase tracking-wider">Performance</p>
+              <p className={`text-sm font-medium truncate ${timingStatus?.descriptionClass || 'text-gray-600'}`}>{timingStatus?.label || 'Timing Pending'}</p>
+            </div>
+            <div className="text-right min-w-0">
+              <p className="text-[10px] text-gray-400 uppercase tracking-wider">Type</p>
+              <p className="text-sm font-medium text-gray-900 capitalize truncate">{currentDelivery.type}</p>
+            </div>
+          </div>
+        </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Scheduled Time
-                </label>
-                <p className="text-gray-900 flex items-center">
-                  <Calendar className="w-4 h-4 mr-2" />
-                  {formatDateTime(currentDelivery.scheduledTime)}
-                </p>
+        {/* Recipient Details Card */}
+        <div className="bg-white border border-gray-200 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-3 text-gray-400">
+            <span className="material-symbols-outlined text-[20px]">person</span>
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider">Recipient Details</h2>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs text-gray-400">Customer</p>
+              <p className="text-sm font-medium text-gray-900">{currentDelivery.customerName}</p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-400">Company</p>
+              <p className="text-sm font-medium text-gray-900">{currentDelivery.company || '—'}</p>
+            </div>
+            {currentDelivery.notes && (
+              <div className="col-span-2">
+                <p className="text-xs text-gray-400">Notes</p>
+                <p className="text-sm bg-gray-50 p-2 rounded-md mt-1 text-gray-700">{currentDelivery.notes}</p>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* ... existing fields ... */}
-  
-               <div>
-                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                     Zone
-                   </label>
-                  <p className="text-gray-900 flex items-center">
-    <FlagTriangleRight className="w-4 h-4 mr-2" />
-    {currentDelivery.zone || 'Not specified'}
-  </p>
+            )}
+            {associatedBagIds.length > 0 && (
+              <div className="col-span-2">
+                <p className="text-xs text-gray-400 mb-1.5">Associated Bags</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {associatedBagIds.map((bagId, i) => (
+                    <span key={`${bagId}-${i}`} className="px-2 py-0.5 bg-gray-50 border border-gray-200 rounded font-mono text-xs text-gray-700">{bagId}</span>
+                  ))}
                 </div>
+              </div>
+            )}
+          </div>
+        </div>
 
-                <div>
-
-                 </div>
-
-                {currentDelivery.gpsLocation && (
-                       <div className="md:col-span-2">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                      GPS Location
-                       </label>
-                      <p className="text-gray-900 flex items-center">
-                      <Map className="w-4 h-4 mr-2" />
-                    {currentDelivery.gpsLocation.lat?.toFixed(6)}
-                    <a
-                        href={`${currentDelivery.gpsLocation.link}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-sm text-blue-600 hover:text-blue-800 mt-1 inline-block"
-                      >View on Google Maps
-                        </a>
-                     </p>
-                     
-                     </div>
-                      )}
-</div>
-
+        {/* Destination & Timing Card */}
+        <div className="bg-white border border-gray-200 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-3 text-gray-400">
+            <span className="material-symbols-outlined text-[20px]">location_on</span>
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider">Destination &amp; Timing</h2>
+          </div>
+          <div className="flex flex-col gap-4">
+            <div>
+              <p className="text-xs text-gray-400">{currentDelivery.type === 'Collection' ? 'Collection Address' : 'Address'}</p>
+              <p className="text-sm font-medium text-gray-900 leading-snug mt-0.5">
+                {currentDelivery.address || customerLocation?.address || <span className="text-gray-400 italic font-normal">Not specified</span>}
+              </p>
+              {currentDelivery.zone && <p className="text-xs text-gray-400 mt-1">Zone: {currentDelivery.zone}</p>}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="border-l-2 border-gray-200 pl-3">
+                <p className="text-xs text-gray-400">Scheduled</p>
+                <p className="text-sm text-gray-700">{formatTime(currentDelivery.scheduledTime)}</p>
+              </div>
               {currentDelivery.deliveredTime && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Delivered Time
-                  </label>
-                  <p className="text-gray-900 flex items-center">
-                    <CheckCircle className="w-4 h-4 mr-2 text-green-600" />
-                    {formatDateTime(currentDelivery.deliveredTime)}
-                  </p>
-                </div>
-              )}
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Company
-                </label>
-                <p className="text-gray-900">{currentDelivery.company}</p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Delivery Type
-                </label>
-                <p className="text-gray-900 capitalize">{currentDelivery.type}</p>
-              </div>
-
-
-
-              {timingStatus && (
-                <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Timing Status
-                  </label>
-                  <div className={`flex items-start space-x-3 rounded-lg px-3 py-3 ${timingStatus.containerClass}`}>
-                    {TimingIcon && (
-                      <TimingIcon className={`w-5 h-5 mt-0.5 ${timingStatus.iconClass}`} />
-                    )}
-                    <div>
-                      <p className="font-semibold">{timingStatus.label}</p>
-                      {timingStatus.description && (
-                        <p className={`text-sm ${timingStatus.descriptionClass}`}>
-                          {timingStatus.description}
-                        </p>
-                      )}
-                    </div>
-                  </div>
+                <div className="border-l-2 border-blue-600 bg-blue-50/50 rounded-r-md pl-3 py-1">
+                  <p className="text-xs text-blue-600 font-medium">Actual</p>
+                  <p className="text-sm font-semibold text-blue-700">{formatTime(currentDelivery.deliveredTime)}</p>
                 </div>
               )}
             </div>
+          </div>
+        </div>
 
-{(currentDelivery.address || currentDelivery.type === 'Collection' || customerLocation?.address) && (
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {currentDelivery.type === 'Collection' ? 'Collection Address' : 'Delivery Address'}
-                </label>
-                <p className="text-gray-900 flex items-start">
-                  <MapPin className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
-                  {currentDelivery.address || customerLocation?.address || <span className="text-gray-400 italic">Not specified</span>}
-                </p>
-                {!currentDelivery.address && customerLocation?.address && (
-                  <p className="text-xs text-gray-400 mt-1 ml-6">From customer's last delivery</p>
-                )}
-                {currentDelivery.addressDetails && (
-                  <dl className="mt-2 ml-6 grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-                    {currentDelivery.addressDetails.city && (
-                      <><dt className="text-gray-500">City</dt><dd className="text-gray-800">{currentDelivery.addressDetails.city}</dd></>
-                    )}
-                    {currentDelivery.addressDetails.area && (
-                      <><dt className="text-gray-500">Area</dt><dd className="text-gray-800">{currentDelivery.addressDetails.area}</dd></>
-                    )}
-                    {currentDelivery.addressDetails.street && (
-                      <><dt className="text-gray-500">Street</dt><dd className="text-gray-800">{currentDelivery.addressDetails.street}</dd></>
-                    )}
-                    {currentDelivery.addressDetails.building && (
-                      <><dt className="text-gray-500">Building</dt><dd className="text-gray-800">{currentDelivery.addressDetails.building}</dd></>
-                    )}
-                    {currentDelivery.addressDetails.floor && currentDelivery.addressDetails.floor !== '0' && (
-                      <><dt className="text-gray-500">Floor</dt><dd className="text-gray-800">{currentDelivery.addressDetails.floor}</dd></>
-                    )}
-                    {currentDelivery.addressDetails.apartment && (
-                      <><dt className="text-gray-500">Apartment</dt><dd className="text-gray-800">{currentDelivery.addressDetails.apartment}</dd></>
-                    )}
-                  </dl>
-                )}
-              </div>
-            )}
-
-            {currentDelivery.notes && (
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Notes
-                </label>
-                <p className="text-gray-900">{currentDelivery.notes}</p>
-              </div>
-            )}
-          </motion.div>
-
-          {/* Driver Information Card */}
-          {currentDelivery.driver && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 }}
-              className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
-            >
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">Driver Information</h2>
-              
-              <div className="flex items-center space-x-4">
+        {/* Driver Assigned Card */}
+        {currentDelivery.driver && (
+          <div className="bg-white border border-gray-200 rounded-xl p-4">
+            <div className="flex items-center gap-2 mb-3 text-gray-400">
+              <span className="material-symbols-outlined text-[20px]">badge</span>
+              <h2 className="text-[11px] font-semibold uppercase tracking-wider">Driver Assigned</h2>
+            </div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3 min-w-0">
                 <UserAvatar
                   user={currentDelivery.driver}
-                  sizePx={64}
+                  sizePx={48}
                   showStatus
                   fallbackName={`${currentDelivery.driver.profile?.firstName || 'Driver'} ${currentDelivery.driver.profile?.lastName || ''}`.trim() || 'Assigned Driver'}
                   fallbackEmail={currentDelivery.driver.email || 'driver@matter.app'}
                 />
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">
+                <div className="min-w-0">
+                  <p className="font-semibold text-gray-900 truncate">
                     {currentDelivery.driver.profile?.firstName} {currentDelivery.driver.profile?.lastName}
-                  </h3>
-                  <div className="flex items-center space-x-4 text-sm text-gray-500 mt-1">
-                    {currentDelivery.driver.profile?.phone && (
-                      <div className="flex items-center">
-                        <Phone className="w-4 h-4 mr-1" />
-                        {currentDelivery.driver.profile.phone}
-                      </div>
-                    )}
-                    {currentDelivery.driver.email && (
-                      <div className="flex items-center">
-                        <Mail className="w-4 h-4 mr-1" />
-                        {currentDelivery.driver.email}
-                      </div>
-                    )}
+                  </p>
+                  <p className="text-xs text-gray-400 truncate">
+                    {currentDelivery.driver.profile?.status || 'offline'}
+                    {currentDelivery.driver.profile?.vehicleType && ` · ${currentDelivery.driver.profile.vehicleType}`}
+                  </p>
+                </div>
+              </div>
+              {currentDelivery.driver.profile?.phone && (
+                <a
+                  href={`tel:${currentDelivery.driver.profile.phone}`}
+                  className="flex-shrink-0 bg-blue-50 text-blue-600 hover:bg-blue-100 p-2 rounded-full transition-colors flex items-center justify-center"
+                >
+                  <span className="material-symbols-outlined text-[20px]">call</span>
+                </a>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Tracking Timeline Card */}
+        <div className="bg-white border border-gray-200 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-4 text-gray-400">
+            <span className="material-symbols-outlined text-[20px]">timeline</span>
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider">Tracking Timeline</h2>
+          </div>
+          {currentDelivery.timeline && currentDelivery.timeline.length > 0 ? (
+            <div className="relative pl-6 flex flex-col gap-5 before:content-[''] before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-[2px] before:bg-gray-100">
+              {currentDelivery.timeline.map((event, index) => {
+                const isLast = index === currentDelivery.timeline.length - 1;
+                const isFinal = isLast && ['delivered', 'collected', 'failed'].includes(event.status);
+                return (
+                  <div key={index} className="relative">
+                    <div className={`absolute -left-6 top-0 w-6 h-6 rounded-full flex items-center justify-center z-10 ${isFinal ? 'bg-white border-2 border-blue-600' : 'bg-white border-2 border-gray-200'}`}>
+                      <div className={`w-2 h-2 rounded-full ${isFinal ? 'bg-blue-600' : 'bg-gray-300'}`} />
+                    </div>
+                    <p className={`text-sm text-gray-900 capitalize ${isFinal ? 'font-semibold' : 'font-medium'}`}>{event.status.replace('_', ' ')}</p>
+                    {event.notes && <p className="text-sm text-gray-500 mt-0.5">{event.notes}</p>}
+                    <p className="text-xs text-gray-400 mt-0.5">{formatDateTime(event.timestamp)}</p>
                   </div>
-                  <div className="mt-2">
-                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                      currentDelivery.driver.profile?.status === 'available' ? 'bg-green-100 text-green-800' :
-                      currentDelivery.driver.profile?.status === 'busy' ? 'bg-yellow-100 text-yellow-800' :
-                      'bg-gray-100 text-gray-800'
-                    }`}>
-                      {currentDelivery.driver.profile?.status || 'offline'}
-                    </span>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-center py-6 text-gray-400">
+              <span className="material-symbols-outlined text-[32px] mb-1 block">timeline</span>
+              <div className="text-sm">No timeline events recorded</div>
+            </div>
+          )}
+        </div>
+
+        {/* Location Card */}
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden flex flex-col h-[280px]">
+          <div className="p-3 border-b border-gray-100 flex justify-between items-center flex-shrink-0">
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Delivery Location</h2>
+            {gpsLink && (
+              <a href={gpsLink} target="_blank" rel="noopener noreferrer" className="text-blue-600 text-xs font-medium hover:underline flex items-center gap-1">
+                <span className="material-symbols-outlined text-[14px]">open_in_new</span> Open
+              </a>
+            )}
+          </div>
+          <div className="relative flex-1 bg-gray-50">
+            {gpsLat && gpsLng ? (
+              <iframe
+                title="Delivery location map (mobile)"
+                className="absolute inset-0 w-full h-full border-0"
+                src={`https://www.google.com/maps?q=${gpsLat},${gpsLng}&output=embed`}
+                loading="lazy"
+              />
+            ) : (
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400 gap-1">
+                <span className="material-symbols-outlined text-[32px]">location_off</span>
+                <p className="text-xs">No GPS location recorded</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Proof of Delivery Card */}
+        <div className="bg-white border border-gray-200 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 text-gray-400">
+              <span className="material-symbols-outlined text-[20px]">photo_camera</span>
+              <h2 className="text-[11px] font-semibold uppercase tracking-wider">Proof of Delivery</h2>
+            </div>
+            {(currentDelivery?.proof?.images?.length > 0) && (
+              <span className="text-xs bg-gray-50 px-2 py-1 rounded-md text-gray-500">{currentDelivery.proof.images.length} Files</span>
+            )}
+          </div>
+          {currentDelivery?.proof?.images?.length > 0 || currentDelivery?.proof?.photoUrl ? (
+            <div className="grid grid-cols-2 gap-3">
+              {(currentDelivery?.proof?.images || (currentDelivery?.proof?.photoUrl ? [currentDelivery.proof.photoUrl] : [])).map((imageEntry, index) => {
+                const resolvedUrl = resolveImageUrl(imageEntry);
+                if (!resolvedUrl) {
+                  return (
+                    <div key={`proof-m-${index}`} className="aspect-square rounded-lg border border-dashed border-gray-200 flex items-center justify-center text-xs text-gray-400">
+                      Unable to load image
+                    </div>
+                  );
+                }
+                return (
+                  <a
+                    key={`proof-m-${index}`}
+                    href={resolvedUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="aspect-square bg-gray-50 rounded-lg border border-gray-200 overflow-hidden relative"
+                  >
+                    <img
+                      src={resolvedUrl}
+                      alt={`Delivery proof ${index + 1}`}
+                      className="w-full h-full object-cover"
+                      referrerPolicy="no-referrer"
+                      onError={(event) => { event.currentTarget.src = FALLBACK_IMAGE; }}
+                    />
+                  </a>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-center py-6 text-gray-400">
+              <span className="material-symbols-outlined text-[32px] mb-1 block">image</span>
+              <div className="text-sm">No proof of delivery uploaded</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Desktop two-column layout */}
+      <div className="hidden lg:grid lg:grid-cols-12 lg:gap-4">
+        {/* Left Column */}
+        <div className="col-span-12 lg:col-span-8 flex flex-col gap-4">
+          {/* Core Information Card */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white border border-gray-200 rounded-lg p-5"
+          >
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              <div>
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-4">Recipient Info</h3>
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">Customer</p>
+                    <p className="text-base text-gray-900 font-medium">{currentDelivery.customerName}</p>
+                    <p className="text-xs font-mono text-gray-500">{currentDelivery.customerId}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">Company</p>
+                    <p className="text-sm text-gray-900">{currentDelivery.company}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">Delivery Type</p>
+                    <p className="text-sm text-gray-900 capitalize">{currentDelivery.type}</p>
                   </div>
                 </div>
               </div>
-
-              {currentDelivery.driver.kpi && (
-                <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="text-center p-3 bg-blue-50 rounded-lg">
-                    <Target className="w-6 h-6 text-blue-600 mx-auto mb-1" />
-                    <div className="text-lg font-semibold text-blue-600">{currentDelivery.driver.kpi.accuracyRate}%</div>
-                    <div className="text-xs text-gray-600">Accuracy</div>
+              <div>
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-4">Timing &amp; Location</h3>
+                <div className="space-y-4">
+                  <div className="flex gap-6">
+                    <div>
+                      <p className="text-xs text-gray-500 mb-1">Scheduled</p>
+                      <p className="text-sm font-mono text-gray-900">{formatTime(currentDelivery.scheduledTime)}</p>
+                    </div>
+                    {currentDelivery.deliveredTime && (
+                      <div>
+                        <p className="text-xs text-gray-500 mb-1">Actual</p>
+                        <p className="text-sm font-mono text-gray-900 font-bold">{formatTime(currentDelivery.deliveredTime)}</p>
+                      </div>
+                    )}
                   </div>
-                  <div className="text-center p-3 bg-orange-50 rounded-lg">
-                    <Clock className="w-6 h-6 text-orange-600 mx-auto mb-1" />
-                    <div className="text-lg font-semibold text-orange-600">{currentDelivery.driver.kpi.avgLateTime}m</div>
-                    <div className="text-xs text-gray-600">Avg Late</div>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">Zone</p>
+                    <p className="text-sm text-gray-900">{currentDelivery.zone || customerLocation?.zone || 'Not specified'}</p>
                   </div>
-                  <div className="text-center p-3 bg-purple-50 rounded-lg">
-                    <div className="text-lg font-semibold text-purple-600">{currentDelivery.driver.kpi.score}</div>
-                    <div className="text-xs text-gray-600">KPI Score</div>
-                  </div>
-                  <div className="text-center p-3 bg-red-50 rounded-lg">
-                    <AlertTriangle className="w-6 h-6 text-red-600 mx-auto mb-1" />
-                    <div className="text-lg font-semibold text-red-600">{currentDelivery.driver.kpi.complaintsCount}</div>
-                    <div className="text-xs text-gray-600">Complaints</div>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-1">
+                      {currentDelivery.type === 'Collection' ? 'Collection Address' : 'Delivery Address'}
+                    </p>
+                    <p className="text-sm text-gray-900 leading-tight">
+                      {currentDelivery.address || customerLocation?.address || <span className="text-gray-400 italic">Not specified</span>}
+                    </p>
+                    {!currentDelivery.address && customerLocation?.address && (
+                      <p className="text-xs text-gray-400 mt-1">From customer's last delivery</p>
+                    )}
+                    {currentDelivery.addressDetails && (
+                      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                        {currentDelivery.addressDetails.city && (
+                          <><dt className="text-gray-500">City</dt><dd className="text-gray-800">{currentDelivery.addressDetails.city}</dd></>
+                        )}
+                        {currentDelivery.addressDetails.area && (
+                          <><dt className="text-gray-500">Area</dt><dd className="text-gray-800">{currentDelivery.addressDetails.area}</dd></>
+                        )}
+                        {currentDelivery.addressDetails.street && (
+                          <><dt className="text-gray-500">Street</dt><dd className="text-gray-800">{currentDelivery.addressDetails.street}</dd></>
+                        )}
+                        {currentDelivery.addressDetails.building && (
+                          <><dt className="text-gray-500">Building</dt><dd className="text-gray-800">{currentDelivery.addressDetails.building}</dd></>
+                        )}
+                        {currentDelivery.addressDetails.floor && currentDelivery.addressDetails.floor !== '0' && (
+                          <><dt className="text-gray-500">Floor</dt><dd className="text-gray-800">{currentDelivery.addressDetails.floor}</dd></>
+                        )}
+                        {currentDelivery.addressDetails.apartment && (
+                          <><dt className="text-gray-500">Apartment</dt><dd className="text-gray-800">{currentDelivery.addressDetails.apartment}</dd></>
+                        )}
+                      </dl>
+                    )}
                   </div>
                 </div>
-              )}
-            </motion.div>
-          )}
+              </div>
+            </div>
 
-            {/* Bags Card */}
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.15 }}
-              className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
-            >
-              {currentDelivery.bagAssignment && (
-  <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
-    <h3 className="text-lg font-semibold text-gray-900 mb-4">Associated Bag</h3>
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div>
-        <p className="text-sm text-gray-600">Bag ID</p>
-        <p className="font-medium text-gray-900">{currentDelivery.bagAssignment.bagId}</p>
-      </div>
-      <div>
-        <p className="text-sm text-gray-600">Assigned At</p>
-        <p className="font-medium text-gray-900">
-          {new Date(currentDelivery.bagAssignment.assignedAt).toLocaleString()}
-        </p>
-      </div>
-      <div>
-        <p className="text-sm text-gray-600">Assignment Status</p>
-        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-          currentDelivery.bagAssignment.status === 'delivered' ? 'bg-green-100 text-green-800' :
-          currentDelivery.bagAssignment.status === 'assigned' ? 'bg-blue-100 text-blue-800' :
-          currentDelivery.bagAssignment.status === 'returned' ? 'bg-emerald-100 text-emerald-800' :
-          'bg-gray-100 text-gray-800'
-        }`}>
-          {formatStatusLabel(currentDelivery.bagAssignment.status)}
-        </span>
-      </div>
-      {currentDelivery.bagAssignment.returnedAt && (
-        <div>
-          <p className="text-sm text-gray-600">Returned At</p>
-          <p className="font-medium text-gray-900">
-            {formatDateTime(currentDelivery.bagAssignment.returnedAt)}
-          </p>
-        </div>
-      )}
-    </div>
-  </div>
-)}
-            </motion.div>
+            {currentDelivery.notes && (
+              <div className="mt-4 pt-4 border-t border-gray-100">
+                <p className="text-xs text-gray-500 mb-1">Notes</p>
+                <p className="text-sm text-gray-900">{currentDelivery.notes}</p>
+              </div>
+            )}
+
+            {associatedBagIds.length > 0 && (
+              <div className="mt-6 pt-4 border-t border-gray-100">
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Associated Bags</h3>
+                <div className="flex flex-wrap gap-2">
+                  {associatedBagIds.map((bagId, i) => (
+                    <span key={`${bagId}-${i}`} className="px-3 py-1 bg-gray-50 border border-gray-200 rounded font-mono text-xs text-gray-700 flex items-center gap-2">
+                      <span className="material-symbols-outlined text-[14px]">work</span> {bagId}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </motion.div>
+
+          {/* Map Card */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.05 }}
+            className="bg-white border border-gray-200 rounded-lg overflow-hidden flex flex-col h-[360px]"
+          >
+            <div className="p-4 border-b border-gray-100 flex justify-between items-center flex-shrink-0">
+              <h3 className="text-lg font-semibold text-gray-900">Delivery Location</h3>
+              {gpsLink && (
+                <a href={gpsLink} target="_blank" rel="noopener noreferrer" className="text-blue-600 text-sm font-medium hover:underline flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[16px]">open_in_new</span> Open in Maps
+                </a>
+              )}
+            </div>
+            <div className="relative flex-1 bg-gray-50">
+              {gpsLat && gpsLng ? (
+                <iframe
+                  title="Delivery location map"
+                  className="absolute inset-0 w-full h-full border-0"
+                  src={`https://www.google.com/maps?q=${gpsLat},${gpsLng}&output=embed`}
+                  loading="lazy"
+                />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400 gap-2">
+                  <span className="material-symbols-outlined text-[40px]">location_off</span>
+                  <p className="text-sm">No GPS location recorded</p>
+                </div>
+              )}
+            </div>
+          </motion.div>
 
           {/* Collection Details Card — shown only for Collection type */}
           {currentDelivery.type === 'Collection' && (
@@ -836,7 +807,7 @@ const DeliveryDetail = () => {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.18 }}
-              className="bg-white rounded-lg shadow-sm border border-teal-200 p-6"
+              className="bg-white border border-teal-200 rounded-lg p-5"
             >
               <h2 className="text-lg font-semibold text-teal-800 mb-4 flex items-center gap-2">
                 <Archive className="w-5 h-5 text-teal-600" />
@@ -956,235 +927,207 @@ const DeliveryDetail = () => {
             </motion.div>
           )}
 
-          {/* Timeline Card */}
+          {/* Proof of Delivery Card */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.2 }}
-            className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+            className="bg-white border border-gray-200 rounded-lg p-5"
           >
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Delivery Timeline</h2>
-            
-            <div className="space-y-4">
-              {currentDelivery.timeline && currentDelivery.timeline.length > 0 ? (
-                currentDelivery.timeline.map((event, index) => (
-                  <div key={index} className="flex items-start space-x-4">
-                    <div className={`w-3 h-3 rounded-full mt-2 ${
-                      event.status === 'delivered' ? 'bg-green-500' :
-                      event.status === 'failed' ? 'bg-red-500' :
-                      event.status === 'picked_up' ? 'bg-blue-500' :
-                      event.status === 'assigned' ? 'bg-yellow-500' :
-                      'bg-gray-500'
-                    }`} />
-                    <div className="flex-1">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <h4 className="font-medium text-gray-900 capitalize">
-                            {event.status.replace('_', ' ')}
-                          </h4>
-                          <p className="text-sm text-gray-500">
-                            {formatDateTime(event.timestamp)}
-                          </p>
-                        </div>
-                      </div>
-                      {event.notes && (
-                        <p className="text-sm text-gray-600 mt-1">{event.notes}</p>
-                      )}
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="text-center py-8 text-gray-500">
-                  <Package className="w-12 h-12 mx-auto mb-2 text-gray-300" />
-                  <div>No timeline events recorded</div>
-                </div>
-              )}
-            </div>
-          </motion.div>
-        </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Proof of Delivery</h3>
 
-        {/* Right Column - Proof & Actions */}
-        <div className="space-y-6">
-          {/* Proof of Delivery Card */}
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
-          >
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Proof of Delivery</h2>
-            
             {currentDelivery?.proof?.images?.length > 0 || currentDelivery?.proof?.photoUrl ? (
-              <div className="mb-4">
-        <p className="text-sm text-gray-600 mb-2">Delivery Photos</p>
-        <div className="grid grid-cols-2 gap-4">
-          {(currentDelivery?.proof?.images || (currentDelivery?.proof?.photoUrl ? [currentDelivery.proof.photoUrl] : [])).map((imageEntry, index) => {
-            const resolvedUrl = resolveImageUrl(imageEntry);
-            if (!resolvedUrl) {
-              return (
-                <div
-                  key={`proof-${index}`}
-                  className="w-full h-32 rounded-lg border border-dashed border-gray-300 flex items-center justify-center text-xs text-gray-400"
-                >
-                  Unable to load image
-                </div>
-              );
-            }
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {(currentDelivery?.proof?.images || (currentDelivery?.proof?.photoUrl ? [currentDelivery.proof.photoUrl] : [])).map((imageEntry, index) => {
+                  const resolvedUrl = resolveImageUrl(imageEntry);
+                  if (!resolvedUrl) {
+                    return (
+                      <div
+                        key={`proof-${index}`}
+                        className="aspect-square rounded border border-dashed border-gray-200 flex items-center justify-center text-xs text-gray-400"
+                      >
+                        Unable to load image
+                      </div>
+                    );
+                  }
 
-            const originalUrl =
-              typeof imageEntry === 'string'
-                ? imageEntry
-                : imageEntry?.url || imageEntry?.path || imageEntry?.location || resolvedUrl;
-            const fallbackUrl = originalUrl ? resolveImageUrl(originalUrl) : '';
-            const fullSizeUrl = fallbackUrl || resolvedUrl;
+                  const originalUrl =
+                    typeof imageEntry === 'string'
+                      ? imageEntry
+                      : imageEntry?.url || imageEntry?.path || imageEntry?.location || resolvedUrl;
+                  const fallbackUrl = originalUrl ? resolveImageUrl(originalUrl) : '';
+                  const fullSizeUrl = fallbackUrl || resolvedUrl;
 
-            return (
-              <div key={`proof-${index}`} className="relative">
-                <img
-                  src={resolvedUrl}
-                  alt={`Delivery proof ${index + 1}`}
-                  className="w-full h-32 object-cover rounded-lg border border-gray-200 bg-gray-100"
-                  referrerPolicy="no-referrer"
-                  onError={event => {
-                    const el = event.currentTarget;
-                    if (!el.dataset.fallbackAttempted && fallbackUrl && fallbackUrl !== resolvedUrl) {
-                      el.dataset.fallbackAttempted = 'true';
-                      el.src = fallbackUrl;
-                    } else {
-                      el.src = FALLBACK_IMAGE;
-                    }
-                  }}
-                />
-                <a
-                  href={fullSizeUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="absolute bottom-2 right-2 bg-black bg-opacity-50 text-white p-1 rounded text-xs"
-                >
-                  View Full
-                </a>
+                  return (
+                    <a
+                      key={`proof-${index}`}
+                      href={fullSizeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="aspect-square bg-gray-50 rounded border border-gray-200 overflow-hidden relative group"
+                    >
+                      <img
+                        src={resolvedUrl}
+                        alt={`Delivery proof ${index + 1}`}
+                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        referrerPolicy="no-referrer"
+                        onError={event => {
+                          const el = event.currentTarget;
+                          if (!el.dataset.fallbackAttempted && fallbackUrl && fallbackUrl !== resolvedUrl) {
+                            el.dataset.fallbackAttempted = 'true';
+                            el.src = fallbackUrl;
+                          } else {
+                            el.src = FALLBACK_IMAGE;
+                          }
+                        }}
+                      />
+                      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                        <span className="material-symbols-outlined text-white opacity-0 group-hover:opacity-100 drop-shadow-md">zoom_in</span>
+                      </div>
+                    </a>
+                  );
+                })}
               </div>
-            );
-          })}
-        </div>
-      </div>
             ) : (
-              <div className="text-center py-8 text-gray-500">
-                <ImageIcon className="w-12 h-12 mx-auto mb-2 text-gray-300" />
-                <div>No proof of delivery uploaded</div>
+              <div className="text-center py-8 text-gray-400">
+                <span className="material-symbols-outlined text-[40px] mb-2 block">image</span>
+                <div className="text-sm">No proof of delivery uploaded</div>
               </div>
             )}
           </motion.div>
+        </div>
 
-          {/* Actions Card */}
+        {/* Right Column */}
+        <div className="col-span-12 lg:col-span-4 flex flex-col gap-4">
+          {/* Driver Assigned Card */}
+          {currentDelivery.driver && (
+            <motion.div
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="bg-white border border-gray-200 rounded-lg p-5"
+            >
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-4">Driver Assigned</h3>
+              <div className="flex items-center gap-4 mb-4">
+                <UserAvatar
+                  user={currentDelivery.driver}
+                  sizePx={48}
+                  showStatus
+                  fallbackName={`${currentDelivery.driver.profile?.firstName || 'Driver'} ${currentDelivery.driver.profile?.lastName || ''}`.trim() || 'Assigned Driver'}
+                  fallbackEmail={currentDelivery.driver.email || 'driver@matter.app'}
+                />
+                <div>
+                  <p className="text-lg font-semibold text-gray-900">
+                    {currentDelivery.driver.profile?.firstName} {currentDelivery.driver.profile?.lastName}
+                  </p>
+                  <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full mt-0.5 ${
+                    currentDelivery.driver.profile?.status === 'available' ? 'bg-emerald-50 text-emerald-700' :
+                    currentDelivery.driver.profile?.status === 'busy' ? 'bg-amber-50 text-amber-700' :
+                    'bg-gray-100 text-gray-700'
+                  }`}>
+                    {currentDelivery.driver.profile?.status || 'offline'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-2 mb-4 border-t border-gray-100 pt-3">
+                {currentDelivery.driver.profile?.phone && (
+                  <div className="flex justify-between items-center text-sm">
+                    <span className="text-gray-500">Phone</span>
+                    <span className="text-gray-900 font-mono font-medium">{currentDelivery.driver.profile.phone}</span>
+                  </div>
+                )}
+                {currentDelivery.driver.email && (
+                  <div className="flex justify-between items-center text-sm">
+                    <span className="text-gray-500">Email</span>
+                    <span className="text-gray-900 font-medium truncate ml-2">{currentDelivery.driver.email}</span>
+                  </div>
+                )}
+              </div>
+
+              {currentDelivery.driver.kpi && (
+                <div className="grid grid-cols-2 gap-2 mb-4 border-t border-gray-100 pt-3">
+                  <div className="text-center p-2 bg-blue-50 rounded">
+                    <div className="text-sm font-semibold text-blue-600">{currentDelivery.driver.kpi.accuracyRate}%</div>
+                    <div className="text-[11px] text-gray-500">Accuracy</div>
+                  </div>
+                  <div className="text-center p-2 bg-amber-50 rounded">
+                    <div className="text-sm font-semibold text-amber-600">{currentDelivery.driver.kpi.avgLateTime}m</div>
+                    <div className="text-[11px] text-gray-500">Avg Late</div>
+                  </div>
+                </div>
+              )}
+
+              {currentDelivery.driver.profile?.phone && (
+                <a
+                  href={`tel:${currentDelivery.driver.profile.phone}`}
+                  className="w-full py-2 bg-white border border-gray-200 hover:bg-gray-50 text-gray-900 text-sm font-medium rounded transition-colors flex items-center justify-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-[18px]">chat</span> Contact Driver
+                </a>
+              )}
+            </motion.div>
+          )}
+
+          {/* Tracking Timeline Card */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ delay: 0.1 }}
-            className="bg-white rounded-lg shadow-sm border border-gray-200 p-6"
+            className="bg-white border border-gray-200 rounded-lg p-5 flex-1"
           >
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Actions</h2>
-            
-            <div className="space-y-3">
-              <button
-                onClick={async () => {
-                  if (auth.user?.role !== 'admin') { alert('Only admins can mark deliveries as delivered'); return; }
-                  if (!window.confirm('Mark this delivery as delivered?')) return;
-                  setActionLoading(true);
-                  try {
-                    await api.put(`/deliveries/${id}`, { status: 'delivered', deliveredTime: new Date().toISOString() });
-                    await dispatch(fetchDeliveryById(id));
-                    alert('Delivery marked as delivered');
-                  } catch (err) {
-                    console.error('Mark delivered error:', err);
-                    alert(err?.response?.data?.message || 'Failed to mark delivered');
-                  } finally {
-                    setActionLoading(false);
-                  }
-                }}
-                disabled={actionLoading}
-                className={`w-full flex items-center justify-center px-4 py-2 rounded-lg ${actionLoading ? 'bg-gray-300 text-gray-700' : 'bg-green-500 text-white hover:bg-green-600'}`}
-              >
-                <CheckCircle className="w-4 h-4 mr-2" />
-                Mark as Delivered
-              </button>
+            <h3 className="text-lg font-semibold text-gray-900 mb-6">Tracking Timeline</h3>
 
-              {/* Mark as Collected — only for Collection type */}
-              {currentDelivery.type === 'Collection' && currentDelivery.status !== 'collected' && (
-                ['admin', 'super_admin', 'dispatcher', 'driver'].includes(auth.user?.role)
-              ) && (
-                <CollectButton
-                  deliveryId={id}
-                  actionLoading={actionLoading}
-                  setActionLoading={setActionLoading}
-                  onSuccess={() => dispatch(fetchDeliveryById(id))}
-                />
-              )}
-
-              <button
-                onClick={() => {
-                  if (auth.user?.role !== 'admin') { alert('Only admins can reassign drivers'); return; }
-                  setShowDriverModal(true);
-                }}
-                disabled={actionLoading}
-                className={`w-full flex items-center justify-center px-4 py-2 rounded-lg ${actionLoading ? 'bg-gray-300 text-gray-700' : 'bg-blue-500 text-white hover:bg-blue-600'}`}
-              >
-                <Truck className="w-4 h-4 mr-2" />
-                Reassign Driver
-              </button>
-
-              {/* AI Auto-Assign Button */}
-              {(['admin', 'super_admin', 'dispatcher'].includes(auth.user?.role)) && (
-                <AutoAssignButton 
-                  delivery={currentDelivery} 
-                  onAssignmentComplete={(updatedDelivery) => {
-                    dispatch(fetchDeliveryById(currentDelivery._id));
-                  }}
-                />
-              )}
-
-              <button
-                onClick={() => setShowIssueReportModal(true)}
-                disabled={actionLoading}
-                className={`w-full flex items-center justify-center px-4 py-2 rounded-lg ${actionLoading ? 'bg-gray-300 text-gray-700' : 'bg-red-500 text-white hover:bg-red-600'}`}
-              >
-                <AlertTriangle className="w-4 h-4 mr-2" />
-                Report Issue
-              </button>
-
-              {currentDelivery.complaint?.hasComplaint && (
-                <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
-                  <div className="flex items-center text-red-800">
-                    <AlertTriangle className="w-4 h-4 mr-2" />
-                    <span className="font-medium">Complaint Filed</span>
-                  </div>
-                  {currentDelivery.complaint.details && (
-                    <p className="text-sm text-red-700 mt-1">{currentDelivery.complaint.details}</p>
-                  )}
-                  <div className="flex items-center justify-between mt-2">
-                    <span className="text-xs text-red-600">
-                      {currentDelivery.complaint.resolved ? 'Resolved' : 'Pending Resolution'}
-                    </span>
-                    <button className="text-xs text-red-600 hover:text-red-800">
-                      {currentDelivery.complaint.resolved ? 'Reopen' : 'Mark Resolved'}
-                    </button>
-                  </div>
+            {currentDelivery.timeline && currentDelivery.timeline.length > 0 ? (
+              <div className="relative">
+                <div className="absolute left-[11px] top-2 bottom-2 w-0.5 bg-gray-200" />
+                <div className="space-y-6 relative">
+                  {currentDelivery.timeline.map((event, index) => {
+                    const isLast = index === currentDelivery.timeline.length - 1;
+                    const isFinal = isLast && ['delivered', 'collected', 'failed'].includes(event.status);
+                    return (
+                      <div key={index} className="flex gap-4">
+                        <div className={`relative z-10 w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 ${
+                          isFinal
+                            ? 'bg-blue-600 text-white ring-4 ring-blue-100'
+                            : 'bg-white border-2 border-blue-600'
+                        }`}>
+                          {isFinal ? (
+                            <span className="material-symbols-outlined text-[14px]">check</span>
+                          ) : (
+                            <div className="w-2 h-2 rounded-full bg-blue-600" />
+                          )}
+                        </div>
+                        <div className="pt-0.5">
+                          <p className={`text-sm text-gray-900 capitalize ${isFinal ? 'font-bold' : 'font-medium'}`}>
+                            {event.status.replace('_', ' ')}
+                          </p>
+                          <p className={`font-mono text-[11px] mt-0.5 ${isFinal ? 'text-blue-600 font-medium' : 'text-gray-400'}`}>
+                            {formatDateTime(event.timestamp)}
+                          </p>
+                          {event.notes && (
+                            <p className="text-sm text-gray-500 mt-1">{event.notes}</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              )}
-            </div>
+              </div>
+            ) : (
+              <div className="text-center py-8 text-gray-400">
+                <span className="material-symbols-outlined text-[40px] mb-2 block">timeline</span>
+                <div className="text-sm">No timeline events recorded</div>
+              </div>
+            )}
           </motion.div>
+
         </div>
       </div>
-      <DriverSelectModal
-        isOpen={showDriverModal}
-        onClose={() => setShowDriverModal(false)}
-        onSelect={handleReassignDriver}
-        currentDriverId={currentDelivery?.driver?._id}
-      />
 
       {showEditModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg w-full max-w-2xl overflow-hidden">
-            <div className="flex items-center justify-between p-6 border-b border-gray-200">
+          <div className="bg-white rounded-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 sticky top-0 bg-white z-10">
               <h2 className="text-xl font-bold text-gray-900">Edit Delivery</h2>
               <button
                 onClick={() => setShowEditModal(false)}
@@ -1218,6 +1161,18 @@ const DeliveryDetail = () => {
                   if (newDate.toISOString() !== currentIso) {
                     updatePayload.scheduledTime = newIso; // Send without Z - server will handle timezone
                   }
+                }
+
+                // Pin location
+                const prevLat = currentDelivery.gpsLocation?.lat ?? null;
+                const prevLng = currentDelivery.gpsLocation?.lng ?? null;
+                const prevLink = currentDelivery.gpsLocation?.link || '';
+                if (editForm.gpsLat !== prevLat || editForm.gpsLng !== prevLng || editForm.gpsLink !== prevLink) {
+                  updatePayload.gpsLocation = {
+                    lat: editForm.gpsLat,
+                    lng: editForm.gpsLng,
+                    link: editForm.gpsLink
+                  };
                 }
 
                 if (Object.keys(updatePayload).length === 0) {
@@ -1325,6 +1280,36 @@ const DeliveryDetail = () => {
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                 </div>
+
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Pin Location</label>
+                  <input
+                    type="text"
+                    value={editForm.gpsLink}
+                    onChange={(e) => {
+                      const link = e.target.value;
+                      const parsed = parseGPSFromLink(link);
+                      setEditForm(f => ({
+                        ...f,
+                        gpsLink: link,
+                        ...(parsed ? { gpsLat: parsed.lat, gpsLng: parsed.lng } : {})
+                      }));
+                    }}
+                    placeholder="Paste a Google Maps or Apple Maps link…"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 mb-2"
+                  />
+                  <p className="text-xs text-gray-400 mb-2">Or drag the pin, or click anywhere on the map, to set the exact location.</p>
+                  <LocationPinPicker
+                    lat={editForm.gpsLat}
+                    lng={editForm.gpsLng}
+                    onChange={(lat, lng) => setEditForm(f => ({ ...f, gpsLat: lat, gpsLng: lng }))}
+                  />
+                  {Number.isFinite(editForm.gpsLat) && Number.isFinite(editForm.gpsLng) && (
+                    <p className="text-xs text-gray-500 mt-2 font-mono">
+                      {editForm.gpsLat.toFixed(6)}, {editForm.gpsLng.toFixed(6)}
+                    </p>
+                  )}
+                </div>
               </div>
 
               <div className="flex justify-end space-x-3 pt-2 border-t border-gray-200">
@@ -1347,40 +1332,6 @@ const DeliveryDetail = () => {
           </div>
         </div>
       )}
-
-      {/* Issue Report Modal */}
-      <IssueReportModal
-        isOpen={showIssueReportModal}
-        onClose={() => setShowIssueReportModal(false)}
-        onSubmit={async (issueData) => {
-          setActionLoading(true);
-          try {
-            await api.post(`/deliveries/${id}/report-issue`, {
-              complaint: {
-                hasComplaint: true,
-                complaintType: issueData.complaintType,
-                remarks: issueData.remarks,
-                compensation: issueData.compensation,
-                resolved: false,
-                reportedAt: new Date().toISOString()
-              }
-            });
-            await dispatch(fetchDeliveryById(id));
-            setShowIssueReportModal(false);
-            alert('Issue reported successfully and sent to Slack');
-          } catch (err) {
-            console.error('Report issue error:', err);
-            alert(err?.response?.data?.message || 'Failed to report issue');
-          } finally {
-            setActionLoading(false);
-          }
-        }}
-        isLoading={actionLoading}
-        deliveryInfo={currentDelivery ? {
-          customerName: currentDelivery.customerName,
-          customerId: currentDelivery.customerId
-        } : null}
-      />
     </div>
   );
 };

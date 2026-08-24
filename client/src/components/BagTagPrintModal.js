@@ -1,29 +1,37 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useImperativeHandle, forwardRef } from 'react';
 import api from '../utils/api';
 import { X, Printer, Upload, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const BagTagPrintModal = ({ deliveries, onClose }) => {
-  const [stickerSize, setStickerSize] = useState('medium'); // 'small' | 'medium' | 'large' | 'custom'
-  const [customWidth, setCustomWidth] = useState(100);
-  const [customHeight, setCustomHeight] = useState(100);
+const BagTagPrintModal = forwardRef(({
+  deliveries,
+  onClose,
+  isOpen = true,
+  initialWidth = null,
+  initialHeight = null,
+  initialGroupBy = null,
+  initialPrintDate = null,
+}, ref) => {
+  const [stickerSize, setStickerSize] = useState(() => (initialWidth || initialHeight) ? 'custom' : 'medium'); // 'small' | 'medium' | 'large' | 'custom'
+  const [customWidth, setCustomWidth] = useState(() => initialWidth || 100);
+  const [customHeight, setCustomHeight] = useState(() => initialHeight || 100);
   const [measurementUnit, setMeasurementUnit] = useState('mm'); // 'mm' | 'inch' | 'cm'
-  const [groupBy, setGroupBy] = useState('driver'); // 'driver' | 'all'
+  const [groupBy, setGroupBy] = useState(() => initialGroupBy || 'driver'); // 'driver' | 'all'
   const [previewMode, setPreviewMode] = useState(false);
   const [logoUrl, setLogoUrl] = useState('');
   const [logoPreview, setLogoPreview] = useState('');
   const [selectedLogoFile, setSelectedLogoFile] = useState(null);
   const [loadingLogo, setLoadingLogo] = useState(false);
   const [savingLogo, setSavingLogo] = useState(false);
-  
+
   // Get tomorrow's date as default print date
   const getDefaultPrintDate = () => {
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
     return tomorrow.toISOString().split('T')[0];
   };
-  
-  const [printDate, setPrintDate] = useState(getDefaultPrintDate());
+
+  const [printDate, setPrintDate] = useState(() => initialPrintDate || getDefaultPrintDate());
   const STORAGE_KEY = 'bag-tag-print-size';
 
   const getServerOrigin = () => {
@@ -59,6 +67,10 @@ const BagTagPrintModal = ({ deliveries, onClose }) => {
   };
 
   useEffect(() => {
+    // When mounted as a hidden print engine (isOpen=false), the caller's
+    // initialWidth/initialHeight/etc. are the source of truth — don't let a
+    // stale localStorage preference silently override them.
+    if (!isOpen) return;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return;
@@ -238,8 +250,13 @@ const BagTagPrintModal = ({ deliveries, onClose }) => {
     }
   };
 
+  // Lets a parent (e.g. PrintConfigModal) trigger printing synchronously from its own
+  // click handler, using this instance's current size, without showing this
+  // component's own designer UI (isOpen can stay false).
+  useImperativeHandle(ref, () => ({ print: handlePrint }));
+
   const openPrintWindow = (html) => {
-    const printWindow = window.open('', 'print-bag-tags', 'width=800,height=600');
+    const printWindow = window.open('', '_blank');
     if (!printWindow) {
       alert('Please allow pop-ups to print stickers');
       return;
@@ -249,15 +266,18 @@ const BagTagPrintModal = ({ deliveries, onClose }) => {
     printWindow.document.write(html);
     printWindow.document.close();
 
-    printWindow.onload = function() {
+    // onload doesn't fire reliably for document.write in every browser, so keep the
+    // timeout as a fallback — but guard so print() (and thus the print dialog) only
+    // ever fires once, whichever trigger wins.
+    let hasPrinted = false;
+    const triggerPrint = () => {
+      if (hasPrinted || !printWindow || printWindow.closed) return;
+      hasPrinted = true;
       printWindow.print();
     };
 
-    setTimeout(() => {
-      if (printWindow && !printWindow.closed) {
-        printWindow.print();
-      }
-    }, 500);
+    printWindow.onload = triggerPrint;
+    setTimeout(triggerPrint, 500);
   };
 
   // Generate printable HTML
@@ -620,6 +640,8 @@ const BagTagPrintModal = ({ deliveries, onClose }) => {
     );
   };
 
+  if (!isOpen) return null;
+
   return (
     <AnimatePresence>
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -895,6 +917,6 @@ const BagTagPrintModal = ({ deliveries, onClose }) => {
       </div>
     </AnimatePresence>
   );
-};
+});
 
 export default BagTagPrintModal;

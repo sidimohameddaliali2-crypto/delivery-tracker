@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Users, RefreshCw, Award, Package, MapPin, Clock } from 'lucide-react';
+import { Users, Award, Package, MapPin, Clock, FileText, Download, X } from 'lucide-react';
 import api from '../utils/api';
+import { formatDate, isCycleEnded } from '../utils/subscriptionFormat';
 
 function KpiCard({ icon: Icon, label, value, sub }) {
   return (
@@ -15,10 +16,96 @@ function KpiCard({ icon: Icon, label, value, sub }) {
   );
 }
 
+const escapeCsvCell = (value) => {
+  const str = value === null || value === undefined ? '' : String(value);
+  return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+};
+
+const downloadCsv = (filename, header, rows) => {
+  const csv = [header, ...rows].map((row) => row.map(escapeCsvCell).join(',')).join('\n');
+  const blob = new Blob([String.fromCharCode(0xFEFF) + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+function ReportModal({ subscriptions, onClose }) {
+  const downloadLeadDeliveryDate = () => {
+    const activeSubs = subscriptions.filter(
+      (s) => s.subscription_status === 'active' && !isCycleEnded(s.cycle_end_date)
+    );
+
+    const rows = activeSubs.map((s) => {
+      const duration = s.starting_date && s.cycle_end_date
+        ? Math.round((new Date(s.cycle_end_date) - new Date(s.starting_date)) / 86400000) + 1
+        : null;
+      return [
+        s.name || '',
+        formatDate(s.starting_date),
+        duration !== null ? `${duration} days` : '—',
+        formatDate(s.cycle_end_date),
+      ];
+    });
+
+    downloadCsv(
+      `lead-delivery-date-${new Date().toISOString().slice(0, 10)}.csv`,
+      ['Customer Name', 'Starting Date', 'Duration', 'Last Delivery Date'],
+      rows
+    );
+    onClose();
+  };
+
+  const REPORTS = [
+    {
+      key: 'lead-delivery-date',
+      label: 'Lead Delivery Date',
+      description: "Active customers' starting date, duration and last delivery date.",
+      onDownload: downloadLeadDeliveryDate,
+    },
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative bg-white rounded-2xl border border-matter-dust/40 shadow-xl w-full max-w-md">
+        <div className="border-b border-gray-100 px-6 py-4 flex items-center justify-between rounded-t-2xl">
+          <h3 className="font-serif-mgmt text-lg font-semibold text-matter-navy">Reports</h3>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="px-6 py-5 space-y-2">
+          {REPORTS.map((report) => (
+            <button
+              key={report.key}
+              onClick={report.onDownload}
+              className="w-full flex items-center gap-3 text-left rounded-xl p-3.5 border border-gray-100 hover:bg-gray-50 transition-colors"
+            >
+              <span className="flex items-center justify-center w-9 h-9 rounded-lg bg-matter-sky/20 text-matter-navy flex-shrink-0">
+                <Download className="w-4 h-4" />
+              </span>
+              <span className="min-w-0">
+                <p className="text-sm font-semibold text-gray-900">{report.label}</p>
+                <p className="text-xs text-gray-400 mt-0.5">{report.description}</p>
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const CustomerAnalytics = () => {
   const [subscriptions, setSubscriptions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showReportModal, setShowReportModal] = useState(false);
 
   const [analytics, setAnalytics] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
@@ -124,14 +211,17 @@ const CustomerAnalytics = () => {
           <p className="text-gray-500 text-sm mt-1">Plan popularity, subscriber status and delivery zones, computed from your live Matter subscriptions.</p>
         </div>
         <button
-          onClick={fetchAll}
-          disabled={loading}
-          className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-50 disabled:opacity-50 transition"
+          onClick={() => setShowReportModal(true)}
+          className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-50 transition"
         >
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
+          <FileText className="w-4 h-4" />
+          Report
         </button>
       </div>
+
+      {showReportModal && (
+        <ReportModal subscriptions={subscriptions} onClose={() => setShowReportModal(false)} />
+      )}
 
       {loading ? (
         <div className="text-center py-16 text-gray-400 animate-pulse">Loading…</div>

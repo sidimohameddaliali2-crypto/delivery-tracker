@@ -39,6 +39,7 @@ const STATUS_STYLE = {
   skipped: { cell: 'bg-matter-red/10', number: 'text-matter-red', dot: 'bg-matter-red' },
   delivered: { cell: 'bg-matter-green/30', number: 'text-matter-navy', dot: 'bg-matter-charcoal' },
   scheduled: { cell: 'bg-matter-sky/15', number: 'text-matter-navy', dot: 'bg-matter-sky' },
+  resumed: { cell: 'bg-yellow-100', number: 'text-yellow-800', dot: 'bg-yellow-400' },
   upcoming: { cell: 'bg-stone-100', number: 'text-gray-500', dot: 'bg-gray-300' },
   none: { cell: '', number: 'text-gray-300', dot: '' },
 };
@@ -46,6 +47,7 @@ const STATUS_STYLE = {
 const LEGEND = [
   { key: 'delivered', label: 'Delivered', dot: 'bg-matter-charcoal' },
   { key: 'scheduled', label: 'Scheduled', dot: 'bg-matter-sky' },
+  { key: 'resumed', label: 'Resumed', dot: 'bg-yellow-400' },
   { key: 'upcoming', label: 'Upcoming', dot: 'bg-gray-300' },
   { key: 'skipped', label: 'Skipped', dot: 'bg-matter-red' },
 ];
@@ -110,7 +112,8 @@ export default function DeliveryCalendar({ pauses, deliverySchedule, customerId 
   const dayStatus = (iso) => {
     if (pausedDates.has(iso)) return 'skipped';
     if (deliveredDates.has(iso)) return 'delivered';
-    if (scheduledActiveDates.has(iso) || resumedDates.has(iso)) return 'scheduled';
+    if (resumedDates.has(iso)) return 'resumed';
+    if (scheduledActiveDates.has(iso)) return 'scheduled';
     if (iso > todayISO) return 'upcoming';
     return 'none';
   };
@@ -128,7 +131,7 @@ export default function DeliveryCalendar({ pauses, deliverySchedule, customerId 
   const cells = [...Array(firstWeekday).fill(null), ...days];
 
   const legendCounts = useMemo(() => {
-    const counts = { delivered: 0, scheduled: 0, upcoming: 0, skipped: 0 };
+    const counts = { delivered: 0, scheduled: 0, resumed: 0, upcoming: 0, skipped: 0 };
     days.forEach((iso) => {
       const status = dayStatus(iso);
       if (counts[status] !== undefined) counts[status] += 1;

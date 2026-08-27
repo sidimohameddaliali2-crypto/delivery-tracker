@@ -11,6 +11,7 @@ import { upload, handleUploadError } from '../middleware/upload.js';
 import { getUploadToSpaces } from '../config/spaces.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { resolveDeliveryCoordinates, extractCoordsFromGoogleMapsUrl } from '../services/geocoding.js';
+import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js';
 
 // Helper to persist coordinates onto a customer's record via their deliveries
 async function saveCustomerCoords(delivery, lat, lng, link) {
@@ -1013,6 +1014,12 @@ router.post('/', [
       console.warn('Socket.io not initialized - cannot emit delivery:created');
     }
 
+    if (delivery.driver) {
+      sendDeliveryPushToDriver({ driverId: delivery.driver._id || delivery.driver, type: 'delivery_created', delivery }).catch((err) => {
+        console.warn('Delivery-created push notify failed (caught):', err?.message || err);
+      });
+    }
+
     // Notify Slack only for manually created single deliveries (not bulk)
     if ((delivery.type || deliveryData.type) !== 'Task' && (delivery.type || deliveryData.type) !== 'Collection') {
       const actorLabel = resolveUserDisplayName(req.user) || req.user?.email || req.user?._id?.toString();
@@ -1236,8 +1243,13 @@ router.patch('/assign-driver', [
 
     const updatedDeliveries = [];
     const driverName = resolveUserDisplayName(driver) || driver.email || driver._id.toString();
+    const reassignments = [];
 
     for (const delivery of deliveries) {
+      const oldDriverId = delivery.driver ? delivery.driver.toString() : null;
+      if (oldDriverId !== driverId) {
+        reassignments.push({ delivery, oldDriverId });
+      }
       delivery.driver = driverId;
       if (delivery.status === 'pending') {
         delivery.status = 'assigned';
@@ -1264,6 +1276,15 @@ router.patch('/assign-driver', [
     } else {
       console.warn('Socket.io not initialized - cannot emit delivery updates (assign-driver)');
     }
+
+    const pushes = reassignments.flatMap(({ delivery, oldDriverId }) => {
+      const jobs = [sendDeliveryPushToDriver({ driverId, type: 'delivery_reassigned', delivery })];
+      if (oldDriverId) {
+        jobs.push(sendDeliveryPushToDriver({ driverId: oldDriverId, type: 'delivery_removed', delivery }));
+      }
+      return jobs;
+    });
+    Promise.allSettled(pushes).catch(() => {});
 
     res.json({
       success: true,
@@ -1357,6 +1378,34 @@ router.put('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']),
       io.emit('delivery:updated', delivery);
     } else {
       console.warn('Socket.io not initialized - cannot emit delivery:updated');
+    }
+
+    // Push notify the driver — only for a real driver reassignment or a
+    // status change, not for every minor field edit (avoids spamming the
+    // driver's phone every time a dispatcher fixes a typo in notes/address).
+    // Note: `changesMap.get('driver')` isn't usable for this comparison —
+    // `originalDelivery.driver` is an unpopulated ObjectId while `delivery.driver`
+    // is populated, so their JSON always differs even when unchanged.
+    const oldDriverId = originalDelivery.driver ? originalDelivery.driver.toString() : null;
+    const newDriverId = delivery.driver
+      ? (delivery.driver._id ? delivery.driver._id.toString() : delivery.driver.toString())
+      : null;
+
+    if (oldDriverId !== newDriverId) {
+      if (newDriverId) {
+        sendDeliveryPushToDriver({ driverId: newDriverId, type: 'delivery_reassigned', delivery }).catch((err) => {
+          console.warn('Delivery-reassigned push notify failed (caught):', err?.message || err);
+        });
+      }
+      if (oldDriverId) {
+        sendDeliveryPushToDriver({ driverId: oldDriverId, type: 'delivery_removed', delivery }).catch((err) => {
+          console.warn('Delivery-removed push notify failed (caught):', err?.message || err);
+        });
+      }
+    } else if (changesMap.has('status') && newDriverId) {
+      sendDeliveryPushToDriver({ driverId: newDriverId, type: 'delivery_updated', delivery }).catch((err) => {
+        console.warn('Delivery-updated push notify failed (caught):', err?.message || err);
+      });
     }
 
     res.json({

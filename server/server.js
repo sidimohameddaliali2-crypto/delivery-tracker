@@ -1,11 +1,15 @@
-import dotenv from 'dotenv';
+// Must stay the very first import: ES module imports are always resolved
+// and evaluated before any of THIS file's own top-level code runs — even
+// code positioned textually earlier — so loading dotenv here (as a side
+// effect of the first import) is the only way to guarantee every route
+// module imported below sees process.env already populated. See
+// loadEnv.js for the full explanation.
+import './loadEnv.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Load environment variables FIRST - before any other imports
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.join(__dirname, '.env') });
 
 console.log('🔧 Environment check:', {
   nodeEnv: process.env.NODE_ENV,

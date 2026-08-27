@@ -94,6 +94,11 @@ const userSchema = new mongoose.Schema({
     lastUpdated: Date,
     address: String
   },
+  pushTokens: [{
+    token: { type: String, required: true },
+    platform: { type: String, enum: ['ios', 'android'] },
+    addedAt: { type: Date, default: Date.now }
+  }],
   kpi: {
     score: { type: Number, default: 0 },
     avgLateTime: { type: Number, default: 0 },

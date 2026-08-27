@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Users, Award, Package, MapPin, Clock, FileText, Download, X } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import api from '../utils/api';
 import { formatDate, isCycleEnded } from '../utils/subscriptionFormat';
 
@@ -34,7 +35,15 @@ const downloadCsv = (filename, header, rows) => {
   URL.revokeObjectURL(url);
 };
 
+const todayKey = () => new Date().toISOString().slice(0, 10);
+
 function ReportModal({ subscriptions, onClose }) {
+  const [downloadingKey, setDownloadingKey] = useState(null);
+  const [downloadError, setDownloadError] = useState('');
+  const [expandedKey, setExpandedKey] = useState(null);
+  const [rangeFrom, setRangeFrom] = useState(todayKey);
+  const [rangeTo, setRangeTo] = useState(todayKey);
+
   const downloadLeadDeliveryDate = () => {
     const activeSubs = subscriptions.filter(
       (s) => s.subscription_status === 'active' && !isCycleEnded(s.cycle_end_date)
@@ -53,11 +62,98 @@ function ReportModal({ subscriptions, onClose }) {
     });
 
     downloadCsv(
-      `lead-delivery-date-${new Date().toISOString().slice(0, 10)}.csv`,
+      `lead-delivery-date-${todayKey()}.csv`,
       ['Customer Name', 'Starting Date', 'Duration', 'Last Delivery Date'],
       rows
     );
     onClose();
+  };
+
+  // Matter's delivery_schedule already reflects pauses: a paused day's entry
+  // has status "paused" and its auto-assigned resume day is added back in as
+  // a normal "active" entry — so filtering on status === 'active' naturally
+  // excludes skipped customers and includes resumed ones, for every date in
+  // the chosen range. One worksheet per date, matching the Reports page's
+  // Multi-Month Excel Export pattern.
+  const downloadDeliverySheet = async () => {
+    if (rangeTo < rangeFrom) {
+      setDownloadError('The end date must be on or after the start date.');
+      return;
+    }
+    setDownloadError('');
+    setDownloadingKey('delivery-sheet');
+    try {
+      const res = await api.get('/matter/subscriptions/delivery-on-date', {
+        params: { date: rangeFrom, dateTo: rangeTo }
+      });
+      const subs = res.data?.data || [];
+
+      const byDate = new Map();
+      subs.forEach((s) => {
+        const dateKey = s.delivery_date || rangeFrom;
+        if (!byDate.has(dateKey)) byDate.set(dateKey, []);
+        byDate.get(dateKey).push(s);
+      });
+      const sortedDates = Array.from(byDate.keys()).sort();
+
+      if (sortedDates.length === 0) {
+        setDownloadError('No scheduled deliveries found for that date range.');
+        return;
+      }
+
+      const workbook = XLSX.utils.book_new();
+      sortedDates.forEach((dateKey) => {
+        const dayCustomers = byDate.get(dateKey)
+          .slice()
+          .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+        const sheetData = [
+          ['Matter Delivery Tracker'],
+          [`Deliveries for ${dateKey}`],
+          [`Total: ${dayCustomers.length}`],
+          [],
+          ['Customer Name', 'Email', 'Phone', 'Address', 'Plan', 'Meals/Day', 'Exclusions'],
+        ];
+
+        dayCustomers.forEach((s) => {
+          sheetData.push([
+            s.name || '',
+            s.email || '',
+            s.phone || '',
+            s.address || '',
+            s.plan_name || '',
+            s.meal_frequency ?? '',
+            (s.exclusions || []).join('; '),
+          ]);
+        });
+
+        const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
+        worksheet['!cols'] = [24, 26, 16, 32, 18, 12, 24].map((w) => ({ wch: w }));
+        // Sheet names can't exceed 31 chars or contain : \ / ? * [ ] — "YYYY-MM-DD" is safe
+        XLSX.utils.book_append_sheet(workbook, worksheet, dateKey);
+      });
+
+      const workbookArray = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+      const filename = rangeFrom === rangeTo
+        ? `delivery-sheet-${rangeFrom}.xlsx`
+        : `delivery-sheet-${rangeFrom}-to-${rangeTo}.xlsx`;
+
+      const blob = new Blob([workbookArray], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      onClose();
+    } catch (err) {
+      console.error('Failed to generate delivery sheet:', err);
+      setDownloadError(err.response?.data?.message || 'Failed to generate the delivery sheet.');
+    } finally {
+      setDownloadingKey(null);
+    }
   };
 
   const REPORTS = [
@@ -66,6 +162,13 @@ function ReportModal({ subscriptions, onClose }) {
       label: 'Lead Delivery Date',
       description: "Active customers' starting date, duration and last delivery date.",
       onDownload: downloadLeadDeliveryDate,
+    },
+    {
+      key: 'delivery-sheet',
+      label: 'Delivery Sheet',
+      description: 'Excel file with one tab per date — skipped customers excluded, resumed customers included.',
+      needsRange: true,
+      onDownload: downloadDeliverySheet,
     },
   ];
 
@@ -80,21 +183,68 @@ function ReportModal({ subscriptions, onClose }) {
           </button>
         </div>
         <div className="px-6 py-5 space-y-2">
-          {REPORTS.map((report) => (
-            <button
-              key={report.key}
-              onClick={report.onDownload}
-              className="w-full flex items-center gap-3 text-left rounded-xl p-3.5 border border-gray-100 hover:bg-gray-50 transition-colors"
-            >
-              <span className="flex items-center justify-center w-9 h-9 rounded-lg bg-matter-sky/20 text-matter-navy flex-shrink-0">
-                <Download className="w-4 h-4" />
-              </span>
-              <span className="min-w-0">
-                <p className="text-sm font-semibold text-gray-900">{report.label}</p>
-                <p className="text-xs text-gray-400 mt-0.5">{report.description}</p>
-              </span>
-            </button>
-          ))}
+          {downloadError && <p className="text-sm text-matter-red mb-1">{downloadError}</p>}
+          {REPORTS.map((report) => {
+            const isLoading = downloadingKey === report.key;
+            const isExpanded = expandedKey === report.key;
+            return (
+              <div key={report.key} className="rounded-xl border border-gray-100 overflow-hidden">
+                <button
+                  onClick={() => (
+                    report.needsRange
+                      ? setExpandedKey((k) => (k === report.key ? null : report.key))
+                      : report.onDownload()
+                  )}
+                  disabled={downloadingKey !== null}
+                  className="w-full flex items-center gap-3 text-left p-3.5 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <span className="flex items-center justify-center w-9 h-9 rounded-lg bg-matter-sky/20 text-matter-navy flex-shrink-0">
+                    {isLoading ? (
+                      <span className="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>
+                    ) : (
+                      <Download className="w-4 h-4" />
+                    )}
+                  </span>
+                  <span className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900">{report.label}</p>
+                    <p className="text-xs text-gray-400 mt-0.5">{isLoading ? 'Generating…' : report.description}</p>
+                  </span>
+                </button>
+                {report.needsRange && isExpanded && (
+                  <div className="px-3.5 pb-3.5 pt-1 border-t border-gray-100 bg-gray-50/50 space-y-3">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-1">From</label>
+                        <input
+                          type="date"
+                          value={rangeFrom}
+                          onChange={(e) => setRangeFrom(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-matter-sky focus:border-matter-sky"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-1">To</label>
+                        <input
+                          type="date"
+                          value={rangeTo}
+                          onChange={(e) => setRangeTo(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-matter-sky focus:border-matter-sky"
+                        />
+                      </div>
+                    </div>
+                    <button
+                      onClick={report.onDownload}
+                      disabled={downloadingKey !== null}
+                      className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 bg-matter-sky text-matter-navy rounded-lg text-sm font-semibold hover:opacity-90 disabled:opacity-50 transition"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      {isLoading ? 'Generating…' : 'Download CSV'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

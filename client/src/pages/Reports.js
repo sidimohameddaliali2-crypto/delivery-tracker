@@ -668,12 +668,13 @@ const generatePDF = (data) => {
           [`Deliveries for ${dayKey}`],
           [`Total: ${dayDeliveries.length}`],
           [],
-          ['Customer', 'Address', 'Scheduled Time', 'Delivered Time', 'Status', 'Driver'],
+          ['Customer', 'Address', 'Zone', 'Scheduled Time', 'Delivered Time', 'Status', 'Driver'],
         ];
 
         dayDeliveries.forEach((delivery) => {
           const driverName = delivery.driverName || delivery.driver?.profile?.name || 'Unassigned';
           const deliveredTimeStr = delivery.deliveredTime ? formatTime(delivery.deliveredTime) : 'Not delivered';
+          const zone = delivery.area || delivery.assignedTo?.area || delivery.zone || '-';
 
           let statusLabel;
           if (!delivery.deliveredTime) {
@@ -689,6 +690,7 @@ const generatePDF = (data) => {
           sheetData.push([
             delivery.customerName || '-',
             delivery.address || '-',
+            zone,
             formatTime(delivery.scheduledTime),
             deliveredTimeStr,
             statusLabel,
@@ -697,7 +699,7 @@ const generatePDF = (data) => {
         });
 
         const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
-        worksheet['!cols'] = [24, 32, 14, 14, 16, 20].map((w) => ({ wch: w }));
+        worksheet['!cols'] = [24, 32, 16, 14, 14, 16, 20].map((w) => ({ wch: w }));
         // Sheet names can't exceed 31 chars or contain : \ / ? * [ ] — "YYYY-MM-DD" is safe
         XLSX.utils.book_append_sheet(workbook, worksheet, dayKey);
       });

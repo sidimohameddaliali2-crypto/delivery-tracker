@@ -138,18 +138,24 @@ class MatterApiService {
   }
 
   /**
-   * Find active, non-cycle-ended subscriptions whose delivery_schedule has
-   * an active entry for the given date. Checking delivery_schedule requires
-   * a full-detail fetch per subscription (the list endpoint doesn't include
-   * it), so this is expensive — hundreds of calls for a full customer base —
-   * and is meant to be triggered on demand, not on every page load.
+   * Find non-cycle-ended subscriptions (active or subscription-level paused)
+   * whose delivery_schedule has an active entry somewhere in [startDateKey,
+   * endDateKey] (inclusive, both "YYYY-MM-DD"). A subscription-level
+   * "paused" status doesn't necessarily mean every day is skipped, so those
+   * are checked too — the per-day delivery_schedule status is the real
+   * source of truth. One row per (subscription, delivery date) match.
+   * Checking delivery_schedule requires a full-detail fetch per subscription
+   * (the list endpoint doesn't include it), so this is expensive — hundreds
+   * of calls for a full customer base — and is meant to be triggered on
+   * demand, not on every page load. Widening the date range doesn't add
+   * extra calls: each subscription's full delivery_schedule is already
+   * fetched in one shot and just gets checked against every date in range.
    */
-  async findSubscriptionsWithDeliveryOnDate(dateKey) {
+  async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey) {
     const all = await this.listAllSubscriptions();
-    const todayStr = new Date().toISOString().slice(0, 10);
     const candidates = all.filter((sub) =>
-      sub.subscription_status === 'active'
-      && String(sub.cycle_end_date || '').slice(0, 10) >= todayStr
+      (sub.subscription_status === 'active' || sub.subscription_status === 'paused')
+      && String(sub.cycle_end_date || '').slice(0, 10) >= startDateKey
     );
 
     const CONCURRENCY = 20;
@@ -161,11 +167,15 @@ class MatterApiService {
         try {
           const detail = await this.getSubscription(sub.subscription_id);
           const schedule = detail?.data?.delivery_schedule || [];
-          const hasDelivery = schedule.some(
-            (entry) => String(entry.date).slice(0, 10) === dateKey && entry.status === 'active'
-          );
-          if (!hasDelivery) return null;
-          return {
+          const deliveryDates = schedule
+            .filter((entry) => {
+              const d = String(entry.date).slice(0, 10);
+              return entry.status === 'active' && d >= startDateKey && d <= endDateKey;
+            })
+            .map((entry) => String(entry.date).slice(0, 10))
+            .sort();
+          if (deliveryDates.length === 0) return [];
+          return deliveryDates.map((deliveryDate) => ({
             subscription_id: sub.subscription_id,
             customer_id: sub.customer_id,
             name: sub.name,
@@ -178,17 +188,23 @@ class MatterApiService {
             plan_name: detail.data.plan?.name ?? null,
             cycle_end_date: sub.cycle_end_date ?? null,
             renewal_due_date: sub.renewal_due_date ?? null,
-            renewal_eligible: sub.renewal_eligible ?? null
-          };
+            renewal_eligible: sub.renewal_eligible ?? null,
+            delivery_date: deliveryDate
+          }));
         } catch (error) {
-          console.error(`delivery-on-date check failed for subscription ${sub.subscription_id}:`, error.message);
-          return null;
+          console.error(`delivery-in-range check failed for subscription ${sub.subscription_id}:`, error.message);
+          return [];
         }
       }));
-      matches.push(...results.filter(Boolean));
+      matches.push(...results.flat());
     }
 
     return matches;
+  }
+
+  /** Single-date convenience wrapper around findSubscriptionsWithDeliveryInRange. */
+  async findSubscriptionsWithDeliveryOnDate(dateKey) {
+    return this.findSubscriptionsWithDeliveryInRange(dateKey, dateKey);
   }
 
   /**

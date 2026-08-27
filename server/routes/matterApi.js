@@ -34,15 +34,19 @@ router.get('/subscriptions/nutrition-by-email', protect, async (req, res) => {
 });
 
 // Find active, non-cycle-ended subscriptions with a scheduled delivery on a
-// given date (per their own delivery_schedule). Expensive — checks every
-// active subscription's full detail — meant to be triggered on demand.
+// given date, or across a date range when dateTo is also passed (per their
+// own delivery_schedule). Expensive — checks every active/paused
+// subscription's full detail — meant to be triggered on demand.
 router.get('/subscriptions/delivery-on-date', protect, async (req, res) => {
   try {
-    const { date } = req.query;
+    const { date, dateTo } = req.query;
     if (!date) {
       return res.status(400).json({ success: false, message: 'date is required' });
     }
-    const data = await matterApiService.findSubscriptionsWithDeliveryOnDate(date);
+    if (dateTo && dateTo < date) {
+      return res.status(400).json({ success: false, message: 'dateTo must be on or after date' });
+    }
+    const data = await matterApiService.findSubscriptionsWithDeliveryInRange(date, dateTo || date);
     res.json({ success: true, data });
   } catch (error) {
     const status = error?.response?.status || 500;

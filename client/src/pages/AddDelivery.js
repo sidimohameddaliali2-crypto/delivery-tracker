@@ -234,10 +234,30 @@ const SCHEDULED_TIME_INPUT_CLS = 'w-full bg-gray-50 border border-gray-200 round
 const SCHEDULED_TIME_LABEL_CLS = 'block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5';
 
 function ScheduledTimeField({ value, onChange, label, hint, name = 'scheduledTime', required = true }) {
-  const { date, hour12, period } = splitScheduledTimeLocal(value);
+  // buildScheduledTimeLocal only returns a value once date AND hour are both
+  // set, so picking Hour before Date (or vice versa) produces '' — if this
+  // field just re-derived its displayed values from that '' every render, an
+  // in-progress pick would immediately snap back to blank. Local state keeps
+  // whatever the user picked visible; it's only resynced from the parent
+  // `value` when that prop changes for a reason other than our own emit
+  // (e.g. loading a different delivery, or an external form reset).
+  const [local, setLocal] = useState(() => splitScheduledTimeLocal(value));
+  const lastEmittedRef = React.useRef(value);
+
+  useEffect(() => {
+    if (value !== lastEmittedRef.current) {
+      setLocal(splitScheduledTimeLocal(value));
+      lastEmittedRef.current = value;
+    }
+  }, [value]);
+
+  const { date, hour12, period } = local;
 
   const emit = (nextDate, nextHour, nextPeriod) => {
-    onChange({ target: { name, value: buildScheduledTimeLocal(nextDate, nextHour, nextPeriod) } });
+    setLocal({ date: nextDate, hour12: nextHour, period: nextPeriod });
+    const built = buildScheduledTimeLocal(nextDate, nextHour, nextPeriod);
+    lastEmittedRef.current = built;
+    onChange({ target: { name, value: built } });
   };
 
   return (

@@ -66,9 +66,10 @@ function CustomerListPanel({ selectedId, onSelect }) {
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
   const statusCounts = useMemo(() => {
-    const counts = { all: allSubscriptions.length, active: 0, renewal: 0, cycleEnded: 0 };
+    const counts = { all: allSubscriptions.length, active: 0, renewal: 0, cycleEnded: 0, cancelled: 0 };
     allSubscriptions.forEach((s) => {
       const cycleEnded = isCycleEnded(s.cycle_end_date);
+      if (s.subscription_status === 'cancelled') counts.cancelled += 1;
       if (cycleEnded) counts.cycleEnded += 1;
       else if (s.subscription_status === 'active') counts.active += 1;
       if (isDueForRenewal(s)) counts.renewal += 1;
@@ -83,6 +84,7 @@ function CustomerListPanel({ selectedId, onSelect }) {
       if (statusTab === 'active' && (s.subscription_status !== 'active' || cycleEnded)) return false;
       if (statusTab === 'renewal' && !isDueForRenewal(s)) return false;
       if (statusTab === 'cycleEnded' && !cycleEnded) return false;
+      if (statusTab === 'cancelled' && s.subscription_status !== 'cancelled') return false;
       if (term) {
         const haystack = `${s.name || ''} ${s.email || ''} ${s.subscription_id || ''} ${s.customer_id || ''}`.toLowerCase();
         if (!haystack.includes(term)) return false;
@@ -100,6 +102,7 @@ function CustomerListPanel({ selectedId, onSelect }) {
     { key: 'active', label: 'Active', count: statusCounts.active },
     { key: 'renewal', label: 'Due for renewal', count: statusCounts.renewal },
     { key: 'cycleEnded', label: 'Cycle ended', count: statusCounts.cycleEnded },
+    { key: 'cancelled', label: 'Cancelled', count: statusCounts.cancelled },
   ];
 
   return (

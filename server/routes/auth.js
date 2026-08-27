@@ -292,4 +292,79 @@ router.put('/change-password', authenticate, [
   }
 });
 
+// @desc    Register (or refresh) this device's push token for the current user
+// @route   POST /api/auth/push-token
+// @access  Private
+router.post('/push-token', authenticate, [
+  body('token').notEmpty()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { token, platform } = req.body;
+
+    // Idempotent: drop any existing entry for this token first, then add it
+    // fresh, so repeated calls (every login/session-restore) never duplicate.
+    await User.findByIdAndUpdate(req.user._id, {
+      $pull: { pushTokens: { token } }
+    });
+    await User.findByIdAndUpdate(req.user._id, {
+      $push: { pushTokens: { token, platform } }
+    });
+
+    res.json({
+      success: true,
+      message: 'Push token registered'
+    });
+  } catch (error) {
+    console.error('Register push token error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// @desc    Unregister this device's push token for the current user
+// @route   DELETE /api/auth/push-token
+// @access  Private
+router.delete('/push-token', authenticate, [
+  body('token').notEmpty()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { token } = req.body;
+
+    await User.findByIdAndUpdate(req.user._id, {
+      $pull: { pushTokens: { token } }
+    });
+
+    res.json({
+      success: true,
+      message: 'Push token unregistered'
+    });
+  } catch (error) {
+    console.error('Unregister push token error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
 export default router;

@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import api from '../utils/api';
 import PrintConfigModal from '../components/deliveries/PrintConfigModal';
 import RowActionsMenu from '../components/deliveries/RowActionsMenu';
+import { toBusinessComponents } from '../utils/businessTime';
 
 const COMPLETED_STATUSES = ['delivered', 'completed', 'collected'];
 const PENDING_STATUSES = ['pending', 'assigned', 'on_route', 'picked_up'];
@@ -55,21 +56,21 @@ const getTimingBandColor = (delivery) => {
   return 'bg-gray-300';
 };
 
+// scheduledTime is a business-local (Dubai) instant — render it via the
+// fixed business offset rather than the viewer's own device timezone, which
+// otherwise makes the displayed time drift depending on where the viewer's
+// machine is set.
 const formatDate = (dateString) => {
   if (!dateString) return 'Date not set';
-  try {
-    const date = new Date(dateString);
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const year = date.getFullYear();
-    let hours = date.getHours();
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    hours = hours % 12 || 12;
-    return { date: `${month}/${day}/${year}`, time: `${String(hours).padStart(2, '0')}:${minutes} ${ampm}` };
-  } catch {
-    return { date: 'Invalid date', time: '' };
-  }
+  const c = toBusinessComponents(dateString);
+  if (!c) return { date: 'Invalid date', time: '' };
+  const month = String(c.month + 1).padStart(2, '0');
+  const day = String(c.day).padStart(2, '0');
+  let hours = c.hours;
+  const minutes = String(c.minutes).padStart(2, '0');
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12 || 12;
+  return { date: `${month}/${day}/${c.year}`, time: `${String(hours).padStart(2, '0')}:${minutes} ${ampm}` };
 };
 
 const getDriverDisplayName = (driver) => {

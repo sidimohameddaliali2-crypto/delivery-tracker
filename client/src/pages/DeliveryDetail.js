@@ -18,6 +18,13 @@ import api from '../utils/api';
 import UserAvatar from '../components/users/UserAvatar';
 import LocationPinPicker from '../components/LocationPinPicker';
 import { parseGPSFromLink } from '../utils/gpsParsing';
+import {
+  formatBusinessDateInput,
+  formatBusinessTimeInput,
+  formatBusinessTime,
+  formatBusinessDateTime,
+  businessComponentsToUtcDate
+} from '../utils/businessTime';
 
 const API_BASE_URL = (api.defaults.baseURL || '').replace(/\/api\/?$/, '');
 const FALLBACK_IMAGE =
@@ -149,11 +156,12 @@ const DeliveryDetail = () => {
 
   useEffect(() => {
     if (currentDelivery) {
-      const dt = currentDelivery.scheduledTime ? new Date(currentDelivery.scheduledTime) : null;
-      const pad2 = (n) => String(n).padStart(2, '0');
-      // Use local time methods to display in user's timezone
-      const localDate = dt ? `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}` : '';
-      const localTime = dt ? `${pad2(dt.getHours())}:${pad2(dt.getMinutes())}` : '';
+      // Populate with the fixed business timezone (Dubai), not the viewer's
+      // own device timezone — scheduledTime is a business-local time, and
+      // showing it in whatever zone the browser happens to be set to is what
+      // caused edits to silently save the wrong hour.
+      const businessDate = formatBusinessDateInput(currentDelivery.scheduledTime);
+      const businessTime = formatBusinessTimeInput(currentDelivery.scheduledTime);
       setEditForm({
         customerName: currentDelivery.customerName || '',
         customerPhone: currentDelivery.customerPhone || '',
@@ -161,8 +169,8 @@ const DeliveryDetail = () => {
         company: currentDelivery.company || 'Matter',
         notes: currentDelivery.notes || '',
         zone: currentDelivery.zone || '',
-        date: localDate,
-        time: localTime,
+        date: businessDate,
+        time: businessTime,
         gpsLink: currentDelivery.gpsLocation?.link || '',
         gpsLat: Number.isFinite(currentDelivery.gpsLocation?.lat) ? currentDelivery.gpsLocation.lat : null,
         gpsLng: Number.isFinite(currentDelivery.gpsLocation?.lng) ? currentDelivery.gpsLocation.lng : null
@@ -190,20 +198,11 @@ const DeliveryDetail = () => {
 
   // rendering logic moved down to the final return so helper functions can be declared above
 
-  // Format date and time - use local time methods to display in user's timezone
-  const formatDateTime = (dateString) => {
-    if (!dateString) return 'N/A';
-    const date = new Date(dateString);
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${pad(date.getMonth() + 1)}/${pad(date.getDate())}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  };
-
-  const formatTime = (dateString) => {
-    if (!dateString) return 'N/A';
-    const date = new Date(dateString);
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  };
+  // Format date and time in the fixed business timezone (Dubai) — not the
+  // viewer's own device timezone, which can differ from where deliveries
+  // actually happen.
+  const formatDateTime = formatBusinessDateTime;
+  const formatTime = formatBusinessTime;
 
   const formatStatusLabel = (status) => {
     if (!status) return 'N/A';
@@ -1152,14 +1151,16 @@ const DeliveryDetail = () => {
                 if (editForm.notes !== (currentDelivery.notes || '')) updatePayload.notes = editForm.notes;
                 if (editForm.zone !== (currentDelivery.zone || '')) updatePayload.zone = editForm.zone;
 
-                // Scheduled time: combine local date + time if provided
+                // Scheduled time: combine business-local date + time if provided.
+                // editForm.date/time are business-timezone (Dubai) values, so
+                // convert them back through the same fixed offset rather than
+                // treating them as UTC — that mismatch was silently saving
+                // the wrong hour on every edit.
                 if (editForm.date && editForm.time) {
-                  // Construct as UTC time since server stores it that way
-                  const newIso = `${editForm.date}T${editForm.time}:00`;
+                  const newDate = businessComponentsToUtcDate(editForm.date, editForm.time);
                   const currentIso = currentDelivery.scheduledTime ? new Date(currentDelivery.scheduledTime).toISOString() : '';
-                  const newDate = new Date(newIso + 'Z'); // Add Z to parse as UTC
-                  if (newDate.toISOString() !== currentIso) {
-                    updatePayload.scheduledTime = newIso; // Send without Z - server will handle timezone
+                  if (newDate && newDate.toISOString() !== currentIso) {
+                    updatePayload.scheduledTime = newDate.toISOString();
                   }
                 }
 

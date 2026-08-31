@@ -114,7 +114,13 @@ const Drivers = () => {
 
   const handleToggleStatus = useCallback((driverId, currentStatus) => {
     const isActive = !currentStatus;
-    dispatch(toggleDriverStatus({ id: driverId, isActive }));
+    const action = isActive ? 'enable' : 'disable';
+    if (!window.confirm(`Are you sure you want to ${action} this driver?`)) return;
+    dispatch(toggleDriverStatus({ id: driverId, isActive }))
+      .unwrap()
+      .catch((err) => {
+        console.error('Failed to toggle driver status:', err);
+      });
   }, [dispatch]);
 
   if (isLoading && driversArray.length === 0) {

@@ -691,9 +691,11 @@ const MenuSelection = ({ token }) => {
       setMealIndex(mealIndex + 1);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } else {
-      // Last day — auto-submit if they have meals on other days, otherwise scroll to submit button
+      // Last day — auto-submit if they have meals on other days, otherwise scroll to submit button.
+      // Pass the just-skipped key explicitly: the setSkippedDateKeys above hasn't
+      // flushed yet when submitSelections reads state in this same tick.
       if (selectedMeals.length > 0) {
-        submitSelections();
+        submitSelections(currentDateKey ? [currentDateKey] : []);
       } else {
         window.scrollTo({ top: 0, behavior: 'smooth' });
       }
@@ -718,7 +720,7 @@ const MenuSelection = ({ token }) => {
     }
   };
 
-  const submitSelections = async () => {
+  const submitSelections = async (extraSkippedKeys = []) => {
     setLoading(true);
     setError(null);
 
@@ -747,6 +749,10 @@ const MenuSelection = ({ token }) => {
 
       const body = { weeklyMenuId: weeklyMenu._id, selections: selectedMeals };
       if (macrosPayload) body.macros = macrosPayload;
+      // Days the customer chose to skip — the server pauses each on their Matter
+      // subscription and reschedules it after the cycle end. Not surfaced here.
+      const allSkipped = Array.from(new Set([...skippedDateKeys, ...extraSkippedKeys])).filter(Boolean);
+      if (allSkipped.length > 0) body.skippedDates = allSkipped;
 
       const response = await api.post(`/menus/customers/${encodeURIComponent(trimmed)}/select-meals`, body);
 

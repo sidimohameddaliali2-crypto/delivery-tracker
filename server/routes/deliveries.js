@@ -12,6 +12,8 @@ import { getUploadToSpaces } from '../config/spaces.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { resolveDeliveryCoordinates, extractCoordsFromGoogleMapsUrl } from '../services/geocoding.js';
 import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js';
+import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
+import { optimizeRoutes, applyRoutePlan } from '../services/routeOptimizationService.js';
 
 // Helper to persist coordinates onto a customer's record via their deliveries
 async function saveCustomerCoords(delivery, lat, lng, link) {
@@ -1208,6 +1210,55 @@ router.post('/bulk', [
   }
 });
 
+// Compute an optimized multi-driver route plan for a set of deliveries.
+// Does not modify anything — the dispatcher reviews the proposed plan and
+// calls /optimize-routes/apply to actually assign it. Expensive (geocoding
+// + Distance Matrix API calls + an OR-Tools solve), same "on demand only"
+// cost profile as other heavy endpoints in this codebase.
+router.post('/optimize-routes', [
+  body('deliveryIds').isArray({ min: 1 }).withMessage('deliveryIds array is required'),
+  body('deliveryIds.*').isMongoId().withMessage('Invalid delivery ID'),
+  body('driverIds').isArray({ min: 1 }).withMessage('driverIds array is required'),
+  body('driverIds.*').isMongoId().withMessage('Invalid driver ID')
+], authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+    }
+
+    const { deliveryIds, driverIds } = req.body;
+    const plan = await optimizeRoutes(deliveryIds, driverIds);
+    res.json({ success: true, data: plan });
+  } catch (error) {
+    console.error('Optimize routes error:', error.message);
+    res.status(500).json({ success: false, message: error.message || 'Failed to optimize routes' });
+  }
+});
+
+// Persist a route plan (from /optimize-routes, possibly dispatcher-edited)
+// onto the underlying deliveries — sets driver, routeOrder, routeOptimizedAt.
+router.post('/optimize-routes/apply', [
+  body('routes').isArray({ min: 1 }).withMessage('routes array is required'),
+  body('routes.*.driverId').isMongoId().withMessage('Invalid driver ID'),
+  body('routes.*.stops').isArray().withMessage('Each route needs a stops array'),
+  body('routes.*.stops.*.deliveryId').isMongoId().withMessage('Invalid delivery ID'),
+  body('routes.*.stops.*.routeOrder').isInt({ min: 0 }).withMessage('routeOrder must be a non-negative integer')
+], authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+    }
+
+    const result = await applyRoutePlan(req.body.routes);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Apply route plan error:', error.message);
+    res.status(500).json({ success: false, message: error.message || 'Failed to apply route plan' });
+  }
+});
+
 router.patch('/assign-driver', [
   body('deliveryIds').isArray({ min: 1 }).withMessage('deliveryIds array is required'),
   body('deliveryIds.*').isMongoId().withMessage('Invalid delivery ID'),
@@ -1336,8 +1387,8 @@ router.put('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']),
     // Track changes
     const changes = [];
     const fieldsToTrack = [
-      'customerName', 'customerId', 'company', 'address', 'zone', 
-      'scheduledTime', 'driver', 'status', 'notes'
+      'customerName', 'customerId', 'company', 'address', 'addressDetails', 'zone',
+      'scheduledTime', 'driver', 'status', 'notes', 'gpsLocation'
     ];
 
     const changesMap = new Map();
@@ -1371,6 +1422,10 @@ router.put('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']),
         status: 'applied'
       });
     }
+
+    // Surface a "changed since assignment" banner to the driver app when a
+    // driver-relevant field changed on a delivery that already has a driver.
+    await flagDeliveryChangeIfNeeded(originalDelivery, updateData);
 
     // Emit real-time update
     const io = req.app.get('io');
@@ -1882,6 +1937,39 @@ router.get('/driver/today', protect, async (req, res) => {
 });
 
 // Update delivery with bag assignment
+// Driver acknowledges the "changed since assignment" banner on their own
+// delivery, clearing it. Only the assigned driver can clear their own flag.
+router.patch('/:id/acknowledge-change', async (req, res) => {
+  try {
+    const delivery = await Delivery.findById(req.params.id);
+    if (!delivery) {
+      return res.status(404).json({ success: false, message: 'Delivery not found' });
+    }
+
+    const deliveryDriverId = getDeliveryDriverId(delivery);
+    const requesterId = getUserId(req.user);
+    if (!deliveryDriverId) {
+      return res.status(400).json({ success: false, message: 'Delivery has not been assigned to a driver yet' });
+    }
+    if (!requesterId || deliveryDriverId !== requesterId) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    delivery.changeFlag = {
+      ...(delivery.changeFlag?.toObject?.() ?? delivery.changeFlag ?? {}),
+      active: false,
+      acknowledgedAt: new Date(),
+      acknowledgedBy: req.user._id,
+    };
+    await delivery.save();
+
+    res.json({ success: true, data: { delivery } });
+  } catch (error) {
+    console.error('Acknowledge delivery change error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 router.patch('/:id/bag-assignment', async (req, res) => {
   try {
     const { bagId, proof } = req.body;
@@ -2255,7 +2343,11 @@ router.delete('/bulk-delete', authorize(['admin', 'super_admin']), async (req, r
 });
 
 // PATCH endpoint to update delivery gpsLocation
-router.patch('/:id', async (req, res) => {
+// Restricted to dispatch roles (matches PUT /:id) — this used to have no
+// role check at all, meaning any authenticated user, including a driver,
+// could silently move a delivery's pin with zero audit trail. Only caller
+// is the dispatcher map-assign tool (DispatcherMapAssignModal.jsx).
+router.patch('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
   try {
     const { id } = req.params;
     const { gpsLocation } = req.body;
@@ -2264,15 +2356,18 @@ router.patch('/:id', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid delivery ID' });
     }
 
+    const originalDelivery = await Delivery.findById(id);
+    if (!originalDelivery) {
+      return res.status(404).json({ success: false, message: 'Delivery not found' });
+    }
+
     const delivery = await Delivery.findByIdAndUpdate(
       id,
       { gpsLocation },
       { new: true, runValidators: true }
     );
 
-    if (!delivery) {
-      return res.status(404).json({ success: false, message: 'Delivery not found' });
-    }
+    await flagDeliveryChangeIfNeeded(originalDelivery, { gpsLocation });
 
     res.json({
       success: true,

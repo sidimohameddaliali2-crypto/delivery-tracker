@@ -14,3 +14,9 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, '.env') });
+
+// Machine-specific overrides (e.g. PYTHON_BIN=python on Windows dev boxes,
+// vs. the python3 that's correct on the Linux production server) — kept in
+// a separate, git-ignored file (.env.* is excluded except .env.example) so
+// nothing here ever risks shipping to production.
+dotenv.config({ path: path.join(__dirname, '.env.local'), override: true });

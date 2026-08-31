@@ -16,7 +16,8 @@ import {
   Cookie,
   X,
   Image as ImageIcon,
-  FileText
+  FileText,
+  PauseCircle
 } from 'lucide-react';
 
 // A meal's allergens are a small, bounded, real-world vocabulary — a chip
@@ -257,6 +258,28 @@ const MenuManagement = () => {
     deadlineDateLocal.setHours(hh, mm, 59, 999);
     return deadlineDateLocal;
   };
+
+  // Human-readable status for a day the customer skipped, including whether the
+  // Matter website pause was applied (or the error). Used in the STATUS column
+  // of the selections Excel export and the on-screen detail view.
+  const formatSkipStatus = (skip) => {
+    if (!skip) return null;
+    switch (skip.pauseStatus) {
+      case 'success':
+        return `Skipped — pause applied on Matter${skip.resumeDate ? ` (resumes ${skip.resumeDate})` : ''}`;
+      case 'already_paused':
+        return 'Skipped — already paused on Matter';
+      case 'pending':
+        return 'Skipped — pause pending on Matter';
+      case 'failed':
+        return `Skipped — pause FAILED on Matter: ${skip.error || 'Unknown error'}`;
+      default:
+        return 'Skipped';
+    }
+  };
+
+  const getSkipForDate = (customer, dateKey) =>
+    (customer?.skippedDays || []).find((s) => String(s.date || '').slice(0, 10) === dateKey) || null;
 
   const initializeWeeklyItems = (start, end) => {
     const dates = getDateRange(start, end);
@@ -1309,6 +1332,7 @@ const MenuManagement = () => {
           id: customer.customerId || '',
           email: customer.email || '',
           lastMenuSelectionDate: customer.lastMenuSelectionDate || null,
+          skippedDays: customer.skippedDays || [],
           meals: consolidatedMeals
         });
       });
@@ -1332,10 +1356,13 @@ const MenuManagement = () => {
         const excelSubmittedAt = customer.lastMenuSelectionDate ? new Date(customer.lastMenuSelectionDate) : null;
         const excelSubmittedBeforeDeadline = excelSubmittedAt && excelDeadlineForDay && excelSubmittedAt <= excelDeadlineForDay;
         const dayClosed = dayIsLocked && !excelSubmittedBeforeDeadline;
+        // A day the customer explicitly skipped takes precedence over the
+        // generic "No meal selection" — and carries the Matter pause result.
+        const skipStatus = formatSkipStatus(getSkipForDate(customer, dateKey));
         const row = [
           customer.name,
           customer.id,
-          hasMealsForDay ? '' : dayClosed ? 'Closed Day' : 'No meal selection'
+          skipStatus || (hasMealsForDay ? '' : dayClosed ? 'Closed Day' : 'No meal selection')
         ];
 
         // For each unique meal, include quantity if selected multiple times
@@ -2316,12 +2343,20 @@ const MenuManagement = () => {
                                     };
                                   };
                                   
+                                  const cardSkip = getSkipForDate(customer, key);
+
                                   return (
-                                    <div key={key} className={`${dayClass} rounded-lg border-2 p-3 shadow-sm`}> 
+                                    <div key={key} className={`${dayClass} rounded-lg border-2 p-3 shadow-sm`}>
                                       <div className="font-semibold text-sm text-matter-neutral-800 mb-2 flex items-center gap-2">
                                         <Calendar className="w-4 h-4 text-matter-neutral-600" />
                                         {date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
                                       </div>
+                                      {cardSkip && (
+                                        <div className={`text-xs font-medium flex items-start gap-1 py-1 ${cardSkip.pauseStatus === 'failed' ? 'text-red-600' : 'text-matter-charcoal'}`}>
+                                          <PauseCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                                          <span>{formatSkipStatus(cardSkip)}</span>
+                                        </div>
+                                      )}
                                       {mealsFor.length === 0 ? (
                                         dayLocked ? (
                                           <div className="text-sm text-matter-neutral-600 font-medium flex items-center gap-1 py-1">
@@ -2801,7 +2836,12 @@ const MenuManagement = () => {
                       );
                     }
 
+                    const skippedByDate = new Map(
+                      (selectedCustomerDetail.skippedDays || []).map((s) => [String(s.date || '').slice(0, 10), s])
+                    );
+
                     return sourceDateKeys.map((key) => {
+                      const skipInfo = skippedByDate.get(key);
                       const mealsForDate = (selectedCustomerDetail.selectedMeals || []).filter(m => {
                         const mealDate = m.date || m.menuItemId?.itemDate;
                         return getDateKey(mealDate) === key;
@@ -2886,6 +2926,32 @@ const MenuManagement = () => {
                               {mealsFor.reduce((sum, m) => sum + (m.quantity || 1), 0)} meal{mealsFor.reduce((sum, m) => sum + (m.quantity || 1), 0) === 1 ? '' : 's'}
                             </span>
                           </div>
+                          {skipInfo && (
+                            <div className={`mb-3 rounded-lg border px-3 py-2 text-sm ${
+                              skipInfo.pauseStatus === 'failed'
+                                ? 'bg-red-50 border-red-200 text-red-700'
+                                : skipInfo.pauseStatus === 'pending'
+                                  ? 'bg-amber-50 border-amber-200 text-amber-800'
+                                  : 'bg-matter-dust/30 border-matter-dust text-matter-charcoal'
+                            }`}>
+                              <p className="font-semibold flex items-center gap-1.5">
+                                <PauseCircle className="w-4 h-4" />
+                                Customer skipped this day
+                              </p>
+                              {skipInfo.pauseStatus === 'success' && (
+                                <p className="mt-0.5">Paused on Matter · resumes {skipInfo.resumeDate || 'after cycle end'}</p>
+                              )}
+                              {skipInfo.pauseStatus === 'already_paused' && (
+                                <p className="mt-0.5">Already paused on the Matter subscription — no change made.</p>
+                              )}
+                              {skipInfo.pauseStatus === 'pending' && (
+                                <p className="mt-0.5">Pause is being created on the Matter subscription…</p>
+                              )}
+                              {skipInfo.pauseStatus === 'failed' && (
+                                <p className="mt-0.5">Pause failed: {skipInfo.error || 'Unknown error'}</p>
+                              )}
+                            </div>
+                          )}
                           {mealsFor.length === 0 ? (
                             modalDayLocked ? (
                               <div className="text-sm text-matter-neutral-600 font-medium flex items-center gap-1 py-1">

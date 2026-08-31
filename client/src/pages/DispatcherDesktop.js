@@ -23,6 +23,7 @@ import EventCalendarView from '../components/events/EventCalendarView';
 import EventDetailModal from '../components/events/EventDetailModal';
 import api from '../utils/api';
 import DispatcherMapAssignModal from '../components/DispatcherMapAssignModal';
+import RouteOptimizationModal from '../components/RouteOptimizationModal';
 import { fetchDeliveries } from '../store/slices/deliverySlice';
 import { fetchDrivers } from '../store/slices/driverSlice';
 import { logout } from '../store/slices/authSlice';
@@ -76,6 +77,7 @@ const DispatcherDesktop = () => {
   const [showCollectionsOnly, setShowCollectionsOnly] = useState(false);
   const [printMode, setPrintMode] = useState(false);
   const [mapModalOpen, setMapModalOpen] = useState(false);
+  const [routeModalOpen, setRouteModalOpen] = useState(false);
   const [printDriverFilter, setPrintDriverFilter] = useState(null);
   const [selectedDeliveryDetail, setSelectedDeliveryDetail] = useState(null);
   const [selectedDate, setSelectedDate] = useState(() => getTomorrowDate());
@@ -325,6 +327,18 @@ const DispatcherDesktop = () => {
     }
   };
 
+  const refreshDeliveriesForSelectedDate = () => {
+    const start = new Date(`${selectedDate}T00:00:00`);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    dispatch(fetchDeliveries({
+      dateRange: 'custom',
+      dateFrom: start.toISOString(),
+      dateTo: end.toISOString(),
+      limit: 1000
+    }));
+  };
+
   const handleAssignDriver = async (driver) => {
     if (!activeAssignmentDeliveries.length || assigningDriverId) return;
     setAssigningDriverId(driver._id);
@@ -338,15 +352,7 @@ const DispatcherDesktop = () => {
         message: `Assigned to ${getDriverDisplayName(driver)}`,
         error: false
       });
-      const start = new Date(`${selectedDate}T00:00:00`);
-      const end = new Date(start);
-      end.setDate(end.getDate() + 1);
-      dispatch(fetchDeliveries({
-        dateRange: 'custom',
-        dateFrom: start.toISOString(),
-        dateTo: end.toISOString(),
-        limit: 1000
-      }));
+      refreshDeliveriesForSelectedDate();
       setSelectedDeliveryIds([]);
       setActiveAssignmentDeliveries([]);
       setAreaFilters([]);
@@ -791,6 +797,12 @@ const DispatcherDesktop = () => {
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700"
               >
                 Assign to Driver
+              </button>
+              <button
+                onClick={() => setRouteModalOpen(true)}
+                className="px-4 py-2 bg-white border border-blue-300 text-blue-700 rounded-lg font-semibold hover:bg-blue-50"
+              >
+                Optimize Routes
               </button>
               <button
                 onClick={() => setSelectedDeliveryIds([])}
@@ -1498,6 +1510,19 @@ const DispatcherDesktop = () => {
         onClose={() => setMapModalOpen(false)}
         deliveries={filteredDeliveries}
         drivers={drivers}
+      />
+
+      {/* Route Optimization Modal */}
+      <RouteOptimizationModal
+        open={routeModalOpen}
+        onClose={() => setRouteModalOpen(false)}
+        deliveries={selectedDeliveries}
+        drivers={drivers}
+        onApplied={() => {
+          setFeedback({ message: 'Routes applied', error: false });
+          refreshDeliveriesForSelectedDate();
+          setSelectedDeliveryIds([]);
+        }}
       />
 
       {/* Feedback Toast */}

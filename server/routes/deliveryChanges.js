@@ -8,6 +8,7 @@ import Delivery from '../models/Delivery.js';
 import User from '../models/User.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { protect, admin } from '../middleware/auth.js';
+import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 
 const router = express.Router();
 const BUSINESS_TZ_OFFSET_MINUTES = Number.parseInt(
@@ -420,7 +421,12 @@ async function applyChangesToDelivery(delivery, changes) {
 
       if (deliveries.length > 0) {
         for (const delivery of deliveries) {
-          await applyChangesToDelivery(delivery, changes);
+          const updatedDelivery = await applyChangesToDelivery(delivery, changes);
+          // `delivery` here is still the pre-update doc (findByIdAndUpdate
+          // inside applyChangesToDelivery doesn't mutate it) — compare
+          // against the real post-update values, since applyChangesToDelivery
+          // transforms some fields (e.g. scheduledTime "HH:mm" -> Date).
+          await flagDeliveryChangeIfNeeded(delivery, updatedDelivery.toObject());
         }
       }
 
@@ -724,6 +730,11 @@ router.post('/:id/apply', protect, async (req, res) => {
     // Apply changes and get updated delivery
     const updatedDelivery = await applyChangesToDelivery(delivery, change.changes);
 
+    // `delivery` is still the pre-update doc fetched above — surface the
+    // "changed since assignment" banner to the driver if this touched
+    // anything driver-relevant on an already-assigned delivery.
+    await flagDeliveryChangeIfNeeded(delivery, updatedDelivery.toObject());
+
     // Log the change on the delivery timeline so it is visible in delivery details
     const changeReason = change.reason || 'delivery change';
     const changedFields = Object.keys(change.changes instanceof Map ? Object.fromEntries(change.changes) : change.changes || {});
@@ -804,7 +815,8 @@ router.post('/apply/:changeId', protect, admin, async (req, res) => {
     }
 
     // Apply changes
-    await applyChangesToDelivery(delivery, change.changes);
+    const updatedDelivery = await applyChangesToDelivery(delivery, change.changes);
+    await flagDeliveryChangeIfNeeded(delivery, updatedDelivery.toObject());
 
     // Update change record
     change.status = 'applied';

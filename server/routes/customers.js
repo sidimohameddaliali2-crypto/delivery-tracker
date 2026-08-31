@@ -631,26 +631,35 @@ router.post('/send-whatsapp-reminder', async (req, res) => {
  */
 router.patch('/:customerId', async (req, res) => {
   try {
-    const allowed = ['planStartDate', 'cycleDuration', 'amountPaid', 'discount'];
+    const allowed = [
+      'planStartDate', 'cycleDuration', 'amountPaid', 'discount',
+      // Identity / contact details editable from the customer detail page
+      'firstName', 'lastName', 'phone', 'company', 'address', 'email',
+    ];
     const updates = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
+
+    // Never write an empty-string email: it would collide on the unique sparse
+    // index with every other customer that has no email.
+    if (updates.email === '' || updates.email === null) delete updates.email;
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, message: 'No valid fields to update' });
     }
 
+    // upsert so a customer that only exists on delivery records (no Customer
+    // document yet) can still be edited — the edit creates the record.
     const customer = await Customer.findOneAndUpdate(
       { customerId: req.params.customerId },
-      { $set: updates },
-      { new: true }
+      { $set: updates, $setOnInsert: { customerId: req.params.customerId } },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
     );
-
-    if (!customer) {
-      return res.status(404).json({ success: false, message: 'Customer not found' });
-    }
 
     res.json({ success: true, data: customer });
   } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({ success: false, message: 'That email is already used by another customer' });
+    }
     console.error('Error updating customer:', error);
     res.status(500).json({ success: false, message: 'Error updating customer' });
   }

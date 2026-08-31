@@ -235,6 +235,59 @@ const AddCustomerModal = ({ onClose, onSubmit, isSubmitting, submitError }) => {
   );
 };
 
+const EditCustomerModal = ({ customer, onClose, onSubmit, isSubmitting, submitError }) => {
+  const [form, setForm] = useState({
+    customerName: customer.customerName && customer.customerName !== 'Unknown' ? customer.customerName : '',
+    email: customer.email && customer.email !== 'N/A' ? customer.email : '',
+    phone: customer.phone && customer.phone !== 'N/A' ? customer.phone : '',
+    company: customer.company && customer.company !== 'N/A' ? customer.company : '',
+    address: customer.address && customer.address !== 'N/A' ? customer.address : '',
+  });
+  const set = (field) => (e) => setForm(p => ({ ...p, [field]: e.target.value }));
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 max-h-screen overflow-y-auto">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-xl font-bold text-gray-900">Edit Customer</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <form onSubmit={(e) => { e.preventDefault(); onSubmit(form); }} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Customer ID</label>
+            <input type="text" value={customer.customerId} disabled className="w-full border border-gray-200 bg-gray-50 text-gray-500 rounded-lg px-3 py-2 text-sm" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Customer Name <span className="text-red-500">*</span></label>
+            <input type="text" required value={form.customerName} onChange={set('customerName')} placeholder="Full name" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+            <input type="email" value={form.email} onChange={set('email')} placeholder="customer@example.com" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+            <input type="text" value={form.phone} onChange={set('phone')} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Company</label>
+            <input type="text" value={form.company} onChange={set('company')} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+            <textarea rows={2} value={form.address} onChange={set('address')} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          {submitError && <p className="text-sm text-red-600 whitespace-pre-line">{submitError}</p>}
+          <div className="flex gap-3 pt-2">
+            <button type="button" onClick={onClose} className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm">Cancel</button>
+            <button type="submit" disabled={isSubmitting} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium disabled:opacity-60">{isSubmitting ? 'Saving...' : 'Save Changes'}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
 const Customers = () => {
   const [customers, setCustomers] = useState([]);
   const [filteredCustomers, setFilteredCustomers] = useState([]);
@@ -260,6 +313,9 @@ const Customers = () => {
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
   const [addCustomerError, setAddCustomerError] = useState(null);
   const [isAddingCustomer, setIsAddingCustomer] = useState(false);
+  const [showEditCustomerModal, setShowEditCustomerModal] = useState(false);
+  const [editCustomerError, setEditCustomerError] = useState(null);
+  const [isSavingCustomer, setIsSavingCustomer] = useState(false);
   const [isEditingPlanStart, setIsEditingPlanStart] = useState(false);
   const [planStartValue, setPlanStartValue] = useState('');
   const [planStartSaving, setPlanStartSaving] = useState(false);
@@ -317,6 +373,51 @@ const Customers = () => {
       setAddCustomerError(err.response?.data?.message || 'Failed to add customer');
     } finally {
       setIsAddingCustomer(false);
+    }
+  };
+
+  const handleEditCustomer = async (formData) => {
+    if (!selectedCustomer) return;
+    setEditCustomerError(null);
+    setIsSavingCustomer(true);
+    try {
+      const trimmedName = formData.customerName.trim();
+      if (!trimmedName) {
+        setEditCustomerError('Customer name is required');
+        return;
+      }
+      const nameParts = trimmedName.split(/\s+/);
+      const firstName = nameParts[0] || '';
+      const lastName = nameParts.slice(1).join(' ') || '';
+      const payload = {
+        firstName,
+        lastName,
+        email: formData.email.trim(),
+        phone: formData.phone.trim(),
+        company: formData.company.trim(),
+        address: formData.address.trim(),
+      };
+
+      const { data } = await api.patch(`/customers/${selectedCustomer.customerId}`, payload);
+      const saved = data?.data || {};
+
+      const merged = {
+        ...selectedCustomer,
+        customerName: `${saved.firstName || firstName} ${saved.lastName || lastName}`.trim() || 'Unknown',
+        email: saved.email || payload.email || 'N/A',
+        phone: saved.phone || payload.phone || 'N/A',
+        company: saved.company || payload.company || 'N/A',
+        address: saved.address || payload.address || 'N/A',
+      };
+
+      setSelectedCustomer(merged);
+      setCustomers(prev => prev.map(c => c.customerId === merged.customerId ? { ...c, ...merged } : c));
+      setFilteredCustomers(prev => prev.map(c => c.customerId === merged.customerId ? { ...c, ...merged } : c));
+      setShowEditCustomerModal(false);
+    } catch (err) {
+      setEditCustomerError(err.response?.data?.message || 'Failed to update customer');
+    } finally {
+      setIsSavingCustomer(false);
     }
   };
 
@@ -554,6 +655,8 @@ const Customers = () => {
     setPlanStartValue('');
     setIsEditingCycleDuration(false);
     setCycleDurationValue('');
+    setShowEditCustomerModal(false);
+    setEditCustomerError(null);
   };
 
   const handleEditEmail = () => {
@@ -1107,6 +1210,13 @@ const Customers = () => {
             <p className="text-gray-600 text-sm mt-1">Customer ID: {selectedCustomer.customerId}</p>
           </div>
           <div className="flex gap-2">
+            <button
+              onClick={() => { setEditCustomerError(null); setShowEditCustomerModal(true); }}
+              className="flex items-center px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+            >
+              <UserPlus className="w-4 h-4 mr-2" />
+              Edit
+            </button>
             <button
               onClick={() => downloadReport(selectedCustomer)}
               className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
@@ -1679,6 +1789,22 @@ const Customers = () => {
         {/* Delivery Issues */}
         <CustomerIssues customerId={selectedCustomer.customerId} />
 
+        {showEditCustomerModal && (
+          <EditCustomerModal
+            customer={{
+              ...selectedCustomer,
+              customerName: customerProfile?.firstName
+                ? `${customerProfile.firstName} ${customerProfile.lastName || ''}`.trim()
+                : selectedCustomer.customerName,
+              email: customerProfile?.email || selectedCustomer.email,
+              phone: customerProfile?.phone || selectedCustomer.phone,
+            }}
+            onClose={() => { setShowEditCustomerModal(false); setEditCustomerError(null); }}
+            onSubmit={handleEditCustomer}
+            isSubmitting={isSavingCustomer}
+            submitError={editCustomerError}
+          />
+        )}
       </div>
     );
   }

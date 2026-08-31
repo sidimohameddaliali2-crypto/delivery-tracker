@@ -3,8 +3,7 @@ import { GoogleMap, useLoadScript, Marker, InfoWindow, Circle } from '@react-goo
 import { Navigation, Package, MapPin, Clock, Phone } from 'lucide-react';
 import api from '../utils/api';
 
-// Your Google Maps API Key (replace with your actual key)
-const GOOGLE_MAPS_API_KEY = 'AIzaSyDx-l1jvM62ELmN1ir-C4RbAW3B8_p7sW8';
+const GOOGLE_MAPS_API_KEY = process.env.REACT_APP_GOOGLE_MAPS_API_KEY || '';
 
 const mapContainerStyle = {
   width: '100%',

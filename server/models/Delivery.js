@@ -22,6 +22,18 @@ const deliverySchema = new mongoose.Schema({
     required: false,
     default: null
   },
+  // Position of this delivery within the assigned driver's route for the
+  // day, as computed by the route optimizer (server/optimizer/solve_routes.py).
+  // Null means no route has been computed for this delivery yet — driver
+  // lists fall back to sorting by scheduledTime in that case.
+  routeOrder: {
+    type: Number,
+    default: null
+  },
+  routeOptimizedAt: {
+    type: Date,
+    default: null
+  },
   company: {
     type: String,
     required: true,
@@ -81,6 +93,21 @@ const deliverySchema = new mongoose.Schema({
       type: String,
       enum: ['assigned', 'delivered', 'returned'],
       default: 'assigned'
+    }
+  },
+  // Set when a customer-facing field (address, schedule, notes, pin, etc.)
+  // is edited AFTER a driver was already assigned, so the driver app can
+  // surface a "this changed since you were assigned" banner. Cleared when
+  // the assigned driver explicitly acknowledges it.
+  changeFlag: {
+    active: { type: Boolean, default: false },
+    changedAt: Date,
+    changedFields: [String],
+    note: String,
+    acknowledgedAt: Date,
+    acknowledgedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
     }
   },
   status: {
@@ -160,6 +187,7 @@ deliverySchema.index({ customerId: 1 });
 deliverySchema.index({ driver: 1, scheduledTime: 1 }); // For getDriverTodaysDeliveries query
 deliverySchema.index({ company: 1, zone: 1 }); // For bulk filtering by company/zone
 deliverySchema.index({ status: 1, scheduledTime: 1 }); // For status queries with time range
+deliverySchema.index({ driver: 1, type: 1 }); // For per-driver all-time stats (GET /api/users/drivers)
 
 deliverySchema.methods.updateStatus = async function (status, notes, location) {
   this.status = status;
@@ -218,7 +246,19 @@ deliverySchema.statics.getDriverTodaysDeliveries = function (driverId) {
 
   // If enabled and local time >= cutoff hour, include tomorrow's deliveries as available
   // Extend the query window to end of tomorrow
-  if (ENABLE_EARLY_NEXT_DAY && nowUAE.getHours() >= NEXT_DAY_AVAILABLE_HOUR) {
+  //
+  // IMPORTANT: nowUAE's epoch already encodes UAE wall-clock time as if it
+  // were UTC (that's what the +uaeOffset shift above is for — same trick
+  // used for todayStringUAE/startOfDay). It must be read with getUTCHours()
+  // here, not getHours() — getHours() additionally applies the SERVER
+  // PROCESS's own OS timezone on top, which silently breaks this check on
+  // any server not literally configured for TZ=UTC. That's exactly why this
+  // "show tomorrow's deliveries after 4pm" feature wasn't actually kicking
+  // in: this server isn't running in UTC, so the old getHours() read was
+  // several hours off from the real UAE hour and rarely/never crossed the
+  // NEXT_DAY_AVAILABLE_HOUR threshold — drivers only saw next-day deliveries
+  // once real UAE midnight passed and they became "today" outright.
+  if (ENABLE_EARLY_NEXT_DAY && nowUAE.getUTCHours() >= NEXT_DAY_AVAILABLE_HOUR) {
     endOfDay = new Date(startOfDay.getTime() + 48 * 60 * 60 * 1000 - 1); // end of tomorrow (UTC)
   }
 
@@ -229,7 +269,7 @@ deliverySchema.statics.getDriverTodaysDeliveries = function (driverId) {
       $lte: endOfDay
     },
     status: { $in: ['pending', 'assigned', 'on_route', 'picked_up', 'delivered', 'failed', 'completed'] }
-  }).sort({ scheduledTime: 1 });
+  }).sort({ routeOrder: 1, scheduledTime: 1 });
 };
 
 export default mongoose.model('Delivery', deliverySchema);

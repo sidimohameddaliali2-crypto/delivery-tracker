@@ -20,64 +20,65 @@ router.get('/', protect, async (req, res) => {
 
     const driverIds = drivers.map(d => d._id);
 
-    // Batch fetch today's deliveries and all-time deliveries in two queries
-    const [todayAllDeliveries, allTimeDeliveries] = await Promise.all([
-      Delivery.find({
-        driver: { $in: driverIds },
-        scheduledTime: { $gte: today, $lt: tomorrow }
-      }).select('driver type status lateMinutes complaint').lean(),
-
-      Delivery.find({
-        driver: { $in: driverIds },
-        type: { $ne: 'Task' }
-      }).select('driver type status lateMinutes complaint').lean()
+    // Per-driver stats computed with $group in MongoDB instead of pulling
+    // every matching delivery document into Node and reducing them here —
+    // the all-time query matches ~75k of this collection's 80k+ documents,
+    // which made fetching the raw documents take 10+ seconds even once the
+    // query itself had an index to use.
+    const [todayStats, allTimeStats] = await Promise.all([
+      Delivery.aggregate([
+        { $match: { driver: { $in: driverIds }, scheduledTime: { $gte: today, $lt: tomorrow } } },
+        {
+          $group: {
+            _id: '$driver',
+            deliveriesCount: { $sum: { $cond: [{ $ne: ['$type', 'Task'] }, 1, 0] } },
+            tasksCount: { $sum: { $cond: [{ $eq: ['$type', 'Task'] }, 1, 0] } },
+            performedCount: { $sum: { $cond: [{ $in: ['$status', ['delivered', 'completed', 'collected']] }, 1, 0] } }
+          }
+        }
+      ]),
+      // $in on the two concrete types (not $ne: 'Task') so this can use the
+      // driver+type index below — $ne isn't sargable.
+      Delivery.aggregate([
+        { $match: { driver: { $in: driverIds }, type: { $in: ['Delivery', 'Collection'] } } },
+        {
+          $group: {
+            _id: '$driver',
+            totalCount: { $sum: 1 },
+            lateCount: { $sum: { $cond: [{ $gt: ['$lateMinutes', 0] }, 1, 0] } },
+            totalLateMinutes: { $sum: { $ifNull: ['$lateMinutes', 0] } },
+            successfulCount: {
+              $sum: { $cond: [{ $and: [{ $eq: ['$status', 'delivered'] }, { $ne: ['$complaint.hasComplaint', true] }] }, 1, 0] }
+            },
+            complaintsCount: { $sum: { $cond: [{ $eq: ['$complaint.hasComplaint', true] }, 1, 0] } }
+          }
+        }
+      ])
     ]);
 
-    // Group by driver id
-    const todayByDriver = {};
-    for (const d of todayAllDeliveries) {
-      const key = d.driver.toString();
-      if (!todayByDriver[key]) todayByDriver[key] = [];
-      todayByDriver[key].push(d);
-    }
-
-    const allTimeByDriver = {};
-    for (const d of allTimeDeliveries) {
-      const key = d.driver.toString();
-      if (!allTimeByDriver[key]) allTimeByDriver[key] = [];
-      allTimeByDriver[key].push(d);
-    }
+    const todayByDriver = new Map(todayStats.map((s) => [s._id.toString(), s]));
+    const allTimeByDriver = new Map(allTimeStats.map((s) => [s._id.toString(), s]));
 
     const driversWithStats = drivers.map((driver) => {
       const driverKey = driver._id.toString();
-      const todayDeliveries = todayByDriver[driverKey] || [];
-      const onlyDeliveries = allTimeByDriver[driverKey] || [];
+      const today = todayByDriver.get(driverKey) || { deliveriesCount: 0, tasksCount: 0, performedCount: 0 };
+      const allTime = allTimeByDriver.get(driverKey) || { totalCount: 0, lateCount: 0, totalLateMinutes: 0, successfulCount: 0, complaintsCount: 0 };
 
-      const deliveriesCount = todayDeliveries.filter(d => d.type !== 'Task').length;
-      const tasksCount = todayDeliveries.filter(d => d.type === 'Task').length;
-      const performedCount = todayDeliveries.filter(d =>
-        d.status === 'delivered' || d.status === 'completed' || d.status === 'collected'
-      ).length;
-
-      const lateDeliveries = onlyDeliveries.filter(d => d.lateMinutes > 0);
-      const avgLateTime = onlyDeliveries.length > 0
-        ? Math.round(onlyDeliveries.reduce((sum, d) => sum + (d.lateMinutes || 0), 0) / onlyDeliveries.length)
-        : 0;
-
-      const complaintsCount = onlyDeliveries.filter(d => d.complaint?.hasComplaint).length;
-      const kpiScore = calculateKpiScore(driver, onlyDeliveries, lateDeliveries);
+      const avgLateTime = allTime.totalCount > 0 ? Math.round(allTime.totalLateMinutes / allTime.totalCount) : 0;
+      const kpiScore = calculateKpiScoreFromCounts(allTime.totalCount, allTime.lateCount, allTime.totalLateMinutes);
+      const accuracyRate = allTime.totalCount > 0 ? Math.round((allTime.successfulCount / allTime.totalCount) * 100) : 100;
 
       return {
         ...driver,
-        todayDeliveries: deliveriesCount,
-        deliveriesCount,
-        tasksCount,
-        performedCount,
+        todayDeliveries: today.deliveriesCount,
+        deliveriesCount: today.deliveriesCount,
+        tasksCount: today.tasksCount,
+        performedCount: today.performedCount,
         kpi: {
           score: kpiScore,
           avgLateTime,
-          accuracyRate: calculateAccuracyRate(onlyDeliveries),
-          complaintsCount
+          accuracyRate,
+          complaintsCount: allTime.complaintsCount
         }
       };
     });
@@ -586,6 +587,20 @@ router.post('/returns',  async (req, res) => {
   }
 });
 // Helper functions
+
+// Same formula as calculateKpiScore below, but for callers that already
+// have driver-level counts (e.g. from a $group aggregation) instead of the
+// raw per-delivery document arrays — avoids re-deriving totalCount/
+// lateCount/avgLateTime from arrays just to throw the arrays away again.
+function calculateKpiScoreFromCounts(totalCount, lateCount, totalLateMinutes) {
+  if (totalCount === 0) return 100;
+  const avgLateTime = totalLateMinutes / totalCount;
+  let score = 100;
+  score -= lateCount * 2; // -2 points per late delivery
+  score -= Math.max(0, avgLateTime - 5) * 0.5; // -0.5 points per minute over 5min average late
+  return Math.max(0, Math.round(score));
+}
+
 function calculateKpiScore(driver, allDeliveries, lateDeliveries) {
   if (allDeliveries.length === 0) return 100;
 

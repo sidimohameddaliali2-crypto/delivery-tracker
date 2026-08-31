@@ -209,6 +209,10 @@ const driverSlice = createSlice({
   }
 })
       // Toggle driver status
+      .addCase(toggleDriverStatus.pending, (state) => {
+        state.error = null;
+        state.success = false;
+      })
       .addCase(toggleDriverStatus.fulfilled, (state, action) => {
         const { id, isActive } = action.payload;
         const driver = state.drivers.find((d) => d._id === id);
@@ -216,6 +220,9 @@ const driverSlice = createSlice({
           driver.isActive = isActive;
         }
         state.success = true;
+      })
+      .addCase(toggleDriverStatus.rejected, (state, action) => {
+        state.error = action.payload?.message || 'Failed to update driver status';
       });
   },
 });

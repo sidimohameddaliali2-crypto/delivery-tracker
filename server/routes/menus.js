@@ -9,9 +9,142 @@ import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { protect } from '../middleware/auth.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
 import athleatService from '../services/athleatService.js';
-import matterApiService from '../services/matterApiService.js';
+import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
 
 const router = express.Router();
+
+const toDayKey = (value) => {
+  if (!value) return '';
+  const s = String(value);
+  return s.length >= 10 ? s.slice(0, 10) : s;
+};
+
+// Add `days` calendar days to a "YYYY-MM-DD" string, returning "YYYY-MM-DD".
+const addDaysToDateKey = (dateKey, days) => {
+  const [y, m, d] = String(dateKey).split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  date.setDate(date.getDate() + days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+
+const isWeekendKey = (dateKey) => {
+  const [y, m, d] = String(dateKey).split('-').map(Number);
+  const day = new Date(y, m - 1, d).getDay();
+  return day === 0 || day === 6;
+};
+
+/**
+ * Background (fire-and-forget) processing for days a customer skipped in the
+ * menu-selection link. For each skipped day we find the customer's Matter
+ * website subscription and create a pause: the skipped day is paused and a
+ * resume day is placed right after the subscription's cycle_end_date
+ * (skipping weekends unless the customer takes weekend deliveries).
+ *
+ * Nothing here is surfaced to the customer. Per-day outcome (success, or the
+ * error detail) is written back onto the MenuSelectionRecord.skippedDays so it
+ * shows next to that date in the admin selections view.
+ */
+async function processSkippedDayPauses({ weeklyMenuId, email, weekendEnabled }) {
+  const record = await MenuSelectionRecord.findOne({ weeklyMenuId, email }).select('skippedDays').lean();
+  if (!record || !Array.isArray(record.skippedDays) || record.skippedDays.length === 0) return;
+
+  const pending = record.skippedDays.filter((s) => s.pauseStatus === 'pending' || s.pauseStatus === 'failed');
+  if (pending.length === 0) return;
+
+  const results = new Map(); // dateKey -> { pauseStatus, resumeDate, subscriptionId, error }
+  const fail = (dateKey, error) => results.set(toDayKey(dateKey), { pauseStatus: 'failed', error: String(error || 'Unknown error') });
+
+  let subscription = null;
+  let cycleEndKey = null;
+  let existingPaused = new Set();
+  let usedReturn = new Set();
+
+  try {
+    const list = await matterApiService.listSubscriptions({ email, pageSize: 1 });
+    subscription = list?.data?.[0] || null;
+    if (!subscription) {
+      pending.forEach((s) => fail(s.date, 'No Matter website subscription found for this email'));
+    } else {
+      const detail = await matterApiService.getSubscription(subscription.subscription_id);
+      cycleEndKey = toDayKey(detail?.data?.cycle_end_date || subscription.cycle_end_date);
+      if (!cycleEndKey) {
+        pending.forEach((s) => fail(s.date, 'Subscription has no cycle_end_date to place the resume day after'));
+      }
+      try {
+        const pauseState = await matterApiService.getSubscriptionPauses(subscription.subscription_id);
+        existingPaused = new Set((pauseState?.paused_days || pauseState?.data?.paused_days || []).map(toDayKey));
+        usedReturn = new Set((pauseState?.resumed_days || pauseState?.data?.resumed_days || []).map(toDayKey));
+      } catch (err) {
+        // Non-fatal — we can still create pauses, just can't dedupe/skip used return days.
+        console.error('processSkippedDayPauses: failed to read existing pauses:', err.message);
+      }
+    }
+  } catch (err) {
+    const msg = describeMatterApiError(err) || err.message || 'Failed to reach the Matter API';
+    pending.forEach((s) => fail(s.date, msg));
+  }
+
+  if (subscription && cycleEndKey) {
+    let cursor = addDaysToDateKey(cycleEndKey, 1);
+    const nextResumeDate = () => {
+      while (
+        usedReturn.has(cursor) ||
+        existingPaused.has(cursor) ||
+        (!weekendEnabled && isWeekendKey(cursor))
+      ) {
+        cursor = addDaysToDateKey(cursor, 1);
+      }
+      const chosen = cursor;
+      usedReturn.add(chosen);
+      cursor = addDaysToDateKey(cursor, 1);
+      return chosen;
+    };
+
+    for (const skip of pending) {
+      const dateKey = toDayKey(skip.date);
+      if (!dateKey) { fail(skip.date, 'Invalid skipped date'); continue; }
+      if (existingPaused.has(dateKey)) {
+        results.set(dateKey, { pauseStatus: 'already_paused', subscriptionId: subscription.subscription_id });
+        continue;
+      }
+      const resumeDate = nextResumeDate();
+      try {
+        await matterApiService.createSubscriptionPause(subscription.subscription_id, {
+          pausedDays: [dateKey],
+          chosenDays: [resumeDate],
+          reason: 'Customer skipped this day in the menu selection link'
+        });
+        existingPaused.add(dateKey);
+        results.set(dateKey, {
+          pauseStatus: 'success',
+          resumeDate,
+          subscriptionId: subscription.subscription_id
+        });
+      } catch (err) {
+        // Release the resume day we reserved so the next skipped day reuses it.
+        usedReturn.delete(resumeDate);
+        fail(dateKey, describeMatterApiError(err) || err.message || 'Matter rejected the pause');
+      }
+    }
+  }
+
+  // Write outcomes back onto the record (targeted $set — no full-doc revalidation).
+  const fresh = await MenuSelectionRecord.findOne({ weeklyMenuId, email }).select('skippedDays').lean();
+  if (!fresh) return;
+  const merged = (fresh.skippedDays || []).map((s) => {
+    const r = results.get(toDayKey(s.date));
+    if (!r) return s;
+    return {
+      date: s.date,
+      pauseStatus: r.pauseStatus,
+      resumeDate: r.resumeDate || s.resumeDate,
+      subscriptionId: r.subscriptionId || s.subscriptionId,
+      error: r.pauseStatus === 'failed' ? r.error : undefined,
+      processedAt: new Date()
+    };
+  });
+  await MenuSelectionRecord.updateOne({ weeklyMenuId, email }, { $set: { skippedDays: merged } });
+}
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const buildEmailRegex = (email) => {
@@ -2092,8 +2225,15 @@ router.post('/items', protect, async (req, res) => {
 router.post('/customers/:email/select-meals', async (req, res) => {
   try {
     const { email } = req.params;
-    const { weeklyMenuId, selections, macros } = req.body;
+    const { weeklyMenuId, selections, macros, skippedDates } = req.body;
     const cleanEmail = String(email || '').trim();
+
+    // Days the customer explicitly skipped in the selection flow (deduped, normalized)
+    const skippedDateKeys = Array.from(new Set(
+      (Array.isArray(skippedDates) ? skippedDates : [])
+        .map(toDayKey)
+        .filter(Boolean)
+    ));
 
     console.log('=== POST /select-meals ===');
     console.log('Email:', cleanEmail);
@@ -2187,6 +2327,26 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // Upsert a MenuSelectionRecord so historical selections per menu are preserved
     // even after the customer moves on to a newer menu week.
     if (weeklyMenuId) {
+      // Merge skipped days: keep a prior successful/already-paused outcome for a
+      // date that's still skipped (so a re-submit never double-pauses), mark
+      // everything else pending for the background processor to (re)try.
+      const prior = await MenuSelectionRecord.findOne({ weeklyMenuId, email: customer.email })
+        .select('skippedDays').lean();
+      const priorByDate = new Map((prior?.skippedDays || []).map((s) => [toDayKey(s.date), s]));
+      const skippedDays = skippedDateKeys.map((date) => {
+        const p = priorByDate.get(date);
+        if (p && (p.pauseStatus === 'success' || p.pauseStatus === 'already_paused')) {
+          return {
+            date,
+            pauseStatus: p.pauseStatus,
+            resumeDate: p.resumeDate,
+            subscriptionId: p.subscriptionId,
+            processedAt: p.processedAt
+          };
+        }
+        return { date, pauseStatus: 'pending' };
+      });
+
       await MenuSelectionRecord.findOneAndUpdate(
         { weeklyMenuId, email: customer.email },
         {
@@ -2198,13 +2358,14 @@ router.post('/customers/:email/select-meals', async (req, res) => {
             lastName: customer.lastName,
             mealExclusion: customer.mealExclusion,
             selectedMeals: mappedSelections,
+            skippedDays,
             submittedAt: new Date(),
             macros: macros ? macros : undefined
           }
         },
         { upsert: true, new: true }
       );
-      console.log('MenuSelectionRecord upserted for', customer.email, 'menu', weeklyMenuId);
+      console.log('MenuSelectionRecord upserted for', customer.email, 'menu', weeklyMenuId, '- skipped days:', skippedDateKeys.length);
     }
 
     // Refresh selection count from MenuSelectionRecord (authoritative, never decrements on menu switch)
@@ -2251,6 +2412,20 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       message: 'Meals selected successfully',
       data: customer
     });
+
+    // Fire-and-forget: pause each skipped day on the customer's Matter
+    // subscription and place the resume day after the cycle end. The customer
+    // has already been responded to and sees nothing about this — outcomes are
+    // recorded on MenuSelectionRecord.skippedDays for the admin view.
+    if (weeklyMenuId && skippedDateKeys.length > 0) {
+      processSkippedDayPauses({
+        weeklyMenuId,
+        email: customer.email,
+        weekendEnabled: !!customer.weekend
+      }).catch((err) => {
+        console.error('processSkippedDayPauses failed for', customer.email, 'menu', weeklyMenuId, '-', err.message);
+      });
+    }
   } catch (error) {
     console.error('Error selecting meals:', error);
     res.status(500).json({

@@ -22,6 +22,7 @@ const customerSchema = new mongoose.Schema({
   lastName: String,
   phone: String,
   company: String,
+  address: String,
   macros: {
     C: { type: Number, default: 0 },
     P: { type: Number, default: 0 },

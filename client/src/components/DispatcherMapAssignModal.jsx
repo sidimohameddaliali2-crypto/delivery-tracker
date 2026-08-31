@@ -127,7 +127,7 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
           <div className="bg-white rounded-xl shadow-xl p-6 max-w-md w-full space-y-3 text-center">
             <div className="text-lg font-semibold text-gray-900">Google Maps key required</div>
             <p className="text-sm text-gray-600">
-              Add <span className="font-mono">VITE_GOOGLE_MAPS_API_KEY</span> to your <span className="font-mono">client/.env</span>
+              Add <span className="font-mono">REACT_APP_GOOGLE_MAPS_API_KEY</span> to your <span className="font-mono">client/.env</span>
               (or environment) with a valid browser Maps API key that has Maps JavaScript API and Places API
               enabled. Then restart the client dev server.
             </p>

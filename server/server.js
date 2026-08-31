@@ -158,6 +158,7 @@ import matterCoreRoutes from './routes/matterCore.js';
 import matterApiRoutes from './routes/matterApi.js';
 import xeroRoutes from './routes/xero.js';
 import vehicleRoutes from './routes/vehicles.js';
+import yellowblockRoutes from './routes/yellowblock.js';
 
 // Import cache initialization
 import { initRedis } from './config/cache.js';
@@ -190,6 +191,7 @@ app.use('/api/employees', employeeRoutes);
 app.use('/api/matter', matterApiRoutes);
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/xero', xeroRoutes);
+app.use('/api/yellowblock', yellowblockRoutes);
 
 
 // Health check endpoint (supports both GET and HEAD methods)

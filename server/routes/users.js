@@ -1,6 +1,16 @@
 import express from 'express';
-import User from '../models/User.js';
+import User, { getDefaultPermissions, effectivePermissions } from '../models/User.js';
 import { protect, authorize, admin, superAdmin } from '../middleware/auth.js';
+
+// Return a plain user object with `permissions` replaced by the effective set
+// the client should enforce (role defaults for unconfigured users, stored
+// values honoured — including explicit `false` — once configured).
+const withEffectivePermissions = (user) => {
+  if (!user) return user;
+  const obj = typeof user.toObject === 'function' ? user.toObject() : { ...user };
+  obj.permissions = effectivePermissions(obj);
+  return obj;
+};
 
 const router = express.Router();
 
@@ -79,7 +89,7 @@ router.get('/', authorize(['super_admin', 'admin']), async (req, res) => {
     const total = await User.countDocuments(query);
 
     res.json({
-      users,
+      users: users.map(withEffectivePermissions),
       totalPages: Math.ceil(total / limit),
       currentPage: page,
       total
@@ -107,7 +117,7 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    res.json(user);
+    res.json(withEffectivePermissions(user));
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
@@ -152,6 +162,8 @@ router.post('/', authorize(['super_admin', 'admin']), async (req, res) => {
         position
       },
       permissions: permissions || getDefaultPermissions(role),
+      // Only mark configured when the caller sent an explicit permissions object.
+      permissionsConfigured: !!permissions,
       isActive,
       createdBy: req.user.id
     });
@@ -163,7 +175,7 @@ router.post('/', authorize(['super_admin', 'admin']), async (req, res) => {
       .select('-password')
       .populate('createdBy', 'profile firstName lastName');
 
-    res.status(201).json(userResponse);
+    res.status(201).json(withEffectivePermissions(userResponse));
   } catch (error) {
     console.error('Create user error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -215,7 +227,13 @@ router.put('/:id', async (req, res) => {
     // Only admins can change role, permissions, and active status
     if (req.user.role === 'super_admin' || req.user.role === 'admin') {
       if (role) user.role = role;
-      if (permissions) user.permissions = permissions;
+      if (permissions) {
+        // Assign after role so the pre-save hook (which only re-seeds when
+        // permissions weren't also touched) doesn't discard these, and mark the
+        // user as explicitly configured so stored `false` values are enforced.
+        user.permissions = permissions;
+        user.permissionsConfigured = true;
+      }
       if (isActive !== undefined) user.isActive = isActive;
     }
 
@@ -225,7 +243,7 @@ router.put('/:id', async (req, res) => {
       .select('-password')
       .populate('createdBy', 'profile firstName lastName');
 
-    res.json(updatedUser);
+    res.json(withEffectivePermissions(updatedUser));
   } catch (error) {
     console.error('Update user error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -291,82 +309,5 @@ router.get('/stats/overview', authorize(['super_admin', 'admin']), async (req, r
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
-
-// Helper function for default permissions
-function getDefaultPermissions(role) {
-  const permissions = {
-    dashboard: false,
-    users: false,
-    drivers: false,
-    deliveries: false,
-    customers: false,
-    events: false,
-    bags: false,
-    late_deliveries: false,
-    complaints: false,
-    live_map: false,
-    delivery_changes: false,
-    reports: false,
-    menus: false,
-    settings: false,
-    yellowblock: false
-  };
-
-  switch (role) {
-    case 'super_admin':
-      Object.keys(permissions).forEach(key => permissions[key] = true);
-      break;
-    case 'admin':
-      permissions.dashboard = true;
-      permissions.users = true;
-      permissions.drivers = true;
-      permissions.deliveries = true;
-      permissions.customers = true;
-      permissions.events = true;
-      permissions.bags = true;
-      permissions.late_deliveries = true;
-      permissions.complaints = true;
-      permissions.live_map = true;
-      permissions.delivery_changes = true;
-      permissions.reports = true;
-      permissions.menus = true;
-      break;
-    case 'manager':
-      permissions.dashboard = true;
-      permissions.drivers = true;
-      permissions.deliveries = true;
-      permissions.customers = true;
-      permissions.bags = true;
-      permissions.late_deliveries = true;
-      permissions.reports = true;
-      permissions.live_map = true;
-      break;
-    case 'dispatcher':
-      permissions.dashboard = true;
-      permissions.drivers = true;
-      permissions.deliveries = true;
-      permissions.customers = true;
-      permissions.events = true;
-      permissions.bags = true;
-      permissions.late_deliveries = true;
-      permissions.complaints = true;
-      permissions.live_map = true;
-      break;
-    case 'driver':
-      permissions.dashboard = true;
-      permissions.deliveries = true;
-      break;
-    case 'viewer':
-      permissions.dashboard = true;
-      permissions.reports = true;
-      break;
-    case 'yellowblock_user':
-      permissions.events = true;
-      permissions.yellowblock = true;
-      break;
-  }
-
-  return permissions;
-}
 
 export default router;

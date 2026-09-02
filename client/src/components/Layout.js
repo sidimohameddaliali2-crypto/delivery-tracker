@@ -33,31 +33,31 @@ import UserAvatar from './users/UserAvatar';
 const GROUP_ORDER = ['Overview', 'Operations', 'Customers', 'Kitchen & Menus', 'Partners', 'Admin', 'Store Keeper'];
 
 const NAV_ITEMS = [
-  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, permission: 'dashboard', roles: ['super_admin', 'admin', 'manager', 'dispatcher', 'driver', 'viewer'], group: 'Overview' },
+  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, permission: 'dashboard', group: 'Overview' },
 
-  { name: 'Deliveries', href: '/deliveries', icon: Package, permission: 'deliveries', roles: ['super_admin', 'admin', 'manager', 'dispatcher', 'driver'], group: 'Operations' },
-  { name: 'Drivers', href: '/drivers', icon: Motorbike, permission: 'drivers', roles: ['admin'], group: 'Operations' },
-  { name: 'Fleet', href: '/fleet', icon: Truck, permission: 'fleet', roles: ['admin'], group: 'Operations' },
-  { name: 'Delivery Changes', href: '/delivery-changes', icon: ReplaceAll, permission: 'delivery_changes', roles: ['super_admin', 'admin'], group: 'Operations' },
-  { name: 'Bag Tracking', href: '/bags', icon: ShoppingBag, permission: 'bags', roles: ['super_admin', 'admin', 'manager', 'dispatcher'], group: 'Operations' },
-  { name: 'Report', href: '/reports', icon: BarChart3, permission: 'reports', roles: ['super_admin', 'admin', 'manager', 'viewer'], group: 'Operations' },
-  { name: 'Events', href: '/events', icon: Calendar, permission: 'events', roles: ['super_admin', 'admin', 'dispatcher'], group: 'Operations' },
-  { name: 'Complaints', href: '/complaints', icon: AlertTriangle, permission: 'complaints', roles: ['super_admin', 'admin', 'dispatcher'], group: 'Operations' },
+  { name: 'Deliveries', href: '/deliveries', icon: Package, permission: 'deliveries', group: 'Operations' },
+  { name: 'Drivers', href: '/drivers', icon: Motorbike, permission: 'drivers', group: 'Operations' },
+  { name: 'Fleet', href: '/fleet', icon: Truck, permission: 'fleet', group: 'Operations' },
+  { name: 'Delivery Changes', href: '/delivery-changes', icon: ReplaceAll, permission: 'delivery_changes', group: 'Operations' },
+  { name: 'Bag Tracking', href: '/bags', icon: ShoppingBag, permission: 'bags', group: 'Operations' },
+  { name: 'Report', href: '/reports', icon: BarChart3, permission: 'reports', group: 'Operations' },
+  { name: 'Events', href: '/events', icon: Calendar, permission: 'events', group: 'Operations' },
+  { name: 'Complaints', href: '/complaints', icon: AlertTriangle, permission: 'complaints', group: 'Operations' },
 
-  { name: 'Customers', href: '/customers', icon: User, permission: 'customers', roles: ['super_admin', 'admin', 'manager', 'dispatcher'], group: 'Customers' },
-  { name: 'Customer Management', href: '/website-subscriptions', icon: Globe, roles: ['super_admin', 'admin', 'manager'], group: 'Customers' },
-  { name: 'Subscription & Sales', href: '/subscription', icon: CreditCard, roles: ['super_admin', 'admin', 'manager'], group: 'Customers' },
-  { name: 'Customer Analytics', href: '/customer-analytics', icon: LineChart, roles: ['super_admin', 'admin', 'manager'], group: 'Customers' },
-  { name: 'Renewal', href: '/renewal', icon: RefreshCw, roles: ['super_admin', 'admin', 'manager'], group: 'Customers' },
+  { name: 'Customers', href: '/customers', icon: User, permission: 'customers', group: 'Customers' },
+  { name: 'Customer Management', href: '/website-subscriptions', icon: Globe, permission: 'website_subscriptions', group: 'Customers' },
+  { name: 'Subscription & Sales', href: '/subscription', icon: CreditCard, permission: 'subscription', group: 'Customers' },
+  { name: 'Customer Analytics', href: '/customer-analytics', icon: LineChart, permission: 'customer_analytics', group: 'Customers' },
+  { name: 'Renewal', href: '/renewal', icon: RefreshCw, permission: 'renewal', group: 'Customers' },
 
-  { name: 'Menus', href: '/menus', icon: Menu, permission: 'menus', roles: ['super_admin', 'admin'], group: 'Kitchen & Menus' },
-  { name: 'Kitchen List', href: '/kitchen-list', icon: UtensilsCrossed, roles: ['super_admin', 'admin', 'kitchen'], group: 'Kitchen & Menus' },
-  { name: 'Matter Core', href: '/matter-core', icon: FileText, roles: ['super_admin', 'admin'], group: 'Kitchen & Menus' },
+  { name: 'Menus', href: '/menus', icon: Menu, permission: 'menus', group: 'Kitchen & Menus' },
+  { name: 'Kitchen List', href: '/kitchen-list', icon: UtensilsCrossed, permission: 'kitchen_list', group: 'Kitchen & Menus' },
+  { name: 'Matter Core', href: '/matter-core', icon: FileText, permission: 'matter_core', group: 'Kitchen & Menus' },
 
-  { name: 'Partners', href: '/admin/partners', icon: Building2, roles: ['super_admin', 'admin', 'kitchen'], group: 'Partners' },
+  { name: 'Partners', href: '/admin/partners', icon: Building2, permission: 'partners', group: 'Partners' },
 
-  { name: 'Users', href: '/users', icon: Users, permission: 'users', roles: ['super_admin', 'admin'], group: 'Admin' },
-  { name: 'Employees', href: '/employees', icon: Briefcase, permission: 'employees', roles: ['super_admin', 'admin', 'manager'], group: 'Admin' },
+  { name: 'Users', href: '/users', icon: Users, permission: 'users', group: 'Admin' },
+  { name: 'Employees', href: '/employees', icon: Briefcase, permission: 'employees', group: 'Admin' },
 
   { name: 'Store Keeper', href: '/store-keeper', icon: ShoppingBag, roles: ['store_keeper'], group: 'Store Keeper' },
 ];
@@ -71,17 +71,17 @@ const Layout = ({ children }) => {
   const location = useLocation();
   const { user } = useSelector(state => state.auth);
 
-  // Check if a nav item should be visible for the current user
+  // Check if a nav item should be visible for the current user.
+  // Permission wins: a page keyed with `permission` shows iff that permission is
+  // explicitly granted (server sends the effective set). Items with no permission
+  // key (e.g. Store Keeper) fall back to their `roles` list.
   const isNavItemVisible = (item) => {
-    // Role check
-    if (item.roles && !item.roles.includes(user?.role)) return false;
-    // Super admin bypasses all permission checks
     if (user?.role === 'super_admin') return true;
-    // If the nav item has a permission key, check it
-    // Only hide if the permission is explicitly set to false; undefined = not yet set = show
     if (item.permission) {
-      return user?.permissions?.[item.permission] !== false;
+      if (user?.role === 'yellowblock_user' && item.permission === 'events') return true;
+      return user?.permissions?.[item.permission] === true;
     }
+    if (item.roles) return item.roles.includes(user?.role);
     return true;
   };
 

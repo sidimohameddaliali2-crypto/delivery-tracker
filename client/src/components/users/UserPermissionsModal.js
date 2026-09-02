@@ -15,38 +15,31 @@ import {
   Tooltip
 } from '@mui/material';
 import { clearError, clearSuccess } from '../../store/slices/userSlice';
+import { PERMISSION_GROUPS, PERMISSION_KEYS, getDefaultPermissions } from '../../constants/permissions';
+
+// Build a clean permissions object containing only the canonical page keys.
+const pickPageKeys = (source = {}) => {
+  const out = {};
+  PERMISSION_KEYS.forEach((key) => { out[key] = source[key] === true; });
+  return out;
+};
 
 const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) => {
   const dispatch = useDispatch();
   const { isLoading, error, success } = useSelector(state => state.user);
   const authCurrentUser = useSelector(state => state.auth.user);
   const effectiveCurrentUser = currentUser || authCurrentUser;
-  
-  const [permissions, setPermissions] = useState({
-    dashboard: false,
-    users: false,
-    drivers: false,
-    fleet: false,
-    deliveries: false,
-    customers: false,
-    events: false,
-    bags: false,
-    late_deliveries: false,
-    complaints: false,
-    live_map: false,
-    delivery_changes: false,
-    reports: false,
-    menus: false,
-    settings: false
-  });
+
+  const [permissions, setPermissions] = useState(() => pickPageKeys(getDefaultPermissions('viewer')));
 
   const [role, setRole] = useState('viewer');
 
   useEffect(() => {
     if (user) {
-      // Merge saved permissions with defaults so new keys always appear
-      const defaults = getDefaultPermissions(user.role);
-      setPermissions({ ...defaults, ...(user.permissions || {}) });
+      // The server already returns the effective permission set (role defaults
+      // for unconfigured users, stored choices once configured), so trust it.
+      const base = getDefaultPermissions(user.role);
+      setPermissions(pickPageKeys({ ...base, ...(user.permissions || {}) }));
       setRole(user.role);
     }
   }, [user]);
@@ -60,83 +53,10 @@ const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) 
 
   const handleRoleChange = (newRole) => {
     setRole(newRole);
-    
-    // Set default permissions for the role
-    const defaultPermissions = getDefaultPermissions(newRole);
-    setPermissions(defaultPermissions);
+    // Reset the toggles to the new role's defaults.
+    setPermissions(pickPageKeys(getDefaultPermissions(newRole)));
   };
 
-  const getDefaultPermissions = (role) => {
-    const permissions = {
-      dashboard: false,
-      users: false,
-      drivers: false,
-      deliveries: false,
-      customers: false,
-      events: false,
-      bags: false,
-      late_deliveries: false,
-      complaints: false,
-      live_map: false,
-      delivery_changes: false,
-      reports: false,
-      menus: false,
-      settings: false
-    };
-
-    switch (role) {
-      case 'super_admin':
-        if (permissions) Object.keys(permissions).forEach(key => permissions[key] = true);
-        break;
-      case 'admin':
-        permissions.dashboard = true;
-        permissions.users = true;
-        permissions.drivers = true;
-        permissions.fleet = true;
-        permissions.deliveries = true;
-        permissions.customers = true;
-        permissions.events = true;
-        permissions.bags = true;
-        permissions.late_deliveries = true;
-        permissions.complaints = true;
-        permissions.live_map = true;
-        permissions.delivery_changes = true;
-        permissions.reports = true;
-        permissions.menus = true;
-        break;
-      case 'manager':
-        permissions.dashboard = true;
-        permissions.drivers = true;
-        permissions.deliveries = true;
-        permissions.customers = true;
-        permissions.bags = true;
-        permissions.late_deliveries = true;
-        permissions.reports = true;
-        permissions.live_map = true;
-        break;
-      case 'dispatcher':
-        permissions.dashboard = true;
-        permissions.drivers = true;
-        permissions.deliveries = true;
-        permissions.customers = true;
-        permissions.events = true;
-        permissions.bags = true;
-        permissions.late_deliveries = true;
-        permissions.complaints = true;
-        permissions.live_map = true;
-        break;
-      case 'driver':
-        permissions.dashboard = true;
-        permissions.deliveries = true;
-        break;
-      case 'viewer':
-        permissions.dashboard = true;
-        permissions.reports = true;
-        break;
-    }
-
-    return permissions;
-  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -144,7 +64,7 @@ const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) 
     try {
       const userData = {
         role: role,
-        permissions: permissions
+        permissions: pickPageKeys(permissions)
       };
 
       await onSubmit(userData);
@@ -156,33 +76,13 @@ const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) 
 
   const handleClose = () => {
     if (user) {
-      setPermissions(user.permissions || {});
+      const base = getDefaultPermissions(user.role);
+      setPermissions(pickPageKeys({ ...base, ...(user.permissions || {}) }));
       setRole(user.role);
     }
     dispatch(clearError());
     dispatch(clearSuccess());
     onClose();
-  };
-
-  const getPermissionDescription = (permission) => {
-    const descriptions = {
-      dashboard: 'Access to dashboard and overview statistics',
-      users: 'Manage users and their permissions (Admin only)',
-      drivers: 'View and manage driver accounts and performance',
-      fleet: 'View and manage vehicles, assignments, and fleet status',
-      deliveries: 'Create, view, and manage deliveries',
-      customers: 'View and manage customer accounts',
-      events: 'Create and manage events',
-      bags: 'Track and manage bag inventory and assignments',
-      late_deliveries: 'View and manage late delivery alerts',
-      complaints: 'View and manage customer complaints',
-      live_map: 'View real-time driver locations on map',
-      delivery_changes: 'View and manage delivery change requests',
-      reports: 'Access to reports and analytics',
-      menus: 'Manage weekly menus and meal planning',
-      settings: 'System configuration and settings'
-    };
-    return descriptions[permission] || 'No description available';
   };
 
   const getRoleColor = (role) => {
@@ -306,42 +206,46 @@ const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) 
                   </div>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {permissions && Object.entries(permissions).map(([permission, enabled]) => (
-                    <div
-                      key={permission}
-                      className={`border rounded-lg p-4 transition-colors ${
-                        enabled ? 'border-green-200 bg-green-50' : 'border-gray-200 bg-white'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <h4 className="font-medium text-gray-900 capitalize">
-                          {permission.replace('_', ' ')}
-                        </h4>
-                        <Tooltip title={getPermissionDescription(permission)}>
-                          <div className="flex items-center space-x-2">
-                            <span className={`text-sm ${
-                              enabled ? 'text-green-600' : 'text-gray-500'
-                            }`}>
-                              {enabled ? 'Enabled' : 'Disabled'}
-                            </span>
-                            <FormControlLabel
-                              control={
-                                <Switch
-                                  checked={enabled}
-                                  onChange={() => handlePermissionChange(permission)}
-                                  color="success"
-                                  size="small"
-                                />
-                              }
-                              label=""
-                            />
-                          </div>
-                        </Tooltip>
+                <div className="space-y-5">
+                  {PERMISSION_GROUPS.map((group) => (
+                    <div key={group.label}>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-gray-400 mb-2">{group.label}</h4>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {group.items.map(({ key, label, description }) => {
+                          const enabled = permissions[key] === true;
+                          return (
+                            <div
+                              key={key}
+                              className={`border rounded-lg p-3 transition-colors ${
+                                enabled ? 'border-green-200 bg-green-50' : 'border-gray-200 bg-white'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <h5 className="font-medium text-gray-900">{label}</h5>
+                                <Tooltip title={description}>
+                                  <div className="flex items-center space-x-2">
+                                    <span className={`text-sm ${enabled ? 'text-green-600' : 'text-gray-500'}`}>
+                                      {enabled ? 'Enabled' : 'Disabled'}
+                                    </span>
+                                    <FormControlLabel
+                                      control={
+                                        <Switch
+                                          checked={enabled}
+                                          onChange={() => handlePermissionChange(key)}
+                                          color="success"
+                                          size="small"
+                                        />
+                                      }
+                                      label=""
+                                    />
+                                  </div>
+                                </Tooltip>
+                              </div>
+                              <p className="text-sm text-gray-600">{description}</p>
+                            </div>
+                          );
+                        })}
                       </div>
-                      <p className="text-sm text-gray-600">
-                        {getPermissionDescription(permission)}
-                      </p>
                     </div>
                   ))}
                 </div>

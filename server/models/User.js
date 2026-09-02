@@ -74,8 +74,13 @@ const userSchema = new mongoose.Schema({
     dashboard: { type: Boolean, default: false },
     users: { type: Boolean, default: false },
     drivers: { type: Boolean, default: false },
+    fleet: { type: Boolean, default: false },
     deliveries: { type: Boolean, default: false },
     customers: { type: Boolean, default: false },
+    website_subscriptions: { type: Boolean, default: false },
+    subscription: { type: Boolean, default: false },
+    customer_analytics: { type: Boolean, default: false },
+    renewal: { type: Boolean, default: false },
     events: { type: Boolean, default: false },
     bags: { type: Boolean, default: false },
     late_deliveries: { type: Boolean, default: false },
@@ -83,11 +88,19 @@ const userSchema = new mongoose.Schema({
     reports: { type: Boolean, default: false },
     delivery_changes: { type: Boolean, default: false },
     menus: { type: Boolean, default: false },
+    kitchen_list: { type: Boolean, default: false },
+    matter_core: { type: Boolean, default: false },
+    partners: { type: Boolean, default: false },
     employees: { type: Boolean, default: false },
     settings: { type: Boolean, default: false },
     live_map: { type: Boolean, default: false },
     yellowblock: { type: Boolean, default: false }
   },
+  // false = permissions have never been explicitly set for this user, so page
+  // visibility falls back to the role defaults. true = an admin configured them
+  // in the permissions modal, so the stored object is authoritative (an explicit
+  // `false` genuinely hides that page).
+  permissionsConfigured: { type: Boolean, default: false },
   location: {
     latitude: Number,
     longitude: Number,
@@ -132,98 +145,83 @@ userSchema.methods.correctPassword = async function(candidatePassword, userPassw
   return await bcrypt.compare(candidatePassword, userPassword);
 };
 
-// Set default permissions based on role
+// Only re-seed permissions from role defaults when the role changed AND the
+// caller didn't also send an explicit permissions object in the same save.
+// (Previously a role change always wiped custom permissions the admin had just
+// set in the modal, because the modal sends role + permissions together.)
 userSchema.pre('save', function(next) {
-  if (this.isModified('role')) {
+  if (this.isModified('role') && !this.isModified('permissions')) {
     this.permissions = getDefaultPermissions(this.role);
+    // Role changed on its own — go back to "follows role defaults" mode.
+    this.permissionsConfigured = false;
   }
   next();
 });
 
+// Canonical list of page-permission keys. MUST stay in sync with
+// client/src/constants/permissions.js. The trailing group are legacy/non-page
+// keys kept so existing documents and any old checks don't break.
+const PERMISSION_KEYS = [
+  'dashboard',
+  'deliveries', 'drivers', 'fleet', 'delivery_changes', 'bags', 'reports', 'events', 'complaints',
+  'customers', 'website_subscriptions', 'subscription', 'customer_analytics', 'renewal',
+  'menus', 'kitchen_list', 'matter_core',
+  'partners',
+  'users', 'employees',
+  'late_deliveries', 'live_map', 'settings', 'yellowblock',
+];
+
+// Which keys default to ON for each role. A role missing here gets nothing.
+const ROLE_DEFAULT_KEYS = {
+  super_admin: PERMISSION_KEYS,
+  admin: [
+    'dashboard', 'deliveries', 'drivers', 'fleet', 'delivery_changes', 'bags', 'reports', 'events', 'complaints',
+    'customers', 'website_subscriptions', 'subscription', 'customer_analytics', 'renewal',
+    'menus', 'kitchen_list', 'matter_core', 'partners', 'users', 'employees',
+    'late_deliveries', 'live_map',
+  ],
+  manager: [
+    'dashboard', 'deliveries', 'bags', 'reports', 'customers',
+    'website_subscriptions', 'subscription', 'customer_analytics', 'renewal', 'employees',
+    'late_deliveries', 'live_map',
+  ],
+  dispatcher: [
+    'dashboard', 'deliveries', 'bags', 'events', 'complaints', 'customers',
+    'late_deliveries', 'live_map',
+  ],
+  driver: ['dashboard', 'deliveries'],
+  viewer: ['dashboard', 'reports'],
+  store_keeper: ['bags'],
+  yellowblock_user: ['events', 'yellowblock'],
+  kitchen: ['kitchen_list', 'partners'],
+};
+
 function getDefaultPermissions(role) {
-  const permissions = {
-    dashboard: false,
-    users: false,
-    drivers: false,
-    deliveries: false,
-    customers: false,
-    events: false,
-    bags: false,
-    late_deliveries: false,
-    complaints: false,
-    live_map: false,
-    delivery_changes: false,
-    reports: false,
-    menus: false,
-    settings: false,
-    yellowblock: false,
-    employees: false
-  };
-
-  switch (role) {
-    case 'super_admin':
-      Object.keys(permissions).forEach(key => permissions[key] = true);
-      break;
-    case 'admin':
-      permissions.dashboard = true;
-      permissions.users = true;
-      permissions.drivers = true;
-      permissions.deliveries = true;
-      permissions.customers = true;
-      permissions.events = true;
-      permissions.bags = true;
-      permissions.late_deliveries = true;
-      permissions.complaints = true;
-      permissions.live_map = true;
-      permissions.delivery_changes = true;
-      permissions.reports = true;
-      permissions.menus = true;
-      permissions.employees = true;
-      break;
-    case 'manager':
-      permissions.dashboard = true;
-      permissions.drivers = true;
-      permissions.deliveries = true;
-      permissions.customers = true;
-      permissions.bags = true;
-      permissions.late_deliveries = true;
-      permissions.reports = true;
-      permissions.live_map = true;
-      permissions.employees = true;
-      break;
-    case 'dispatcher':
-      permissions.dashboard = true;
-      permissions.drivers = true;
-      permissions.deliveries = true;
-      permissions.customers = true;
-      permissions.events = true;
-      permissions.bags = true;
-      permissions.late_deliveries = true;
-      permissions.complaints = true;
-      permissions.live_map = true;
-      break;
-    case 'store_keeper':
-      permissions.bags = true;
-      break;
-    case 'driver':
-      permissions.dashboard = true;
-      permissions.deliveries = true;
-      break;
-    case 'viewer':
-      permissions.dashboard = true;
-      permissions.reports = true;
-      break;
-    case 'yellowblock_user':
-      permissions.events = true;
-      permissions.yellowblock = true;
-      break;
-    case 'kitchen':
-      // Access is controlled by role-based routing; no standard permissions needed
-      break;
-  }
-
-  return permissions;
+  const on = new Set(ROLE_DEFAULT_KEYS[role] || []);
+  const out = {};
+  PERMISSION_KEYS.forEach((key) => { out[key] = on.has(key); });
+  return out;
 }
 
-export { getDefaultPermissions };
+// The permission set the app should actually enforce for a user:
+// - super_admin always gets everything
+// - unconfigured users fall back entirely to role defaults
+// - configured users: their stored value wins for every key it has (true OR
+//   false); role defaults only fill keys added after they were configured.
+function effectivePermissions(user) {
+  if (!user) return {};
+  if (user.role === 'super_admin') return getDefaultPermissions('super_admin');
+  const defaults = getDefaultPermissions(user.role);
+  if (!user.permissionsConfigured) return defaults;
+  const stored = user.permissions
+    ? (typeof user.permissions.toObject === 'function' ? user.permissions.toObject() : { ...user.permissions })
+    : {};
+  const merged = { ...defaults };
+  Object.keys(defaults).forEach((key) => {
+    if (typeof stored[key] === 'boolean') merged[key] = stored[key];
+  });
+  return merged;
+}
+
+export { getDefaultPermissions, effectivePermissions, PERMISSION_KEYS };
 export default mongoose.model('User', userSchema);

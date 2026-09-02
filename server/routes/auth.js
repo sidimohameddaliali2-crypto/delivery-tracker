@@ -1,7 +1,7 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { body, validationResult } from 'express-validator';
-import User, { getDefaultPermissions } from '../models/User.js';
+import User, { effectivePermissions } from '../models/User.js';
 import { authenticate } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -11,20 +11,6 @@ const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN
   });
-};
-
-// Merge stored permissions with role defaults so existing users
-// automatically gain new permission keys added after their account was created.
-const effectivePermissions = (user) => {
-  const defaults = getDefaultPermissions(user.role);
-  const stored = user.permissions ? user.permissions.toObject ? user.permissions.toObject() : { ...user.permissions } : {};
-  // Role defaults only fill in keys that are false due to schema default (not intentional revocations).
-  // We trust role defaults for admin/super_admin; stored value wins when it was explicitly set to true.
-  const merged = { ...defaults };
-  Object.keys(stored).forEach((key) => {
-    if (stored[key] === true) merged[key] = true;
-  });
-  return merged;
 };
 
 // @desc    Register user

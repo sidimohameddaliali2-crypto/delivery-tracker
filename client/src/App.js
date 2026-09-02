@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { Provider, useDispatch, useSelector } from 'react-redux';
 import { store } from './store/store';
 import { Toaster } from './components/ui/toaster';
@@ -105,7 +105,10 @@ const hasPermission = (user, permissionKey) => {
   if (!permissionKey) return true;
   if (user?.role === 'super_admin') return true;
   if (user?.role === 'yellowblock_user' && permissionKey === 'events') return true;
-  return user?.permissions?.[permissionKey] !== false;
+  // A page is visible only when its permission is explicitly granted. The server
+  // sends the effective set (role defaults for unconfigured users, the admin's
+  // stored choices — including explicit false — once configured).
+  return user?.permissions?.[permissionKey] === true;
 };
 
 const getFirstAvailablePath = (user) => {
@@ -116,21 +119,33 @@ const getFirstAvailablePath = (user) => {
   if (user.role === 'store_keeper') return '/store-keeper';
   if (user.role === 'yellowblock_user') return '/yellowblock';
 
+  // Ordered by likelihood of being granted — first page the user can actually
+  // see becomes their landing / fallback route. Permission-driven now, no role list.
   const candidates = [
-    { path: '/dashboard', permission: 'dashboard', roles: ['super_admin', 'admin', 'manager', 'viewer'] },
-    { path: '/deliveries', permission: 'deliveries', roles: ['super_admin', 'admin', 'manager', 'viewer'] },
-    { path: '/customers', permission: 'customers', roles: ['super_admin', 'admin', 'manager'] },
-    { path: '/events', permission: 'events', roles: ['super_admin', 'admin'] },
-    { path: '/bags', permission: 'bags', roles: ['super_admin', 'admin', 'manager'] },
-    { path: '/complaints', permission: 'complaints', roles: ['super_admin', 'admin'] },
-    { path: '/delivery-changes', permission: 'delivery_changes', roles: ['super_admin', 'admin'] },
-    { path: '/users', permission: 'users', roles: ['super_admin', 'admin'] },
-    { path: '/reports', permission: 'reports', roles: ['super_admin', 'admin', 'manager', 'viewer'] },
-    { path: '/menus', permission: 'menus', roles: ['super_admin', 'admin'] }
+    { path: '/dashboard', permission: 'dashboard' },
+    { path: '/deliveries', permission: 'deliveries' },
+    { path: '/reports', permission: 'reports' },
+    { path: '/customers', permission: 'customers' },
+    { path: '/bags', permission: 'bags' },
+    { path: '/events', permission: 'events' },
+    { path: '/complaints', permission: 'complaints' },
+    { path: '/drivers', permission: 'drivers' },
+    { path: '/fleet', permission: 'fleet' },
+    { path: '/delivery-changes', permission: 'delivery_changes' },
+    { path: '/website-subscriptions', permission: 'website_subscriptions' },
+    { path: '/subscription', permission: 'subscription' },
+    { path: '/customer-analytics', permission: 'customer_analytics' },
+    { path: '/renewal', permission: 'renewal' },
+    { path: '/menus', permission: 'menus' },
+    { path: '/kitchen-list', permission: 'kitchen_list' },
+    { path: '/matter-core', permission: 'matter_core' },
+    { path: '/admin/partners', permission: 'partners' },
+    { path: '/employees', permission: 'employees' },
+    { path: '/users', permission: 'users' },
   ];
 
-  const firstAllowed = candidates.find((item) => item.roles.includes(user.role) && hasPermission(user, item.permission));
-  return firstAllowed?.path || '/login';
+  const firstAllowed = candidates.find((item) => hasPermission(user, item.permission));
+  return firstAllowed?.path || '/no-access';
 };
 
 const AuthBootstrap = () => {
@@ -183,18 +198,39 @@ const ProtectedRoute = ({ children, allowDrivers = false, allowDispatchers = fal
   return children;
 };
 
-const RoleBasedRoute = ({ children, allowedRoles }) => {
-  const authUser = useSelector((state) => state.auth.user);
-  const user = authUser || safeGetUser();
-  return allowedRoles.includes(user.role) ? children : <Navigate to={getFirstAvailablePath(user)} replace />;
+// Redirects to the user's first available page, but renders an access-denied
+// screen instead of navigating when that page is the one we're already on
+// (prevents a redirect loop when the user has no granted pages at all).
+const redirectOrDeny = (user, currentPath) => {
+  const target = getFirstAvailablePath(user);
+  if (target === currentPath || target === '/no-access') {
+    return (
+      <AccessDenied
+        redirectPath="/login"
+        title="No access"
+        message="Your account doesn't have access to any pages yet. Ask an administrator to grant you page permissions."
+        ctaLabel="Back to login"
+      />
+    );
+  }
+  return <Navigate to={target} replace />;
 };
 
-// Blocks access if user's permission for a given key is false (super_admin always passes)
+const RoleBasedRoute = ({ children, allowedRoles }) => {
+  const authUser = useSelector((state) => state.auth.user);
+  const location = useLocation();
+  const user = authUser || safeGetUser();
+  return allowedRoles.includes(user.role) ? children : redirectOrDeny(user, location.pathname);
+};
+
+// Blocks access unless the user's permission for a given key is explicitly granted
+// (super_admin always passes).
 const PermissionBasedRoute = ({ children, permission }) => {
   const authUser = useSelector((state) => state.auth.user);
+  const location = useLocation();
   const user = authUser || safeGetUser();
   if (!hasPermission(user, permission)) {
-    return <Navigate to={getFirstAvailablePath(user)} replace />;
+    return redirectOrDeny(user, location.pathname);
   }
   return children;
 };
@@ -236,43 +272,41 @@ function App() {
 
             <Route path="/drivers" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['admin']}>
-                  <PermissionBasedRoute permission="drivers">
-                    <Layout>
-                      <Drivers />
-                    </Layout>
-                  </PermissionBasedRoute>
-                </RoleBasedRoute>
+                <PermissionBasedRoute permission="drivers">
+                  <Layout>
+                    <Drivers />
+                  </Layout>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 
             <Route path="/fleet" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['admin']}>
-                  <PermissionBasedRoute permission="fleet">
-                    <Layout>
-                      <FleetManagement />
-                    </Layout>
-                  </PermissionBasedRoute>
-                </RoleBasedRoute>
+                <PermissionBasedRoute permission="fleet">
+                  <Layout>
+                    <FleetManagement />
+                  </Layout>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 
             <Route path="/drivers/create" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['admin']}>
+                <PermissionBasedRoute permission="drivers">
                   <Layout>
                     <CreateDriver />
                   </Layout>
-                </RoleBasedRoute>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
             
             <Route path="/drivers/:id" element={
               <ProtectedRoute>
-                <Layout>
-                  <DriverDetail />
-                </Layout>
+                <PermissionBasedRoute permission="drivers">
+                  <Layout>
+                    <DriverDetail />
+                  </Layout>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
             <Route path="/driver-mobile" element={
@@ -300,24 +334,20 @@ function App() {
             
             <Route path="/users" element={
   <ProtectedRoute>
-    <RoleBasedRoute allowedRoles={['super_admin', 'admin']}>
-      <PermissionBasedRoute permission="users">
-        <Layout>
-          <Users />
-        </Layout>
-      </PermissionBasedRoute>
-    </RoleBasedRoute>
+    <PermissionBasedRoute permission="users">
+      <Layout>
+        <Users />
+      </Layout>
+    </PermissionBasedRoute>
   </ProtectedRoute>
 } />
             <Route path="/employees" element={
   <ProtectedRoute>
-    <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
-      <PermissionBasedRoute permission="employees">
-        <Layout>
-          <Employees />
-        </Layout>
-      </PermissionBasedRoute>
-    </RoleBasedRoute>
+    <PermissionBasedRoute permission="employees">
+      <Layout>
+        <Employees />
+      </Layout>
+    </PermissionBasedRoute>
   </ProtectedRoute>
 } />
             <Route path="/deliveries" element={
@@ -342,13 +372,11 @@ function App() {
 
             <Route path="/events" element={
               <ProtectedRoute allowDispatchers allowYellowblock>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'dispatcher', 'yellowblock_user']}>
-                  <PermissionBasedRoute permission="events">
-                    <Layout>
-                      <Events />
-                    </Layout>
-                  </PermissionBasedRoute>
-                </RoleBasedRoute>
+                <PermissionBasedRoute permission="events">
+                  <Layout>
+                    <Events />
+                  </Layout>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 
@@ -362,13 +390,11 @@ function App() {
 
             <Route path="/complaints" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'dispatcher']}>
-                  <PermissionBasedRoute permission="complaints">
-                    <Layout>
-                      <Complaints />
-                    </Layout>
-                  </PermissionBasedRoute>
-                </RoleBasedRoute>
+                <PermissionBasedRoute permission="complaints">
+                  <Layout>
+                    <Complaints />
+                  </Layout>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 
@@ -425,82 +451,76 @@ function App() {
             } />
             <Route path="/subscription" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
+                <PermissionBasedRoute permission="subscription">
                   <Layout>
                     <Subscription />
                   </Layout>
-                </RoleBasedRoute>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
             <Route path="/website-subscriptions" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
+                <PermissionBasedRoute permission="website_subscriptions">
                   <Layout>
                     <WebsiteSubscription />
                   </Layout>
-                </RoleBasedRoute>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
             <Route path="/website-subscriptions/:id" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
+                <PermissionBasedRoute permission="website_subscriptions">
                   <Layout>
                     <WebsiteSubscription />
                   </Layout>
-                </RoleBasedRoute>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
             <Route path="/customer-analytics" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
+                <PermissionBasedRoute permission="customer_analytics">
                   <Layout>
                     <CustomerAnalytics />
                   </Layout>
-                </RoleBasedRoute>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
             <Route path="/renewal" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager']}>
+                <PermissionBasedRoute permission="renewal">
                   <Layout>
                     <Renewal />
                   </Layout>
-                </RoleBasedRoute>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
              <Route path="/delivery-changes" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin']}>
-                  <PermissionBasedRoute permission="delivery_changes">
-                    <Layout>
-                      <DeliveryChanges />
-                    </Layout>
-                  </PermissionBasedRoute>
-                </RoleBasedRoute>
+                <PermissionBasedRoute permission="delivery_changes">
+                  <Layout>
+                    <DeliveryChanges />
+                  </Layout>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 
             <Route path="/delivery-changes/add" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin']}>
-                  <PermissionBasedRoute permission="delivery_changes">
-                    <Layout>
-                      <AddDeliveryChange />
-                    </Layout>
-                  </PermissionBasedRoute>
-                </RoleBasedRoute>
+                <PermissionBasedRoute permission="delivery_changes">
+                  <Layout>
+                    <AddDeliveryChange />
+                  </Layout>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 
             <Route path="/menus" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin']}>
-                  <PermissionBasedRoute permission="menus">
-                    <Layout>
-                      <MenuManagement />
-                    </Layout>
-                  </PermissionBasedRoute>
-                </RoleBasedRoute>
+                <PermissionBasedRoute permission="menus">
+                  <Layout>
+                    <MenuManagement />
+                  </Layout>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 
@@ -510,11 +530,11 @@ function App() {
 
             <Route path="/matter-core" element={
               <ProtectedRoute>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin']}>
+                <PermissionBasedRoute permission="matter_core">
                   <Layout>
                     <MatterCore />
                   </Layout>
-                </RoleBasedRoute>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 
@@ -524,21 +544,21 @@ function App() {
 
             <Route path="/admin/partners" element={
               <ProtectedRoute allowKitchen>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'kitchen']}>
+                <PermissionBasedRoute permission="partners">
                   <Layout>
                     <AdminPartners />
                   </Layout>
-                </RoleBasedRoute>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 
             <Route path="/kitchen-list" element={
               <ProtectedRoute allowKitchen>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'kitchen']}>
+                <PermissionBasedRoute permission="kitchen_list">
                   <Layout>
                     <KitchenList />
                   </Layout>
-                </RoleBasedRoute>
+                </PermissionBasedRoute>
               </ProtectedRoute>
             } />
 

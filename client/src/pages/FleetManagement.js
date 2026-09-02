@@ -168,9 +168,214 @@ function VehicleFormModal({ initial, drivers, onClose, onSaved }) {
   );
 }
 
+const fmtMoney = (n, currency = 'AED') =>
+  `${currency} ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+
+const todayInput = () => new Date().toISOString().slice(0, 10);
+
+function FuelLogModal({ vehicle, onClose, onChange }) {
+  const [logs, setLogs] = useState([]);
+  const [summary, setSummary] = useState({ count: 0, totalAmount: 0, totalLiters: 0, thisMonthAmount: 0, currency: 'AED' });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [form, setForm] = useState({ date: todayInput(), amount: '', liters: '', odometer: '', station: '', notes: '' });
+  const [submitting, setSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await api.get(`/vehicles/${vehicle._id}/fuel-logs`);
+      setLogs(res.data?.data || []);
+      setSummary(res.data?.summary || { count: 0, totalAmount: 0, totalLiters: 0, thisMonthAmount: 0, currency: 'AED' });
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to load fuel logs.');
+    } finally {
+      setLoading(false);
+    }
+  }, [vehicle._id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    if (!(Number(form.amount) > 0)) {
+      setError('Enter a petrol amount greater than 0.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await api.post(`/vehicles/${vehicle._id}/fuel-logs`, {
+        date: form.date || undefined,
+        amount: Number(form.amount),
+        liters: form.liters === '' ? null : Number(form.liters),
+        odometer: form.odometer === '' ? null : Number(form.odometer),
+        station: form.station.trim() || undefined,
+        notes: form.notes.trim() || undefined,
+      });
+      setForm({ date: todayInput(), amount: '', liters: '', odometer: '', station: '', notes: '' });
+      await load();
+      onChange?.();
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to log petrol expense.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDelete = async (logId) => {
+    setDeletingId(logId);
+    try {
+      await api.delete(`/vehicles/${vehicle._id}/fuel-logs/${logId}`);
+      await load();
+      onChange?.();
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to delete entry.');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 p-4">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <div>
+            <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+              <span className="material-symbols-outlined text-[20px] text-blue-600">local_gas_station</span>
+              Petrol Expenses
+            </h3>
+            <p className="text-xs text-gray-500 mt-0.5 font-mono">{vehicle.vehicleId} · {vehicle.plateNumber}</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <span className="material-symbols-outlined">close</span>
+          </button>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {error && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>
+          )}
+
+          {/* Summary */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">This Month</p>
+              <p className="text-lg font-bold text-gray-900">{fmtMoney(summary.thisMonthAmount, summary.currency)}</p>
+            </div>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Total Spent</p>
+              <p className="text-lg font-bold text-gray-900">{fmtMoney(summary.totalAmount, summary.currency)}</p>
+            </div>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+              <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide">Entries</p>
+              <p className="text-lg font-bold text-gray-900">
+                {summary.count}
+                {summary.totalLiters > 0 && <span className="text-xs font-medium text-gray-500"> · {summary.totalLiters} L</span>}
+              </p>
+            </div>
+          </div>
+
+          {/* Add form */}
+          <form onSubmit={handleSubmit} className="border border-gray-200 rounded-lg p-4 space-y-3">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Log a fill-up</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div>
+                <label className={fieldLabelCls}>Date</label>
+                <input type="date" name="date" value={form.date} onChange={handleChange} className={inputCls} />
+              </div>
+              <div>
+                <label className={fieldLabelCls}>Amount (AED) *</label>
+                <input type="number" name="amount" min="0" step="0.01" value={form.amount} onChange={handleChange} placeholder="120" className={inputCls} required />
+              </div>
+              <div>
+                <label className={fieldLabelCls}>Liters</label>
+                <input type="number" name="liters" min="0" step="0.01" value={form.liters} onChange={handleChange} placeholder="optional" className={inputCls} />
+              </div>
+              <div>
+                <label className={fieldLabelCls}>Odometer (km)</label>
+                <input type="number" name="odometer" min="0" value={form.odometer} onChange={handleChange} placeholder="optional" className={inputCls} />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className={fieldLabelCls}>Station</label>
+                <input type="text" name="station" value={form.station} onChange={handleChange} placeholder="ADNOC, ENOC…" className={inputCls} />
+              </div>
+              <div>
+                <label className={fieldLabelCls}>Notes</label>
+                <input type="text" name="notes" value={form.notes} onChange={handleChange} placeholder="Optional" className={inputCls} />
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <button type="submit" disabled={submitting} className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-semibold hover:opacity-90 transition-opacity disabled:opacity-50">
+                {submitting ? 'Saving…' : 'Add Expense'}
+              </button>
+            </div>
+          </form>
+
+          {/* History */}
+          <div>
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">History</p>
+            {loading ? (
+              <div className="text-center py-6 text-gray-400 text-sm">
+                <span className="material-symbols-outlined animate-spin align-middle mr-2">progress_activity</span>
+                Loading…
+              </div>
+            ) : logs.length === 0 ? (
+              <div className="text-center py-6 text-gray-400 text-sm">No petrol expenses logged yet.</div>
+            ) : (
+              <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
+                {logs.map((l) => (
+                  <div key={l._id} className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm group">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-gray-900">{fmtMoney(l.amount, l.currency)}</span>
+                        {l.liters ? <span className="text-xs text-gray-500">{l.liters} L</span> : null}
+                        {l.station ? <span className="text-xs text-gray-500">· {l.station}</span> : null}
+                      </div>
+                      <div className="text-xs text-gray-400 truncate">
+                        {new Date(l.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
+                        {l.odometer ? ` · ${Number(l.odometer).toLocaleString()} km` : ''}
+                        {l.createdBy?.profile ? ` · ${l.createdBy.profile.firstName || ''} ${l.createdBy.profile.lastName || ''}`.trimEnd() : ''}
+                        {l.notes ? ` · ${l.notes}` : ''}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleDelete(l._id)}
+                      disabled={deletingId === l._id}
+                      title="Delete entry"
+                      className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-50"
+                    >
+                      <span className="material-symbols-outlined text-[18px]">delete</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end">
+            <button onClick={onClose} className="px-4 py-2 text-gray-700 text-sm font-medium hover:text-gray-900 transition-colors">
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const FleetManagement = () => {
   const [vehicles, setVehicles] = useState([]);
-  const [stats, setStats] = useState({ totalVehicles: 0, inService: 0, maintenanceRequired: 0, avgFuelLevel: 0 });
+  const [stats, setStats] = useState({ totalVehicles: 0, inService: 0, maintenanceRequired: 0, avgFuelLevel: 0, fuelSpend30d: 0 });
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0, limit: 10 });
   const [drivers, setDrivers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -183,6 +388,7 @@ const FleetManagement = () => {
 
   const [formModal, setFormModal] = useState(null); // { } for add, vehicle object for edit
   const [deletingVehicle, setDeletingVehicle] = useState(null);
+  const [fuelModalVehicle, setFuelModalVehicle] = useState(null);
 
   useEffect(() => {
     api.get('/drivers').then((res) => {
@@ -199,7 +405,7 @@ const FleetManagement = () => {
         params: { search: search.trim() || undefined, status: statusFilter, type: typeFilter, page, limit: 10 },
       });
       setVehicles(res.data?.data || []);
-      setStats(res.data?.stats || { totalVehicles: 0, inService: 0, maintenanceRequired: 0, avgFuelLevel: 0 });
+      setStats(res.data?.stats || { totalVehicles: 0, inService: 0, maintenanceRequired: 0, avgFuelLevel: 0, fuelSpend30d: 0 });
       setPagination(res.data?.pagination || { page: 1, pages: 1, total: 0, limit: 10 });
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to load vehicles.');
@@ -252,7 +458,7 @@ const FleetManagement = () => {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <KpiCard icon="directions_car" label="Total Vehicles" value={stats.totalVehicles} />
         <KpiCard icon="check_circle" label="In Service" value={stats.inService} />
         <KpiCard
@@ -263,6 +469,7 @@ const FleetManagement = () => {
           subCls="px-2 py-0.5 rounded bg-amber-50 text-amber-600"
         />
         <KpiCard icon="local_gas_station" label="Avg Fuel Level" value={`${stats.avgFuelLevel}%`} />
+        <KpiCard icon="payments" label="Petrol Spend (30d)" value={fmtMoney(stats.fuelSpend30d)} />
       </div>
 
       {/* Search + Filters */}
@@ -352,6 +559,9 @@ const FleetManagement = () => {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onClick={() => setFuelModalVehicle(v)} title="Log Petrol Expense" className="p-1.5 text-gray-500 hover:text-emerald-600 hover:bg-emerald-50 rounded transition-colors">
+                          <span className="material-symbols-outlined text-[18px]">local_gas_station</span>
+                        </button>
                         <button onClick={() => setFormModal(v)} title="Edit Vehicle" className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors">
                           <span className="material-symbols-outlined text-[18px]">edit</span>
                         </button>
@@ -395,6 +605,14 @@ const FleetManagement = () => {
           drivers={drivers}
           onClose={() => setFormModal(null)}
           onSaved={() => { setFormModal(null); fetchVehicles(); }}
+        />
+      )}
+
+      {fuelModalVehicle && (
+        <FuelLogModal
+          vehicle={fuelModalVehicle}
+          onClose={() => setFuelModalVehicle(null)}
+          onChange={fetchVehicles}
         />
       )}
 

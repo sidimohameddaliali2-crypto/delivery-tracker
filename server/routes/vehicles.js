@@ -1,10 +1,12 @@
 import express from 'express';
 import Vehicle from '../models/Vehicle.js';
+import FuelLog from '../models/FuelLog.js';
 import { protect, admin } from '../middleware/auth.js';
 
 const router = express.Router();
 
 const DRIVER_SELECT = 'profile.firstName profile.lastName profile.phone';
+const CREATOR_SELECT = 'profile.firstName profile.lastName';
 
 /**
  * GET /api/vehicles
@@ -24,7 +26,8 @@ router.get('/', protect, async (req, res) => {
       query.$or = [{ vehicleId: regex }, { plateNumber: regex }];
     }
 
-    const [vehicles, total, allVehicles] = await Promise.all([
+    const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const [vehicles, total, allVehicles, fuelSpendAgg] = await Promise.all([
       Vehicle.find(query)
         .populate('assignedDriver', DRIVER_SELECT)
         .sort({ createdAt: -1 })
@@ -32,7 +35,11 @@ router.get('/', protect, async (req, res) => {
         .limit(Number(limit))
         .lean(),
       Vehicle.countDocuments(query),
-      Vehicle.find({}).select('status fuelLevel').lean()
+      Vehicle.find({}).select('status fuelLevel').lean(),
+      FuelLog.aggregate([
+        { $match: { date: { $gte: since30d } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ])
     ]);
 
     const totalVehicles = allVehicles.length;
@@ -41,11 +48,12 @@ router.get('/', protect, async (req, res) => {
     const avgFuelLevel = totalVehicles > 0
       ? Math.round(allVehicles.reduce((sum, v) => sum + (v.fuelLevel ?? 0), 0) / totalVehicles)
       : 0;
+    const fuelSpend30d = Math.round((fuelSpendAgg[0]?.total || 0) * 100) / 100;
 
     res.json({
       success: true,
       data: vehicles,
-      stats: { totalVehicles, inService, maintenanceRequired, avgFuelLevel },
+      stats: { totalVehicles, inService, maintenanceRequired, avgFuelLevel, fuelSpend30d },
       pagination: {
         page: Number(page),
         limit: Number(limit),
@@ -139,10 +147,105 @@ router.delete('/:id', protect, admin, async (req, res) => {
     if (!vehicle) {
       return res.status(404).json({ success: false, message: 'Vehicle not found' });
     }
+    // Clean up this vehicle's fuel history too.
+    await FuelLog.deleteMany({ vehicle: req.params.id });
     res.json({ success: true, message: 'Vehicle removed' });
   } catch (error) {
     console.error('Delete vehicle error:', error);
     res.status(500).json({ success: false, message: error.message || 'Failed to delete vehicle' });
+  }
+});
+
+/**
+ * GET /api/vehicles/:id/fuel-logs
+ * Petrol expense history for one vehicle, newest first, plus a spend summary.
+ */
+router.get('/:id/fuel-logs', protect, async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findById(req.params.id).select('_id vehicleId').lean();
+    if (!vehicle) {
+      return res.status(404).json({ success: false, message: 'Vehicle not found' });
+    }
+
+    const logs = await FuelLog.find({ vehicle: req.params.id })
+      .populate('createdBy', CREATOR_SELECT)
+      .sort({ date: -1, createdAt: -1 })
+      .lean();
+
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const round2 = (n) => Math.round(n * 100) / 100;
+    const summary = {
+      count: logs.length,
+      totalAmount: round2(logs.reduce((s, l) => s + (l.amount || 0), 0)),
+      totalLiters: round2(logs.reduce((s, l) => s + (l.liters || 0), 0)),
+      thisMonthAmount: round2(
+        logs
+          .filter((l) => new Date(l.date) >= startOfMonth)
+          .reduce((s, l) => s + (l.amount || 0), 0)
+      ),
+      currency: logs[0]?.currency || 'AED'
+    };
+
+    res.json({ success: true, data: logs, summary });
+  } catch (error) {
+    console.error('Get fuel logs error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to fetch fuel logs' });
+  }
+});
+
+/**
+ * POST /api/vehicles/:id/fuel-logs
+ * Record a petrol expense for a vehicle.
+ */
+router.post('/:id/fuel-logs', protect, async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findById(req.params.id).select('_id').lean();
+    if (!vehicle) {
+      return res.status(404).json({ success: false, message: 'Vehicle not found' });
+    }
+
+    const { amount, date, currency, liters, odometer, station, notes } = req.body;
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({ success: false, message: 'A positive amount is required' });
+    }
+
+    const log = await FuelLog.create({
+      vehicle: req.params.id,
+      amount: numericAmount,
+      date: date ? new Date(date) : new Date(),
+      currency: currency || 'AED',
+      liters: liters === '' || liters == null ? null : Number(liters),
+      odometer: odometer === '' || odometer == null ? null : Number(odometer),
+      station: station || undefined,
+      notes: notes || undefined,
+      createdBy: req.user?._id || null
+    });
+
+    const populated = await log.populate('createdBy', CREATOR_SELECT);
+    res.status(201).json({ success: true, data: populated });
+  } catch (error) {
+    console.error('Create fuel log error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to log fuel expense' });
+  }
+});
+
+/**
+ * DELETE /api/vehicles/:id/fuel-logs/:logId
+ */
+router.delete('/:id/fuel-logs/:logId', protect, admin, async (req, res) => {
+  try {
+    const deleted = await FuelLog.findOneAndDelete({ _id: req.params.logId, vehicle: req.params.id });
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: 'Fuel log not found' });
+    }
+    res.json({ success: true, message: 'Fuel log removed' });
+  } catch (error) {
+    console.error('Delete fuel log error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to delete fuel log' });
   }
 });
 

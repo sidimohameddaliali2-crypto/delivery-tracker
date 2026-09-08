@@ -15,7 +15,8 @@ import {
   LogOut,
   Printer,
   CalendarDays,
-  Briefcase
+  Briefcase,
+  Route
 } from 'lucide-react';
 import { fetchEvents } from '../store/slices/eventSlice';
 import { setSelectedEvent } from '../store/slices/eventSlice';
@@ -24,6 +25,7 @@ import EventDetailModal from '../components/events/EventDetailModal';
 import api from '../utils/api';
 import DispatcherMapAssignModal from '../components/DispatcherMapAssignModal';
 import RouteOptimizationModal from '../components/RouteOptimizationModal';
+import DriverRouteMap2GIS from '../components/DriverRouteMap2GIS';
 import { fetchDeliveries } from '../store/slices/deliverySlice';
 import { fetchDrivers } from '../store/slices/driverSlice';
 import { logout } from '../store/slices/authSlice';
@@ -69,6 +71,7 @@ const DispatcherDesktop = () => {
   const [selectedDeliveryIds, setSelectedDeliveryIds] = useState([]);
   const [assigningDriverId, setAssigningDriverId] = useState(null);
   const [activeAssignmentDeliveries, setActiveAssignmentDeliveries] = useState([]);
+  const [unassigning, setUnassigning] = useState(false);
   const [feedback, setFeedback] = useState({ message: '', error: false });
   const [areaDropdownOpen, setAreaDropdownOpen] = useState(false);
   const [driverFilterDropdownOpen, setDriverFilterDropdownOpen] = useState(false);
@@ -78,6 +81,12 @@ const DispatcherDesktop = () => {
   const [printMode, setPrintMode] = useState(false);
   const [mapModalOpen, setMapModalOpen] = useState(false);
   const [routeModalOpen, setRouteModalOpen] = useState(false);
+  // 'selection' = the checkbox-selected deliveries (Selection Bar's own
+  // "Optimize Routes" button); 'all' = every currently-filtered delivery for
+  // the day (opened from within Driver Routes, which has no checkbox
+  // selection of its own to draw from).
+  const [routeModalSource, setRouteModalSource] = useState('selection');
+  const [driverMapOpen, setDriverMapOpen] = useState(false);
   const [printDriverFilter, setPrintDriverFilter] = useState(null);
   const [selectedDeliveryDetail, setSelectedDeliveryDetail] = useState(null);
   const [selectedDate, setSelectedDate] = useState(() => getTomorrowDate());
@@ -368,6 +377,40 @@ const DispatcherDesktop = () => {
       });
     } finally {
       setAssigningDriverId(null);
+    }
+  };
+
+  const handleUnassignDriver = async (deliveriesToUnassign) => {
+    const targets = (deliveriesToUnassign || []).filter((d) => d.driver);
+    if (!targets.length || unassigning) return;
+    if (!window.confirm(
+      targets.length === 1
+        ? 'Unassign the driver from this delivery?'
+        : `Unassign the driver from ${targets.length} deliveries?`
+    )) return;
+
+    setUnassigning(true);
+    try {
+      const { data } = await api.patch('/deliveries/unassign-driver', {
+        deliveryIds: targets.map((delivery) => delivery._id)
+      });
+      setFeedback({
+        message: data?.message || 'Driver unassigned',
+        error: false
+      });
+      refreshDeliveriesForSelectedDate();
+      setSelectedDeliveryIds([]);
+      setSelectedDeliveryDetail(null);
+    } catch (error) {
+      setFeedback({
+        message:
+          error.response?.data?.message ||
+          error.message ||
+          'Unable to unassign this delivery. Please retry.',
+        error: true
+      });
+    } finally {
+      setUnassigning(false);
     }
   };
 
@@ -785,6 +828,14 @@ const DispatcherDesktop = () => {
             <MapPin className="w-4 h-4" />
             Map
           </button>
+          <button
+            onClick={() => setDriverMapOpen(true)}
+            className="w-full sm:w-auto px-4 py-2 rounded-lg font-semibold text-sm bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+            title="See each driver's assigned deliveries and route on a 2GIS map"
+          >
+            <Route className="w-4 h-4" />
+            Driver Routes
+          </button>
         </div>
 
         {/* Selection Bar */}
@@ -799,7 +850,14 @@ const DispatcherDesktop = () => {
                 Assign to Driver
               </button>
               <button
-                onClick={() => setRouteModalOpen(true)}
+                onClick={() => handleUnassignDriver(selectedDeliveries)}
+                disabled={unassigning || !selectedDeliveries.some((d) => d.driver)}
+                className="px-4 py-2 bg-white border border-red-300 text-red-600 rounded-lg font-semibold hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Unassign
+              </button>
+              <button
+                onClick={() => { setRouteModalSource('selection'); setRouteModalOpen(true); }}
                 className="px-4 py-2 bg-white border border-blue-300 text-blue-700 rounded-lg font-semibold hover:bg-blue-50"
               >
                 Optimize Routes
@@ -920,6 +978,15 @@ const DispatcherDesktop = () => {
                     >
                       Assign
                     </button>
+                    {delivery.driver && (
+                      <button
+                        onClick={() => handleUnassignDriver([delivery])}
+                        disabled={unassigning}
+                        className="text-red-600 hover:text-red-800 font-semibold text-xs px-2 py-1 rounded hover:bg-red-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Unassign
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))
@@ -1363,6 +1430,15 @@ const DispatcherDesktop = () => {
               >
                 Close
               </button>
+              {selectedDeliveryDetail.driver && (
+                <button
+                  onClick={() => handleUnassignDriver([selectedDeliveryDetail])}
+                  disabled={unassigning}
+                  className="flex-1 px-4 py-2 text-sm font-semibold text-red-600 border border-red-300 rounded-lg hover:bg-red-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Unassign
+                </button>
+              )}
               <button
                 onClick={() => {
                   setActiveAssignmentDeliveries([selectedDeliveryDetail]);
@@ -1516,12 +1592,26 @@ const DispatcherDesktop = () => {
       <RouteOptimizationModal
         open={routeModalOpen}
         onClose={() => setRouteModalOpen(false)}
-        deliveries={selectedDeliveries}
+        deliveries={routeModalSource === 'all' ? filteredDeliveries : selectedDeliveries}
         drivers={drivers}
         onApplied={() => {
           setFeedback({ message: 'Routes applied', error: false });
           refreshDeliveriesForSelectedDate();
           setSelectedDeliveryIds([]);
+        }}
+      />
+
+      {/* Driver Routes map (2GIS) */}
+      <DriverRouteMap2GIS
+        open={driverMapOpen}
+        onClose={() => setDriverMapOpen(false)}
+        deliveries={filteredDeliveries}
+        drivers={drivers}
+        date={selectedDate}
+        onOptimizeRoutes={() => {
+          setDriverMapOpen(false);
+          setRouteModalSource('all');
+          setRouteModalOpen(true);
         }}
       />
 

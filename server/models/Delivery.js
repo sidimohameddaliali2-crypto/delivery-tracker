@@ -34,6 +34,13 @@ const deliverySchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  // Set on a bike's second-trip deliveries: the van↔bike meeting where the
+  // bike collects them. Null for everything else.
+  handoff: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Handoff',
+    default: null
+  },
   company: {
     type: String,
     required: true,
@@ -59,7 +66,18 @@ const deliverySchema = new mongoose.Schema({
     street: String,
     building: String,
     floor: String,
-    apartment: String
+    apartment: String,
+    // Category of the delivery location, settable from the bulk import sheet
+    // (a "Location Type" column, or a batch-wide default) and from manual entry.
+    locationType: {
+      type: String,
+      // Must explicitly include null — its own default value — or Mongoose's
+      // enum validator rejects it on full-document validation (re-saving ANY
+      // existing delivery that still has the default, which is ~all of them,
+      // e.g. via the manual pin-correction endpoint's delivery.save()).
+      enum: ['Villa', 'Apartment', null],
+      default: null
+    }
   },
   notes: String,
   zone: {

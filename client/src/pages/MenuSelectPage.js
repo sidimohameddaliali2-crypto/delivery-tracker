@@ -1,6 +1,8 @@
 import React from 'react';
 import { useParams } from 'react-router-dom';
 import MenuSelection from '../components/MenuSelection';
+import MenuSelectionLink from '../components/menuSelectionLink/MenuSelectionLink';
+import { isTestMenuToken } from '../components/menuSelectionLink/config';
 
 const MenuSelectPage = () => {
   const { token } = useParams();
@@ -16,6 +18,12 @@ const MenuSelectPage = () => {
         </div>
       </div>
     );
+  }
+
+  // Only the configured test menu(s) get the redesigned flow; every other
+  // menu-selection link keeps the current UI.
+  if (isTestMenuToken(token)) {
+    return <MenuSelectionLink token={token} />;
   }
 
   return <MenuSelection token={token} />;

@@ -33,6 +33,7 @@ import TestAPI from './pages/TestAPI';
 import MenuManagement from './pages/MenuManagement';
 import KitchenList from './pages/KitchenList';
 import MenuSelectPage from './pages/MenuSelectPage';
+import MenuSelectionLinkPage from './pages/MenuSelectionLinkPage';
 import MatterCore from './pages/MatterCore';
 import MatterCorePdfPage from './pages/MatterCorePdfPage';
 import PrivacyPolicy from './pages/PrivacyPolicy';
@@ -526,6 +527,13 @@ function App() {
 
             <Route path="/menu-select/:token" element={
               <MenuSelectPage />
+            } />
+
+            {/* Standalone design preview (demo data only). The real redesigned
+                flow is served from /menu-select/:token itself, and only for the
+                configured test menu — see components/menuSelectionLink/config.js. */}
+            <Route path="/menu-select-v2" element={
+              <MenuSelectionLinkPage />
             } />
 
             <Route path="/matter-core" element={

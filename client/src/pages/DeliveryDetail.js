@@ -722,6 +722,9 @@ const DeliveryDetail = () => {
                     )}
                     {currentDelivery.addressDetails && (
                       <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                        {currentDelivery.addressDetails.locationType && (
+                          <><dt className="text-gray-500">Type</dt><dd className="text-gray-800">{currentDelivery.addressDetails.locationType}</dd></>
+                        )}
                         {currentDelivery.addressDetails.city && (
                           <><dt className="text-gray-500">City</dt><dd className="text-gray-800">{currentDelivery.addressDetails.city}</dd></>
                         )}
@@ -843,6 +846,9 @@ const DeliveryDetail = () => {
                   )}
                   {currentDelivery.addressDetails && (
                     <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs mt-1 mb-1">
+                      {currentDelivery.addressDetails.locationType && (
+                        <><dt className="text-gray-500">Type</dt><dd className="text-gray-700">{currentDelivery.addressDetails.locationType}</dd></>
+                      )}
                       {currentDelivery.addressDetails.city && (
                         <><dt className="text-gray-500">City</dt><dd className="text-gray-700">{currentDelivery.addressDetails.city}</dd></>
                       )}

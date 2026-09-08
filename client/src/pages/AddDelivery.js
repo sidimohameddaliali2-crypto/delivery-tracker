@@ -312,6 +312,8 @@ const AddDelivery = () => {
     inProgress: false
   });
   const [pastedData, setPastedData] = useState('');
+  // Applied to any imported row that doesn't specify its own "Location Type" column.
+  const [bulkLocationType, setBulkLocationType] = useState('');
   const { user } = useSelector(state => state.auth);
 
   const [formData, setFormData] = useState({
@@ -640,6 +642,16 @@ const AddDelivery = () => {
     };
   };
 
+  // Maps free-text "Location Type" cell values to the two categories the
+  // backend accepts. Unrecognized/blank values fall through to the batch-wide
+  // default selected above the upload area.
+  const normalizeLocationTypeValue = (value) => {
+    const cleaned = String(value || '').trim().toLowerCase();
+    if (['villa', 'house', 'townhouse', 'v'].includes(cleaned)) return 'Villa';
+    if (['apartment', 'apt', 'flat', 'a'].includes(cleaned)) return 'Apartment';
+    return '';
+  };
+
   const processImportedData = data => {
     const headers = data[0].map(h => h?.toString().trim().toLowerCase() || '');
     const rows = data.slice(1);
@@ -659,7 +671,11 @@ const AddDelivery = () => {
       gps: 'gpsLink',
       company: 'company',
       notes: 'notes',
-      type: 'type'
+      type: 'type',
+      'location type': 'locationType',
+      'property type': 'locationType',
+      'villa/apartment': 'locationType',
+      'villa or apartment': 'locationType'
     };
 
     const requiredHeaderGroups = [
@@ -799,6 +815,8 @@ const AddDelivery = () => {
       if (rowData.address) rowData.address = rowData.address.trim();
       if (rowData.customerName) rowData.customerName = rowData.customerName.trim();
       if (rowData.zone) rowData.zone = rowData.zone.trim();
+      // Blank/unrecognized cell -> '' so the batch-wide default applies at submit time.
+      rowData.locationType = normalizeLocationTypeValue(rowData.locationType);
 
       if (rowErrors.length === 0) {
         processedData.push({
@@ -852,8 +870,12 @@ const AddDelivery = () => {
             status: 'pending'
           };
 
-          if (delivery.addressDetails) {
-            payload.addressDetails = delivery.addressDetails;
+          const resolvedLocationType = delivery.locationType || bulkLocationType || '';
+          if (delivery.addressDetails || resolvedLocationType) {
+            payload.addressDetails = {
+              ...(delivery.addressDetails || {}),
+              ...(resolvedLocationType ? { locationType: resolvedLocationType } : {})
+            };
           }
 
           if (delivery.driver) {
@@ -971,10 +993,10 @@ const AddDelivery = () => {
     const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
     const templateData = [
-      ['Customer ID', 'Name', 'Delivery Time and Date', 'Location', 'Area', 'Driver', 'GPS', 'Company'],
-      ['CUST001', 'John Doe', `${today} 09:00`, '123 Main St, New York, NY', 'Midtown', 'John Smith', 'https://maps.google.com/?q=40.758,-73.9855', 'Matter'],
-      ['CUST002', 'Jane Smith', `${today} 14:30`, '456 Oak Ave, Chicago, IL', 'North Side', 'Sarah Johnson', '41.8818,-87.6231', 'Yellow Block'],
-      ['CUST003', 'Bob Wilson', `${tomorrow} 10:00`, '789 Pine Rd, Los Angeles, CA', 'Westwood', 'Mike Brown', '', 'CookIt'],
+      ['Customer ID', 'Name', 'Delivery Time and Date', 'Location', 'Area', 'Driver', 'GPS', 'Company', 'Location Type'],
+      ['CUST001', 'John Doe', `${today} 09:00`, '123 Main St, New York, NY', 'Midtown', 'John Smith', 'https://maps.google.com/?q=40.758,-73.9855', 'Matter', 'Apartment'],
+      ['CUST002', 'Jane Smith', `${today} 14:30`, '456 Oak Ave, Chicago, IL', 'North Side', 'Sarah Johnson', '41.8818,-87.6231', 'Yellow Block', 'Villa'],
+      ['CUST003', 'Bob Wilson', `${tomorrow} 10:00`, '789 Pine Rd, Los Angeles, CA', 'Westwood', 'Mike Brown', '', 'CookIt', ''],
       [
         'Required',
         'Required',
@@ -983,7 +1005,8 @@ const AddDelivery = () => {
         'Optional zone/area name',
         'Use exact driver names',
         'Optional map link or lat,lng',
-        'Optional - defaults to Matter'
+        'Optional - defaults to Matter',
+        'Optional - Villa or Apartment'
       ]
     ];
 
@@ -999,7 +1022,8 @@ const AddDelivery = () => {
       { width: 18 },
       { width: 20 },
       { width: 36 },
-      { width: 18 }
+      { width: 18 },
+      { width: 16 }
     ];
 
     const range = XLSX.utils.decode_range(ws['!ref']);
@@ -1330,6 +1354,9 @@ const AddDelivery = () => {
                   <p className="text-sm text-blue-700 mt-1">
                     Customer ID, Name, Delivery Time and Date, Location, Area, Driver, GPS, Company
                   </p>
+                  <p className="text-sm text-blue-700 mt-1">
+                    Optional: add a "Location Type" column (Villa or Apartment) to set it per row.
+                  </p>
                 </div>
                 <button
                   onClick={downloadTemplate}
@@ -1339,6 +1366,27 @@ const AddDelivery = () => {
                   Download Template
                 </button>
               </div>
+            </div>
+
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4 flex items-center justify-between gap-4 flex-wrap">
+              <div>
+                <label htmlFor="bulk-location-type" className="text-sm font-semibold text-gray-900">
+                  Location Type
+                </label>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Applied to every row in this file. Add a "Location Type" column in the sheet to set it per row instead.
+                </p>
+              </div>
+              <select
+                id="bulk-location-type"
+                value={bulkLocationType}
+                onChange={e => setBulkLocationType(e.target.value)}
+                className="px-3 py-2 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Not set</option>
+                <option value="Villa">Villa</option>
+                <option value="Apartment">Apartment</option>
+              </select>
             </div>
           </div>
 
@@ -1448,6 +1496,9 @@ const AddDelivery = () => {
                           Location
                         </th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                          Location Type
+                        </th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
                           Area
                         </th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
@@ -1469,6 +1520,11 @@ const AddDelivery = () => {
                             {new Date(row.scheduledTime).toLocaleString()}
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-900">{row.address}</td>
+                          <td className="px-4 py-3 text-sm text-gray-900">
+                            {row.locationType || bulkLocationType || (
+                              <span className="text-gray-400">—</span>
+                            )}
+                          </td>
                           <td className="px-4 py-3 text-sm text-gray-900">{row.zone || '—'}</td>
                           <td className="px-4 py-3 text-sm text-gray-900">{row.driverName || '—'}</td>
                           <td className="px-4 py-3 text-sm text-gray-900">{row.company}</td>

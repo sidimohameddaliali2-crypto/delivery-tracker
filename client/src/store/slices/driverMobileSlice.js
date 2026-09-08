@@ -92,7 +92,11 @@ export const fetchDriverDeliveries = createAsyncThunk(
       }));
       
       console.log('✅ Processed deliveries:', processedDeliveries.length);
-      return processedDeliveries;
+      // Only the /driver/today endpoint knows about handoffs; the date-range
+      // fallback doesn't, so this is simply empty on that path.
+      const handoffs = Array.isArray(response.data?.data?.handoffs) ? response.data.data.handoffs : [];
+
+      return { deliveries: processedDeliveries, handoffs };
     } catch (error) {
       console.error('❌ Error fetching driver deliveries:', error);
       return rejectWithValue(error.response?.data || { message: 'Failed to fetch deliveries' });
@@ -129,6 +133,8 @@ const driverMobileSlice = createSlice({
   name: 'driverMobile',
   initialState: {
     deliveries: [],
+    // Van↔bike meetings this driver is part of today (from /deliveries/driver/today).
+    handoffs: [],
     currentDelivery: null,
     isLoading: false,
     error: null,
@@ -157,14 +163,16 @@ const driverMobileSlice = createSlice({
       })
       .addCase(fetchDriverDeliveries.fulfilled, (state, action) => {
         state.isLoading = false;
-        state.deliveries = action.payload;
+        state.deliveries = action.payload.deliveries;
+        state.handoffs = action.payload.handoffs || [];
         state.error = null;
-        console.log('Redux state updated with deliveries:', action.payload);
+        console.log('Redux state updated with deliveries:', action.payload.deliveries);
       })
       .addCase(fetchDriverDeliveries.rejected, (state, action) => {
         state.isLoading = false;
         state.error = action.payload?.message || 'Failed to fetch deliveries';
         state.deliveries = [];
+        state.handoffs = [];
       })
       // Update delivery status
       .addCase(updateDeliveryStatus.pending, (state) => {

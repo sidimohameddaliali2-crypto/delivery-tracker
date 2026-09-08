@@ -1,0 +1,196 @@
+/* Menu Selection Link — a scoped port of the "organic" design system with the
+ * MATTER-blue palette from "Menu Selection Link.dc.html".
+ *
+ * Everything is nested under `.msl` so none of it leaks into the rest of the
+ * app (Tailwind, global CSS). Tokens come from organic/styles.css; the color
+ * ramp is the blue override from the design's <helmet> <style> block. */
+
+@import url('https://fonts.googleapis.com/css2?family=Caprasimo:wght@400&family=Figtree:wght@400;600;700&display=swap');
+
+.msl {
+  /* ---- palette (design helmet override) ---- */
+  --color-bg: #ffffff;
+  --color-surface: #ffffff;
+  --color-text: #051747;
+  --color-accent: #4d9eff;
+  --color-accent-2: #bcf679;
+  --color-divider: rgba(5, 23, 71, 0.14);
+  --color-neutral-100: #f7f9fd;
+  --color-neutral-200: #eef2f9;
+  --color-neutral-300: #dde4f0;
+  --color-neutral-400: #b9c4da;
+  --color-neutral-500: #8e9bb8;
+  --color-neutral-600: #6b7a9b;
+  --color-neutral-700: #4a5a7d;
+  --color-neutral-800: #1e3260;
+  --color-neutral-900: #050f2b;
+  --color-accent-100: #eef5ff;
+  --color-accent-200: #d9eaff;
+  --color-accent-300: #b8d9ff;
+  --color-accent-400: #85bfff;
+  --color-accent-500: #4d9eff;
+  --color-accent-600: #2b7fe0;
+  --color-accent-700: #1b60b4;
+  --color-accent-800: #143f7a;
+  --color-accent-900: #051747;
+  --color-accent-2-100: #f6fde9;
+  --color-accent-2-200: #eafbd0;
+  --color-accent-2-300: #ddf7b0;
+  --color-accent-2-500: #bcf679;
+  --color-accent-2-700: #6f9c30;
+  --color-accent-2-800: #47661d;
+  --color-accent-2-900: #2a3f13;
+
+  /* ---- structure tokens (organic/styles.css) ---- */
+  --font-heading: 'Caprasimo', system-ui, sans-serif;
+  --font-heading-weight: 400;
+  --font-body: 'Figtree', system-ui, sans-serif;
+  --space-1: 4.4px;
+  --space-2: 8.8px;
+  --space-3: 13.2px;
+  --space-4: 17.6px;
+  --space-6: 26.4px;
+  --space-8: 35.2px;
+  --radius-sm: 8px;
+  --radius-md: 16px;
+  --radius-lg: 28px;
+  --shadow-sm: 0 1px 2px rgba(5, 15, 43, 0.14);
+  --shadow-md: 0 3px 10px rgba(5, 15, 43, 0.16);
+  --shadow-lg: 0 12px 32px rgba(5, 15, 43, 0.22);
+
+  font-family: var(--font-body);
+  color: var(--color-text);
+  line-height: 1.55;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.msl *,
+.msl *::before,
+.msl *::after { box-sizing: border-box; }
+
+.msl h2,
+.msl h5,
+.msl h6 {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  line-height: 1.12;
+  letter-spacing: -0.015em;
+  margin: 0 0 var(--space-2);
+}
+.msl h2 { font-size: 32px; }
+.msl h5 { font-size: 16px; }
+.msl h6 { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; }
+.msl p { margin: 0 0 var(--space-3); }
+.msl a { color: var(--color-accent-700); text-underline-offset: 3px; }
+.msl a:hover { color: var(--color-accent-800); }
+.msl .text-muted { color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+
+/* ---- buttons ---- */
+.msl .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  text-decoration: none;
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: 14px;
+  line-height: 1.2;
+  color: var(--color-text);
+  background: transparent;
+  border: 1px solid transparent;
+  padding: var(--space-2) calc(var(--space-3) * 1.2);
+  border-radius: 999px;
+}
+.msl .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.msl .btn-primary { background: #051747; color: #ffffff; }
+.msl .btn-primary:hover,
+.msl .btn-primary:active { background: #050f2b; }
+.msl .btn-secondary { border-color: var(--color-divider); }
+.msl .btn-secondary:hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+.msl .btn-secondary:active { background: color-mix(in srgb, var(--color-text) 14%, transparent); }
+.msl .btn-ghost { color: var(--color-accent-700); padding-inline: var(--space-1); }
+.msl .btn-ghost:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.msl .btn-block { width: 100%; margin-top: var(--space-2); }
+
+/* ---- forms ---- */
+.msl .field > label {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 5px;
+  color: color-mix(in srgb, var(--color-text) 70%, transparent);
+}
+.msl .input {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--color-text);
+  caret-color: var(--color-accent);
+  background: var(--color-surface);
+  border: 1px solid var(--color-divider);
+  border-radius: 999px;
+}
+.msl .input:hover { border-color: color-mix(in srgb, var(--color-text) 45%, transparent); }
+.msl .input:focus-visible { border-color: var(--color-accent); outline: none; }
+.msl .input::placeholder { color: var(--color-neutral-500); }
+
+/* ---- cards ---- */
+.msl .card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-neutral-300);
+  border-radius: calc(var(--radius-lg) * 1.15);
+}
+.msl .elev-sm { box-shadow: var(--shadow-sm); }
+.msl .elev-lg { box-shadow: var(--shadow-lg); }
+
+/* ---- tags ---- */
+.msl .tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+/* ---- dialog ---- */
+.msl .dialog-backdrop {
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--color-neutral-900) 50%, transparent);
+}
+.msl .dialog {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+  border-radius: calc(var(--radius-lg) * 1.15);
+}
+.msl .dialog-title {
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: 20px;
+}
+.msl .dialog-body { font-size: 14px; opacity: 0.85; }
+.msl .dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* hide the phone scrollbar in preview, like the design's `.phone` */
+.msl .msl-phone::-webkit-scrollbar { width: 0; }
+.msl .msl-phone { scrollbar-width: none; }

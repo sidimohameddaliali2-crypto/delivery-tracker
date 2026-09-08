@@ -42,6 +42,10 @@ const userSchema = new mongoose.Schema({
       type: String,
       enum: ['bike', 'van', 'car']
     },
+    // Max stops per optimized route for this driver. Optional — when unset,
+    // route optimization falls back to the vehicle-type default (see
+    // VEHICLE_STOP_CAPACITY in services/routeOptimizationService.js).
+    stopCapacity: Number,
     vehiclePaper: String,
     baseSalary: Number,
     contractType: {

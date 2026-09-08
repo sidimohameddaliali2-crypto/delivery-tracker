@@ -21,6 +21,7 @@ const INITIAL_FORM = {
   shiftTiming: '',
   vehicleId: '',
   vehicleType: '',
+  stopCapacity: '',
   baseSalary: '',
   contractType: 'full_time',
   joiningDate: ''
@@ -186,6 +187,7 @@ const CreateDriver = () => {
         shiftTiming: formData.shiftTiming || undefined,
         vehicleId: formData.vehicleId || undefined,
         vehicleType: formData.vehicleType || undefined,
+        stopCapacity: formData.stopCapacity !== '' ? Number(formData.stopCapacity) : undefined,
         vehiclePaper: vehiclePaperUrl,
         baseSalary: formData.baseSalary ? Number(formData.baseSalary) : undefined,
         contractType: formData.contractType || undefined,
@@ -455,6 +457,19 @@ const CreateDriver = () => {
                 <option value="van">Van</option>
                 <option value="car">Car</option>
               </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Max Stops / Route</label>
+              <input
+                type="number"
+                min="1"
+                name="stopCapacity"
+                value={formData.stopCapacity}
+                onChange={handleChange}
+                placeholder={formData.vehicleType === 'bike' ? 'Default 20' : formData.vehicleType === 'van' ? 'Default 100' : 'Default by vehicle'}
+                className={inputCls('stopCapacity')}
+              />
+              <p className="mt-1 text-[11px] text-gray-500">Leave blank to use the vehicle-type default (bike 20, van 100).</p>
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">Vehicle ID</label>

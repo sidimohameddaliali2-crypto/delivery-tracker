@@ -457,7 +457,7 @@ router.post('/', protect, admin, async (req, res) => {
       email, password, firstName, lastName, phone, status, colorCode, picture,
       licenseNumber, licenseExpiry, nationalId,
       assignedZone, shiftTiming,
-      vehicleId, vehicleType, vehiclePaper,
+      vehicleId, vehicleType, vehiclePaper, stopCapacity,
       baseSalary, contractType, joiningDate
     } = req.body;
 
@@ -486,6 +486,7 @@ router.post('/', protect, admin, async (req, res) => {
         vehicleId,
         vehicleType,
         vehiclePaper,
+        stopCapacity,
         baseSalary,
         contractType,
         joiningDate

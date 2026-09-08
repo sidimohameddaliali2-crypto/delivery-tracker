@@ -13,7 +13,7 @@ const OSRM_PROFILE = process.env.OSRM_PROFILE || 'driving';
 // water, or a genuinely disconnected part of the road graph) — a large
 // penalty so the routing solver strongly avoids pairing them, instead of
 // crashing on a missing matrix cell.
-const UNREACHABLE_PENALTY = 999000;
+export const UNREACHABLE_PENALTY = 999000;
 
 /**
  * Build a full driving distance/duration matrix for a list of {lat, lng}
@@ -70,4 +70,43 @@ export async function buildDistanceMatrix(points) {
   ));
 
   return { distances: cleanDistances, durations: cleanDurations };
+}
+
+/**
+ * Per-leg driving duration/distance along an ORDERED sequence of {lat, lng}
+ * points (e.g. [depot, stop1, stop2, ...] in visit order) via OSRM's Route
+ * Service. Unlike buildDistanceMatrix (an all-pairs table), this follows the
+ * given order and returns exactly one leg per consecutive pair — points.length
+ * - 1 legs — which is what an ETA-along-a-route calculation needs and a table
+ * doesn't directly give you.
+ */
+export async function buildOrderedRouteLegs(points) {
+  if (!Array.isArray(points) || points.length < 2) {
+    return { legDurations: [], legDistances: [] };
+  }
+
+  const coordinates = points.map((p) => `${p.lng},${p.lat}`).join(';');
+  const url = `${OSRM_BASE_URL}/route/v1/${OSRM_PROFILE}/${coordinates}`;
+
+  let resp;
+  try {
+    resp = await axios.get(url, {
+      params: { overview: 'false', steps: 'false', annotations: 'duration,distance' },
+      timeout: 20000
+    });
+  } catch (err) {
+    const detail = err.response?.data?.message || err.message;
+    throw new Error(`OSRM route request failed (is OSRM_BASE_URL="${OSRM_BASE_URL}" reachable?): ${detail}`);
+  }
+
+  if (resp.data?.code !== 'Ok' || !resp.data.routes?.[0]) {
+    const detail = resp.data?.message ? ` — ${resp.data.message}` : '';
+    throw new Error(`OSRM route error: ${resp.data?.code}${detail}`);
+  }
+
+  const legs = resp.data.routes[0].legs || [];
+  return {
+    legDurations: legs.map((l) => l.duration),
+    legDistances: legs.map((l) => l.distance)
+  };
 }

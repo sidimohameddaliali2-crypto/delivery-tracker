@@ -1,14 +1,16 @@
 import axios from 'axios';
+import Customer from '../models/Customer.js';
 
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+// Dedicated Geocoding API key; falls back to the general Maps key.
+const GOOGLE_GEOCODING_API_KEY = process.env.GOOGLE_GEOCODING_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
 
 async function geocodeWithGoogle(address) {
-  if (!GOOGLE_MAPS_API_KEY) return null;
+  if (!GOOGLE_GEOCODING_API_KEY) return null;
   try {
     const resp = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
       params: {
         address,
-        key: GOOGLE_MAPS_API_KEY,
+        key: GOOGLE_GEOCODING_API_KEY,
         region: 'AE'
       },
       timeout: 7000
@@ -64,47 +66,71 @@ export function extractCoordsFromGoogleMapsUrl(url) {
 }
 
 /**
- * Geocode an address to get lat/lng using Nominatim (free, OpenStreetMap)
- * Rate limited to 1 request/second
+ * Geocode an address to get lat/lng.
+ *
+ * Google only — deliberately, since 2026-09-05. This used to fall back to
+ * Nominatim (OSM) whenever Google failed or wasn't configured; the owner
+ * asked to drop that after a Nominatim mismatch sent a real Dubai address
+ * ("Meadows 5, Street 5") to Islamabad, Pakistan.
+ *
+ * Note this doesn't fully solve wrong-country mismatches by itself: Google's
+ * `region: 'AE'` param is a soft bias, not a hard restriction, so a short or
+ * ambiguous string can still confidently match a much stronger exact-name hit
+ * abroad — verified directly against this address book, e.g. "The DEN" and
+ * "Algeria St, Villa 46" both landed in the UK / South Africa via Google too,
+ * the same way "Algeria St" once did via Nominatim. That's why every caller
+ * layers a depot-proximity plausibility check on top of this (see
+ * isPlausibleCoordinate) rather than trusting any single geocode result
+ * blindly — the check, not the provider, is what actually prevents a wrong
+ * pin from being stored or displayed.
  */
 export async function geocodeAddress(address) {
   if (!address || typeof address !== 'string' || address.trim().length === 0) {
     return null;
   }
+  return geocodeWithGoogle(address);
+}
 
-  // Try Google first if key configured
-  const googleResult = await geocodeWithGoogle(address);
-  if (googleResult) return googleResult;
+// Some historical records have garbage in gpsLocation — e.g. an address's
+// own unit/floor number ("1702 Volante Tower...") ended up stored as the
+// latitude somewhere upstream of this function. A plain typeof-number check
+// doesn't catch that (1702 is a number), so anything trusting stored
+// coordinates as-is needs an actual geographic sanity check first. (0,0) is
+// excluded too — a common "never actually set" default, not a real UAE
+// address.
+//
+// A world-bounds check alone isn't enough either: Google Geocoding can
+// confidently return a perfectly valid Earth coordinate for the WRONG
+// place when an address is short/generic — e.g. "Algeria St, Villa 46" (a
+// real Dubai street) matched to Algeria St in *Johannesburg, South
+// Africa*, and "Meadows 5, Street 5" (a real Dubai community) matched to
+// somewhere in Islamabad. Both passed a plain lat/lng-range check and only
+// showed up as a ~25-hour "drive time" once fed into route optimization.
+// So anything claiming to be a delivery coordinate also has to be within a
+// generous radius of the depot — real service area, not just "a place on
+// Earth."
+const DEPOT_LAT = Number(process.env.DELIVERY_DEPOT_LAT);
+const DEPOT_LNG = Number(process.env.DELIVERY_DEPOT_LNG);
+const MAX_PLAUSIBLE_DISTANCE_KM = 300; // generously covers all of the UAE plus nearby GCC border areas
 
-  // Fallback to Nominatim (OSM)
-  try {
-    const response = await axios.get('https://nominatim.openstreetmap.org/search', {
-      params: {
-        q: address,
-        format: 'json',
-        limit: 1
-      },
-      headers: {
-        'User-Agent': 'MatterDeliveryTracker/1.0'
-      },
-      timeout: 5000
-    });
+export function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
-    if (response.data && response.data.length > 0) {
-      const result = response.data[0];
-      return {
-        lat: parseFloat(result.lat),
-        lng: parseFloat(result.lon),
-        displayName: result.display_name,
-        provider: 'osm'
-      };
-    }
-
-    return null;
-  } catch (error) {
-    console.error('Geocoding error for address:', address, error.message);
-    return null;
+export function isPlausibleCoordinate(lat, lng) {
+  if (typeof lat !== 'number' || typeof lng !== 'number') return false;
+  if (Number.isNaN(lat) || Number.isNaN(lng)) return false;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return false;
+  if (lat === 0 && lng === 0) return false;
+  if (Number.isFinite(DEPOT_LAT) && Number.isFinite(DEPOT_LNG)) {
+    if (haversineKm(lat, lng, DEPOT_LAT, DEPOT_LNG) > MAX_PLAUSIBLE_DISTANCE_KM) return false;
   }
+  return true;
 }
 
 /**
@@ -114,7 +140,7 @@ export async function geocodeAddress(address) {
 export async function resolveDeliveryCoordinates(delivery) {
   // If already has coordinates in gpsLocation, return them
   if (delivery.gpsLocation && typeof delivery.gpsLocation === 'object') {
-    if (typeof delivery.gpsLocation.lat === 'number' && typeof delivery.gpsLocation.lng === 'number') {
+    if (isPlausibleCoordinate(delivery.gpsLocation.lat, delivery.gpsLocation.lng)) {
       return {
         lat: delivery.gpsLocation.lat,
         lng: delivery.gpsLocation.lng
@@ -123,14 +149,14 @@ export async function resolveDeliveryCoordinates(delivery) {
   }
   // If already has coordinates as top-level fields
   if (delivery.location && typeof delivery.location === 'object') {
-    if (typeof delivery.location.lat === 'number' && typeof delivery.location.lng === 'number') {
+    if (isPlausibleCoordinate(delivery.location.lat, delivery.location.lng)) {
       return {
         lat: delivery.location.lat,
         lng: delivery.location.lng
       };
     }
   }
-  if (typeof delivery.lat === 'number' && typeof delivery.lng === 'number') {
+  if (isPlausibleCoordinate(delivery.lat, delivery.lng)) {
     return {
       lat: delivery.lat,
       lng: delivery.lng
@@ -140,7 +166,7 @@ export async function resolveDeliveryCoordinates(delivery) {
   // Try to extract from Google Maps URL if present
   if (delivery.mapsUrl && typeof delivery.mapsUrl === 'string') {
     const extracted = extractCoordsFromGoogleMapsUrl(delivery.mapsUrl);
-    if (extracted) {
+    if (extracted && isPlausibleCoordinate(extracted.lat, extracted.lng)) {
       console.log(`✅ Extracted coords from Google Maps URL for ${delivery.customerName}:`, extracted);
       return extracted;
     }
@@ -150,16 +176,71 @@ export async function resolveDeliveryCoordinates(delivery) {
   if (delivery.address) {
     console.log(`🌍 Geocoding address for ${delivery.customerName}:`, delivery.address);
     const geocoded = await geocodeAddress(delivery.address);
-    if (geocoded) {
+    if (geocoded && isPlausibleCoordinate(geocoded.lat, geocoded.lng)) {
       console.log(`✅ Geocoded address:`, geocoded);
       return {
         lat: geocoded.lat,
         lng: geocoded.lng
       };
+    } else if (geocoded) {
+      console.warn(`⚠️ Geocoded address for ${delivery.customerName} landed implausibly far from the depot — rejecting:`, geocoded, delivery.address);
     } else {
       console.warn(`⚠️ Could not geocode address: ${delivery.address}`);
     }
   }
 
   return null;
+}
+
+/**
+ * Same as resolveDeliveryCoordinates, but backed by a permanent per-customer
+ * cache (Customer.gpsLocation) instead of re-geocoding on every call.
+ *
+ * Why: resolveDeliveryCoordinates only ever looks at the fields on the one
+ * delivery it's given — it has no memory between calls. That meant every
+ * Optimize Routes run, every delivery created for a repeat customer, and
+ * every Driver Routes map load that hit a delivery with no gpsLocation saved
+ * would call Google Geocoding again for the exact same address, sometimes
+ * dozens of times over for one customer's history. This wrapper checks (and
+ * updates) the customer's own record instead, so a given address is sent to
+ * Google at most once — including a *negative* cache (source: 'unresolved')
+ * for addresses that don't geocode plausibly, so a garbage address like
+ * "PICKUP" doesn't get retried against Google on every single lookup either.
+ * The cache is address-keyed: editing a customer's address naturally
+ * invalidates it and the next lookup re-resolves.
+ */
+export async function resolveDeliveryCoordinatesCached(delivery) {
+  if (isPlausibleCoordinate(delivery.gpsLocation?.lat, delivery.gpsLocation?.lng)) {
+    return { lat: delivery.gpsLocation.lat, lng: delivery.gpsLocation.lng };
+  }
+
+  const customerId = delivery.customerId;
+  const normalizedAddress = String(delivery.address || '').trim();
+
+  if (customerId) {
+    const customer = await Customer.findOne({ customerId }).select('gpsLocation').lean();
+    const cached = customer?.gpsLocation;
+    if (cached && cached.address === normalizedAddress) {
+      if (isPlausibleCoordinate(cached.lat, cached.lng)) {
+        return { lat: cached.lat, lng: cached.lng };
+      }
+      if (cached.source === 'unresolved') {
+        return null;
+      }
+    }
+  }
+
+  const resolved = await resolveDeliveryCoordinates(delivery);
+
+  if (customerId) {
+    const toSave = resolved
+      ? { lat: resolved.lat, lng: resolved.lng, source: 'geocoded' }
+      : { lat: null, lng: null, source: 'unresolved' };
+    await Customer.updateOne(
+      { customerId },
+      { $set: { gpsLocation: { ...toSave, address: normalizedAddress, geocodedAt: new Date() } } }
+    ).catch((err) => console.warn('Failed to cache customer coordinates:', err.message));
+  }
+
+  return resolved;
 }

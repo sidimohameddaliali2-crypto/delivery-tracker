@@ -1,0 +1,975 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import api from '../../utils/api';
+import MatterLogo from './MatterLogo';
+import {
+  DEMO_ACCOUNTS,
+  DEMO_DAYS,
+  DEMO_MEALS,
+  DEMO_MENU_NAME,
+  DEMO_MENU_RANGE,
+  DEMO_MONTHS,
+  DEMO_WEEK_START,
+} from './demoData';
+import './menuSelectionLink.css';
+
+/* ------------------------------------------------------------------ helpers */
+
+const DAYS = DEMO_DAYS;
+const MONTHS = DEMO_MONTHS;
+const COURSES = [
+  { key: 'breakfast', label: 'Breakfast' },
+  { key: 'lunch', label: 'Lunch' },
+  { key: 'dinner', label: 'Dinner' },
+];
+const BAG = {
+  breakfast: { bg: 'var(--color-accent-2-200)', fg: 'var(--color-accent-2-900)' },
+  lunch: { bg: 'var(--color-accent-200)', fg: 'var(--color-accent-800)' },
+  dinner: { bg: 'var(--color-neutral-200)', fg: 'var(--color-neutral-800)' },
+};
+
+const toDateKey = (value) => {
+  if (!value) return '';
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+const dateFromKey = (key) => new Date(`${key}T00:00:00`);
+
+const fmtDayLong = (key) => {
+  const d = dateFromKey(key);
+  if (Number.isNaN(d.getTime())) return key;
+  return `${DAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate()}`;
+};
+
+const fmtShort = (value) => {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${DAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate()}`;
+};
+
+const tokens = (value) =>
+  String(value || '')
+    .split(/[,;|\n\r/]+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+
+const titleCase = (s) => String(s || '').replace(/\b\w/g, (c) => c.toUpperCase());
+const initialsOf = (name) =>
+  String(name || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((p) => p[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+
+/* ---------------------------------------------------------- data models */
+
+// Normalized meal shape used by the renderer regardless of source:
+//   { key, dayIndex, dayKey, type, name, sub, allergens[], dietTags[], exclText, item? }
+
+function buildDemoModel() {
+  const dayKeys = [0, 1, 2, 3, 4, 5, 6].map((i) => {
+    const d = dateFromKey(DEMO_WEEK_START);
+    d.setDate(d.getDate() + i);
+    return toDateKey(d);
+  });
+  const meals = DEMO_MEALS.map((m) => ({
+    key: `${dayKeys[m.day]}::${m.type}::${m.id}`,
+    dayIndex: m.day,
+    dayKey: dayKeys[m.day],
+    type: m.type,
+    name: m.name,
+    sub: m.sub,
+    allergens: m.allergens,
+    dietTags: m.exclusions,
+    exclText: '',
+  }));
+  return { menuName: DEMO_MENU_NAME, menuRange: DEMO_MENU_RANGE, dayKeys, meals };
+}
+
+function buildRealModel(weeklyMenu, profile) {
+  const weekendOk = !!profile?.weekend;
+  const rows = Array.isArray(weeklyMenu?.meals) ? weeklyMenu.meals : [];
+
+  const keySet = new Set();
+  rows.forEach((row) => {
+    const k = toDateKey(row?.date);
+    if (!k) return;
+    if (!weekendOk) {
+      const wd = dateFromKey(k).getDay();
+      if (wd === 0 || wd === 6) return;
+    }
+    keySet.add(k);
+  });
+  const dayKeys = Array.from(keySet).sort();
+  const dayIndexByKey = new Map(dayKeys.map((k, i) => [k, i]));
+
+  const meals = [];
+  rows.forEach((row) => {
+    const dayKey = toDateKey(row?.date);
+    if (!dayIndexByKey.has(dayKey)) return;
+    const type = String(row?.mealType || '').toLowerCase();
+    if (!COURSES.some((c) => c.key === type)) return;
+    (row?.items || []).forEach((item) => {
+      if (!item) return;
+      const itemId = String(item._id || item);
+      const allergens = Array.from(
+        new Set([
+          ...(Array.isArray(item.allergens) ? item.allergens : tokens(item.allergens)),
+          ...tokens(item.intolerances),
+        ].map((a) => titleCase(String(a).trim())).filter(Boolean))
+      );
+      const dietTags = [];
+      if (item.isVegan) dietTags.push('Vegan');
+      if (item.isGlutenFree) dietTags.push('Gluten-free');
+      const subParts = [
+        item.ingredients || item.description || '',
+        item.calories ? `${item.calories} kcal` : '',
+      ].filter(Boolean);
+      meals.push({
+        key: `${dayKey}::${type}::${itemId}`,
+        dayIndex: dayIndexByKey.get(dayKey),
+        dayKey,
+        type,
+        name: item.mealName || 'Meal',
+        sub: subParts.join(' · '),
+        allergens,
+        dietTags,
+        exclText: [
+          item.mealName,
+          item.ingredients,
+          item.proteinSource,
+          item.veg,
+          item.sauce,
+          item.carbs,
+          item.description,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase(),
+        item,
+      });
+    });
+  });
+
+  const menuName = weeklyMenu?.title || 'This week’s menu';
+  const menuRange =
+    weeklyMenu?.startDate && weeklyMenu?.endDate
+      ? `${fmtShort(weeklyMenu.startDate)} – ${fmtShort(weeklyMenu.endDate)}`
+      : '';
+  return { menuName, menuRange, dayKeys, meals };
+}
+
+/* ---------------------------------------------------------------- component */
+
+const MenuSelectionLink = ({ token }) => {
+  const preview = !token;
+
+  const [model, setModel] = useState(() => (preview ? buildDemoModel() : null));
+  const [loadState, setLoadState] = useState(preview ? 'ready' : 'loading'); // loading | ready | error
+  const [loadError, setLoadError] = useState('');
+  const [rawMenu, setRawMenu] = useState(null); // real weeklyMenu (for submit)
+
+  const [step, setStep] = useState('signin'); // signin | menu | done
+  const [email, setEmail] = useState('');
+  const [emailError, setEmailError] = useState('');
+  const [account, setAccount] = useState(null); // normalized customer
+  const [day, setDay] = useState(0);
+  const [qty, setQty] = useState({});
+  const [skipped, setSkipped] = useState({});
+  const [acknowledged, setAcknowledged] = useState({});
+  const [modal, setModal] = useState(null);
+  const [toast, setToast] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const toastTimer = useRef(null);
+
+  /* -- load the real menu by share token -- */
+  useEffect(() => {
+    if (preview) return;
+    let alive = true;
+    setLoadState('loading');
+    api
+      .get(`/menus/share/${token}`)
+      .then((res) => {
+        if (!alive) return;
+        const menu = res.data?.data;
+        if (!menu) throw new Error('Menu not found');
+        setRawMenu(menu);
+        setLoadState('ready');
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setLoadError(
+          err.response?.data?.message ||
+            'This menu selection link is invalid or has expired. Please contact support.'
+        );
+        setLoadState('error');
+      });
+    return () => {
+      alive = false;
+    };
+  }, [preview, token]);
+
+  const flash = useCallback((msg) => {
+    clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(''), 2200);
+  }, []);
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+
+  /* -- sign in -- */
+  const signIn = useCallback(async () => {
+    const v = email.trim().toLowerCase();
+    if (!v) return setEmailError('Enter your email address to continue.');
+    if (v.indexOf('@') < 1 || v.indexOf('.') < 0) return setEmailError("That doesn't look like a valid email.");
+
+    if (preview) {
+      const found = DEMO_ACCOUNTS.find((a) => a.email === v);
+      if (!found) return setEmailError('No subscription found for this address. Contact support if this is wrong.');
+      setAccount({
+        name: found.name,
+        email: found.email,
+        plan: found.plan,
+        perDay: found.perDay,
+        allergensDisplay: found.allergens,
+        allergensLc: found.allergens.map((x) => x.toLowerCase()),
+        exclusionsDisplay: found.exclusions,
+        exclusionsLc: found.exclusions.map((x) => x.toLowerCase()),
+        exclusions: found.exclusions.map((x) => x.toLowerCase()),
+      });
+      setModel(buildDemoModel());
+      setStep('menu');
+      setDay(0);
+      setEmailError('');
+      return;
+    }
+
+    try {
+      setEmailError('');
+      const menuIdParam = rawMenu?._id ? `&menuId=${encodeURIComponent(rawMenu._id)}` : '';
+      const res = await api.get(
+        `/menus/customers/${encodeURIComponent(v)}/meal-profile?email=${encodeURIComponent(v)}${menuIdParam}`
+      );
+      const profile = res.data?.data;
+      if (!profile) throw new Error('not found');
+
+      const built = buildRealModel(rawMenu, profile);
+      const allergensDisplay = (profile.allergies || []).map((x) => titleCase(String(x)));
+      const exclTokens = tokens(profile.mealExclusion);
+
+      setAccount({
+        name: `${profile.firstName || ''} ${profile.lastName || ''}`.trim() || profile.email || v,
+        email: profile.email || v,
+        plan: profile.mealPlan || 'Meal plan',
+        perDay: Number(profile.mealPerDay) || 1,
+        allergensDisplay,
+        allergensLc: allergensDisplay.map((x) => x.toLowerCase()),
+        exclusionsDisplay: exclTokens.map(titleCase),
+        exclusionsLc: exclTokens,
+        exclusions: exclTokens,
+      });
+      setModel(built);
+
+      // preload a previously submitted selection for this menu
+      const preQty = {};
+      const alreadySubmitted =
+        profile.hasSubmittedForRequestedMenu ||
+        (profile.currentWeekMenu && rawMenu?._id && String(profile.currentWeekMenu) === String(rawMenu._id));
+      if (alreadySubmitted && Array.isArray(profile.selectedMeals)) {
+        profile.selectedMeals.forEach((sm) => {
+          const itemId = String(sm.menuItemId?._id || sm.menuItemId || '');
+          const k = `${toDateKey(sm.date)}::${String(sm.mealType || '').toLowerCase()}::${itemId}`;
+          if (itemId) preQty[k] = (preQty[k] || 0) + (Number(sm.quantity) || 1);
+        });
+      }
+      setQty(preQty);
+      setSkipped({});
+      setAcknowledged({});
+      setDay(0);
+      setStep('menu');
+    } catch (err) {
+      setEmailError(
+        err.response?.status === 404 || err.response?.data?.success === false
+          ? 'No subscription found for this address. Contact support if this is wrong.'
+          : err.response?.data?.message || 'Could not load your plan. Please try again.'
+      );
+    }
+  }, [email, preview, rawMenu]);
+
+  /* -- selection helpers -- */
+  const dayKeys = model?.dayKeys || [];
+  const lastDay = Math.max(0, dayKeys.length - 1);
+  const target = account?.perDay || 3;
+
+  const dayCount = useCallback(
+    (i) =>
+      (model?.meals || [])
+        .filter((m) => m.dayIndex === i)
+        .reduce((a, m) => a + (qty[m.key] || 0), 0),
+    [model, qty]
+  );
+
+  const conflictOf = useCallback(
+    (m) => {
+      if (!account) return null;
+      const al = (m.allergens || []).filter((a) => account.allergensLc.includes(String(a).toLowerCase()));
+      if (al.length) return { kind: 'allergen', items: al };
+      let ex;
+      if (preview) {
+        ex = (m.dietTags || []).filter((t) => account.exclusionsLc.includes(String(t).toLowerCase()));
+      } else {
+        ex = (account.exclusions || []).filter((x) => x && m.exclText.includes(x)).map(titleCase);
+      }
+      if (ex.length) return { kind: 'exclusion', items: ex };
+      return null;
+    },
+    [account, preview]
+  );
+
+  const bump = useCallback((key, delta) => {
+    setQty((s) => ({ ...s, [key]: Math.max(0, (s[key] || 0) + delta) }));
+  }, []);
+
+  const openAllergen = useCallback(
+    (items) => {
+      setModal({
+        kicker: 'Blocked meal',
+        title: `Contains ${items.join(' and ')}`,
+        body:
+          "This meal can't be selected because it contains an allergen on your profile. If you believe your allergen list is out of date, message the kitchen team and they'll update it for you.",
+        items: items.map((x) => ({ label: x, bg: 'var(--color-accent-200)', fg: 'var(--color-accent-800)' })),
+        actions: [
+          { label: 'Close', kind: 'secondary', onClick: () => setModal(null) },
+          {
+            label: 'Message customer service',
+            kind: 'primary',
+            onClick: () => {
+              setModal(null);
+              flash('Request sent to customer service');
+            },
+          },
+        ],
+      });
+    },
+    [flash]
+  );
+
+  const openExclusion = useCallback(
+    (m, items) => {
+      setModal({
+        kicker: 'Against your preferences',
+        title: `This meal includes ${items.join(', ')}`,
+        body: `${m.name} conflicts with an exclusion on your plan. You can keep it in your selection anyway, or pick something else for this slot.`,
+        items: items.map((x) => ({ label: x, bg: 'var(--color-neutral-200)', fg: 'var(--color-neutral-800)' })),
+        actions: [
+          { label: 'Replace with another', kind: 'secondary', onClick: () => setModal(null) },
+          {
+            label: 'Keep selection',
+            kind: 'primary',
+            onClick: () => {
+              setModal(null);
+              setAcknowledged((s) => ({ ...s, [m.key]: true }));
+              bump(m.key, 1);
+              flash('Added — exclusion acknowledged');
+            },
+          },
+        ],
+      });
+    },
+    [bump, flash]
+  );
+
+  const tryAdd = useCallback(
+    (m) => {
+      const c = conflictOf(m);
+      if (c && c.kind === 'allergen') return openAllergen(c.items);
+      if (c && c.kind === 'exclusion' && !acknowledged[m.key]) return openExclusion(m, c.items);
+      bump(m.key, 1);
+    },
+    [acknowledged, bump, conflictOf, openAllergen, openExclusion]
+  );
+
+  /* -- submit -- */
+  const doSubmit = useCallback(async () => {
+    if (preview) {
+      setStep('done');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const selections = [];
+      (model?.meals || []).forEach((m) => {
+        const n = qty[m.key] || 0;
+        if (!n || skipped[m.dayIndex]) return;
+        selections.push({
+          date: m.dayKey,
+          mealType: m.type,
+          menuItemId: m.item?._id || undefined,
+          mealName: m.name,
+          quantity: n,
+        });
+      });
+      const skippedDates = dayKeys.filter((_, i) => skipped[i]);
+      const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/select-meals`, {
+        weeklyMenuId: rawMenu._id,
+        selections,
+        skippedDates,
+      });
+      if (res.data?.success) {
+        setStep('done');
+      } else {
+        flash(res.data?.message || 'Could not save your selections.');
+      }
+    } catch (err) {
+      flash(err.response?.data?.message || 'Could not save your selections. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [account, dayKeys, flash, model, preview, qty, rawMenu, skipped]);
+
+  const onSubmitButton = useCallback(() => {
+    if (day < lastDay) {
+      setDay((d) => d + 1);
+      return;
+    }
+    doSubmit();
+  }, [day, doSubmit, lastDay]);
+
+  const resetAll = useCallback(() => {
+    setStep('signin');
+    setAccount(null);
+    setEmail('');
+    setEmailError('');
+    setQty({});
+    setSkipped({});
+    setAcknowledged({});
+    setModal(null);
+    setDay(0);
+  }, []);
+
+  /* ------------------------------------------------------- derived render */
+
+  const skippedToday = !!skipped[day];
+  const dayHeading = dayKeys[day] ? fmtDayLong(dayKeys[day]) : `Day ${day + 1}`;
+  const selectedToday = dayCount(day);
+
+  const courses = useMemo(() => {
+    if (!model || !account) return [];
+    return COURSES.map((c) => {
+      const list = (model.meals || []).filter((m) => m.dayIndex === day && m.type === c.key);
+      return {
+        label: c.label,
+        count: `${list.length} option${list.length === 1 ? '' : 's'}`,
+        meals: list.map((m) => {
+          const conflict = conflictOf(m);
+          const blocked = !!(conflict && conflict.kind === 'allergen');
+          const warned = !!(conflict && conflict.kind === 'exclusion');
+          const q = qty[m.key] || 0;
+          const bag = BAG[m.type] || BAG.dinner;
+          const tags = (m.allergens || [])
+            .map((x) => ({
+              label: x,
+              bg: account.allergensLc.includes(String(x).toLowerCase())
+                ? 'var(--color-accent-300)'
+                : 'var(--color-neutral-200)',
+              fg: account.allergensLc.includes(String(x).toLowerCase())
+                ? 'var(--color-accent-900)'
+                : 'var(--color-neutral-700)',
+            }))
+            .concat(
+              (m.dietTags || []).map((x) => ({
+                label: x,
+                bg: 'var(--color-accent-2-200)',
+                fg: 'var(--color-accent-2-900)',
+              }))
+            );
+          return {
+            m,
+            name: m.name,
+            sub: m.sub,
+            typeLabel: c.label,
+            bagBg: blocked ? 'var(--color-neutral-200)' : bag.bg,
+            bagFg: blocked ? 'var(--color-neutral-700)' : bag.fg,
+            cardBorder: q ? 'var(--color-accent)' : 'var(--color-neutral-300)',
+            cardOpacity: blocked ? 0.72 : 1,
+            statusLabel: blocked
+              ? 'Blocked · allergen'
+              : warned
+              ? 'Against your plan'
+              : q
+              ? `${q} selected`
+              : '',
+            statusBg: blocked
+              ? 'var(--color-accent-200)'
+              : warned
+              ? 'var(--color-neutral-200)'
+              : 'var(--color-accent-700)',
+            statusFg: blocked
+              ? 'var(--color-accent-900)'
+              : warned
+              ? 'var(--color-neutral-800)'
+              : '#ffffff',
+            tags,
+            blocked,
+            warned,
+            selectable: !blocked,
+            qty: q,
+            minusDisabled: q === 0,
+            onCard: () => {
+              if (blocked) return openAllergen(conflict.items);
+              if (warned && !acknowledged[m.key]) return openExclusion(m, conflict.items);
+            },
+            onPlus: () => tryAdd(m),
+            onMinus: () => bump(m.key, -1),
+          };
+        }),
+      };
+    }).filter((c) => c.meals.length > 0);
+  }, [account, acknowledged, bump, conflictOf, day, model, openAllergen, openExclusion, qty, tryAdd]);
+
+  const dayTabs = useMemo(
+    () =>
+      dayKeys.map((k, i) => {
+        const d = dateFromKey(k);
+        const on = i === day;
+        const isSkip = !!skipped[i];
+        const n = dayCount(i);
+        return {
+          key: k,
+          dow: DAYS[d.getDay()] || '',
+          num: d.getDate() || i + 1,
+          badge: isSkip ? 'skip' : n ? `${n} sel` : '–',
+          bg: on ? 'var(--color-accent-700)' : 'transparent',
+          fg: on ? '#ffffff' : 'var(--color-text)',
+          border: on ? 'var(--color-accent-700)' : 'var(--color-neutral-300)',
+          onClick: () => setDay(i),
+        };
+      }),
+    [day, dayCount, dayKeys, skipped]
+  );
+
+  const summary = useMemo(
+    () =>
+      dayKeys.map((k, i) => {
+        const picks = (model?.meals || [])
+          .filter((m) => m.dayIndex === i && (qty[m.key] || 0) > 0)
+          .map((m) => m.name);
+        return {
+          day: fmtDayLong(k),
+          value: skipped[i] ? 'Skipped' : picks.length ? picks.join(', ') : 'No meals',
+        };
+      }),
+    [dayKeys, model, qty, skipped]
+  );
+
+  const customer = account
+    ? {
+        name: account.name,
+        firstName: (account.name || '').split(' ')[0],
+        email: account.email,
+        initials: initialsOf(account.name),
+        plan: account.plan,
+        perDay: `${account.perDay} meal${account.perDay === 1 ? '' : 's'}`,
+        flags: [
+          ...account.allergensDisplay.map((x) => ({
+            label: `${x} allergy`,
+            bg: 'var(--color-accent-200)',
+            fg: 'var(--color-accent-900)',
+          })),
+          ...account.exclusionsDisplay.map((x) => ({
+            label: x,
+            bg: 'var(--color-accent-2-200)',
+            fg: 'var(--color-accent-2-900)',
+          })),
+        ],
+      }
+    : null;
+
+  const menuName = model?.menuName || DEMO_MENU_NAME;
+  const menuRange = model?.menuRange || DEMO_MENU_RANGE;
+
+  /* --------------------------------------------------------------- markup */
+
+  const OUTER = {
+    minHeight: '100vh',
+    background: '#ffffff',
+    fontFamily: 'var(--font-body)',
+    color: 'var(--color-text)',
+    display: 'flex',
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+    padding: preview ? '36px 20px 60px' : '0',
+  };
+  const FRAME = preview
+    ? {
+        width: 390,
+        height: 844,
+        background: '#ffffff',
+        borderRadius: 34,
+        border: '1px solid var(--color-neutral-300)',
+        boxShadow: 'var(--shadow-lg)',
+        position: 'relative',
+        overflow: 'hidden',
+      }
+    : {
+        width: '100%',
+        maxWidth: 430,
+        minHeight: '100vh',
+        background: '#ffffff',
+        position: 'relative',
+        overflow: 'hidden',
+      };
+
+  const renderSignIn = () => (
+    <div style={{ minHeight: preview ? 844 : '100vh', display: 'flex', flexDirection: 'column', padding: '54px 26px 32px' }}>
+      <MatterLogo height={28} style={{ alignSelf: 'flex-start', marginBottom: 40 }} />
+      <h2 style={{ margin: '0 0 10px' }}>{menuName}</h2>
+      <p className="text-muted" style={{ margin: '0 0 30px', fontSize: 15 }}>{menuRange}</p>
+      <p style={{ margin: '0 0 24px', fontSize: 15, lineHeight: 1.6 }}>
+        Enter the email your subscription is registered to. We&apos;ll load your plan and this week&apos;s meals.
+      </p>
+
+      <div className="field">
+        <label htmlFor="msl-email">Email address</label>
+        <input
+          id="msl-email"
+          className="input"
+          type="email"
+          value={email}
+          onChange={(e) => { setEmail(e.target.value); setEmailError(''); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') signIn(); }}
+          placeholder="you@example.com"
+          style={{ fontSize: 16 }}
+        />
+      </div>
+      {emailError ? (
+        <div style={{ fontSize: 13, color: 'var(--color-accent-700)', marginTop: 8 }}>{emailError}</div>
+      ) : null}
+
+      <button className="btn btn-primary btn-block" onClick={signIn} style={{ marginTop: 20, padding: 15 }}>
+        Continue
+      </button>
+
+      {preview ? (
+        <div style={{ marginTop: 'auto', paddingTop: 28 }}>
+          <div style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 10 }}>
+            Demo accounts
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {DEMO_ACCOUNTS.map((a) => (
+              <button
+                key={a.email}
+                className="btn btn-secondary"
+                onClick={() => { setEmail(a.email); setEmailError(''); }}
+                style={{ fontSize: 13, justifyContent: 'flex-start', textAlign: 'left' }}
+              >
+                {a.name} · {a.plan}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+
+  const renderMenu = () => (
+    <div style={{ padding: '0 0 20px' }}>
+      <div style={{ position: 'sticky', top: 0, zIndex: 20, background: '#fff', padding: '18px 22px 14px', borderBottom: '1px solid var(--color-divider)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <MatterLogo height={19} />
+          <button className="btn btn-ghost" onClick={resetAll} style={{ fontSize: 12, padding: '4px 8px' }}>Sign out</button>
+        </div>
+      </div>
+
+      {/* profile card */}
+      <div style={{ padding: '20px 22px 0' }}>
+        <div className="card elev-sm" style={{ padding: 20, gap: 0, background: 'var(--color-accent-100)', borderColor: 'var(--color-accent-300)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
+            <div style={{ width: 48, height: 48, flex: 'none', borderRadius: 999, background: 'var(--color-accent-700)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 600 }}>
+              {customer.initials}
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontFamily: 'var(--font-heading)', fontSize: 19, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>{customer.name}</div>
+              <div className="text-muted" style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{customer.email}</div>
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div style={{ background: '#fff', borderRadius: 'var(--radius-md)', padding: '11px 13px' }}>
+              <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)' }}>Plan</div>
+              <div style={{ fontSize: 14, fontWeight: 600, marginTop: 3 }}>{customer.plan}</div>
+            </div>
+            <div style={{ background: '#fff', borderRadius: 'var(--radius-md)', padding: '11px 13px' }}>
+              <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)' }}>Meals per day</div>
+              <div style={{ fontSize: 14, fontWeight: 600, marginTop: 3 }}>{customer.perDay}</div>
+            </div>
+            <div style={{ gridColumn: 'span 2', background: '#fff', borderRadius: 'var(--radius-md)', padding: '11px 13px' }}>
+              <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 6 }}>Exclusions &amp; allergens</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                {customer.flags.length === 0 ? (
+                  <span className="text-muted" style={{ fontSize: 12 }}>None on file</span>
+                ) : (
+                  customer.flags.map((f, i) => (
+                    <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: f.bg, color: f.fg }}>{f.label}</span>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* day tabs */}
+      <div style={{ padding: '18px 22px 0' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+          <h5 style={{ margin: 0 }}>{dayHeading}</h5>
+          <span className="text-muted" style={{ fontSize: 12 }}>
+            {skippedToday ? 'Skipped' : `${selectedToday} of ${target} chosen`}
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 8 }}>
+          {dayTabs.map((d) => (
+            <button
+              key={d.key}
+              className="btn"
+              onClick={d.onClick}
+              style={{ flex: 'none', minWidth: 52, padding: '9px 6px', fontSize: 12, lineHeight: 1.2, flexDirection: 'column', gap: 2, background: d.bg, color: d.fg, borderColor: d.border }}
+            >
+              <span style={{ fontSize: 10, letterSpacing: '0.07em', textTransform: 'uppercase', opacity: 0.85 }}>{d.dow}</span>
+              <span style={{ fontSize: 14, fontWeight: 600 }}>{d.num}</span>
+              <span style={{ fontSize: 9.5, opacity: 0.85 }}>{d.badge}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* skip toggle */}
+      <div style={{ padding: '6px 22px 0' }}>
+        <div className="card" style={{ padding: '14px 16px', gap: 0, background: 'var(--color-neutral-100)', borderColor: 'var(--color-neutral-300)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>
+                {skippedToday ? 'You skipped this day' : 'Not eating on this day?'}
+              </div>
+              <div className="text-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+                {skippedToday ? 'No delivery scheduled.' : 'Skip before browsing the menu.'}
+              </div>
+            </div>
+            <button
+              className="btn btn-secondary"
+              onClick={() => setSkipped((s) => ({ ...s, [day]: !s[day] }))}
+              style={{ fontSize: 13, whiteSpace: 'nowrap' }}
+            >
+              {skippedToday ? 'Undo skip' : 'Skip this day'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {skippedToday ? (
+        <div style={{ padding: '26px 22px' }}>
+          <div style={{ border: '1px dashed var(--color-neutral-400)', borderRadius: 'var(--radius-lg)', padding: '40px 24px', textAlign: 'center' }}>
+            <div style={{ fontFamily: 'var(--font-heading)', fontSize: 19, marginBottom: 6 }}>Day skipped</div>
+            <p className="text-muted" style={{ margin: 0, fontSize: 14 }}>No meals will be delivered on {dayHeading}.</p>
+          </div>
+        </div>
+      ) : (
+        <div style={{ padding: '20px 22px 0', display: 'flex', flexDirection: 'column', gap: 24 }}>
+          {courses.length === 0 ? (
+            <p className="text-muted" style={{ fontSize: 14 }}>No meals published for this day yet.</p>
+          ) : (
+            courses.map((course) => (
+              <div key={course.label}>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
+                  <h6 style={{ margin: 0, color: 'var(--color-text)' }}>{course.label}</h6>
+                  <span className="text-muted" style={{ fontSize: 12 }}>{course.count}</span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {course.meals.map((mc) => (
+                    <div key={mc.m.key} className="card" style={{ padding: 0, gap: 0, overflow: 'hidden', borderColor: mc.cardBorder, opacity: mc.cardOpacity }}>
+                      <div onClick={mc.onCard} style={{ height: 44, background: mc.bagBg, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '0 12px', cursor: 'pointer' }}>
+                        <span className="tag" style={{ fontSize: 10.5, padding: '3px 9px', background: '#fff', color: mc.bagFg, fontWeight: 600 }}>{mc.typeLabel}</span>
+                        {mc.statusLabel ? (
+                          <span className="tag" style={{ fontSize: 10.5, padding: '3px 9px', background: mc.statusBg, color: mc.statusFg, fontWeight: 600 }}>{mc.statusLabel}</span>
+                        ) : null}
+                      </div>
+                      <div style={{ padding: '14px 16px 16px' }}>
+                        <div onClick={mc.onCard} style={{ cursor: 'pointer' }}>
+                          <div style={{ fontSize: 16, fontWeight: 600, lineHeight: 1.3, letterSpacing: '-0.01em', marginBottom: 8 }}>{mc.name}</div>
+                          {mc.sub ? <div className="text-muted" style={{ fontSize: 12.5, lineHeight: 1.5, marginBottom: 10 }}>{mc.sub}</div> : null}
+                          {mc.tags.length ? (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 14 }}>
+                              {mc.tags.map((t, i) => (
+                                <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: t.bg, color: t.fg }}>{t.label}</span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        {mc.blocked ? (
+                          <button className="btn btn-secondary btn-block" onClick={mc.onCard} style={{ fontSize: 13, justifyContent: 'flex-start' }}>
+                            Ask customer service
+                          </button>
+                        ) : (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <button className="btn btn-secondary" onClick={mc.onMinus} disabled={mc.minusDisabled} style={{ width: 44, height: 44, padding: 0, fontSize: 19, lineHeight: 1 }}>
+                              &#8722;
+                            </button>
+                            <div style={{ flex: 1, textAlign: 'center', fontFamily: 'var(--font-heading)', fontSize: 19, fontVariantNumeric: 'tabular-nums' }}>{mc.qty}</div>
+                            <button className="btn btn-primary" onClick={mc.onPlus} style={{ width: 44, height: 44, padding: 0, fontSize: 19, lineHeight: 1 }}>+</button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {/* sticky footer */}
+      <div style={{ position: 'sticky', bottom: 0, marginTop: 26, background: '#fff', borderTop: '1px solid var(--color-divider)', padding: '14px 22px 18px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+          <span className="text-muted" style={{ fontSize: 12.5 }}>
+            {skippedToday ? 'This day is skipped' : `Selected for ${dayKeys[day] ? DAYS[dateFromKey(dayKeys[day]).getDay()] : ''}`}
+          </span>
+          <span style={{ fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+            {skippedToday ? '–' : `${selectedToday}/${target}`}
+          </span>
+        </div>
+        <button className="btn btn-primary btn-block" onClick={onSubmitButton} disabled={submitting} style={{ padding: 14 }}>
+          {submitting ? 'Saving…' : day < lastDay ? 'Save and go to next day' : 'Submit my week'}
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderDone = () => (
+    <div style={{ minHeight: preview ? 844 : '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '40px 28px' }}>
+      <div style={{ width: 64, height: 64, borderRadius: 999, background: 'var(--color-accent-2-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, color: 'var(--color-accent-2-900)', marginBottom: 22 }}>
+        &#10003;
+      </div>
+      <h2 style={{ margin: '0 0 10px' }}>Selections received</h2>
+      <p className="text-muted" style={{ margin: '0 0 24px', fontSize: 15, lineHeight: 1.6 }}>
+        Thanks {customer?.firstName} — your week is locked in. We&apos;ve emailed a copy to {customer?.email}.
+      </p>
+      <div className="card" style={{ padding: 18, gap: 0 }}>
+        {summary.map((s, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, padding: '9px 0', borderBottom: '1px solid var(--color-divider)' }}>
+            <span style={{ fontSize: 13.5, whiteSpace: 'nowrap' }}>{s.day}</span>
+            <span className="text-muted" style={{ fontSize: 13, textAlign: 'right' }}>{s.value}</span>
+          </div>
+        ))}
+      </div>
+      <button className="btn btn-secondary btn-block" onClick={() => setStep('menu')} style={{ marginTop: 20 }}>
+        Change my selections
+      </button>
+    </div>
+  );
+
+  const renderModal = () =>
+    modal ? (
+      <div
+        className="dialog-backdrop"
+        style={{ position: preview ? 'absolute' : 'fixed', inset: 0, borderRadius: preview ? 34 : 0, zIndex: 60, padding: 22 }}
+        onClick={() => setModal(null)}
+      >
+        <div className="dialog elev-lg" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '100%' }}>
+          <h6 className="text-muted" style={{ margin: 0 }}>{modal.kicker}</h6>
+          <div className="dialog-title" style={{ fontSize: 21 }}>{modal.title}</div>
+          <div className="dialog-body" style={{ opacity: 1 }}>
+            <p style={{ margin: '0 0 14px', fontSize: 14, lineHeight: 1.6 }}>{modal.body}</p>
+            {modal.items && modal.items.length ? (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {modal.items.map((it, i) => (
+                  <span key={i} className="tag" style={{ fontSize: 11.5, padding: '4px 10px', background: it.bg, color: it.fg }}>{it.label}</span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="dialog-actions" style={{ flexWrap: 'wrap' }}>
+            {modal.actions.map((a, i) => (
+              <button
+                key={i}
+                className="btn"
+                onClick={a.onClick}
+                style={{
+                  fontSize: 13.5,
+                  background: a.kind === 'primary' ? '#051747' : 'transparent',
+                  color: a.kind === 'primary' ? '#fff' : 'var(--color-text)',
+                  borderColor: a.kind === 'primary' ? '#051747' : 'var(--color-neutral-400)',
+                }}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    ) : null;
+
+  const renderToast = () =>
+    toast ? (
+      <div style={{ position: preview ? 'absolute' : 'fixed', left: '50%', bottom: 104, transform: 'translateX(-50%)', zIndex: 70, padding: '11px 18px', borderRadius: 999, background: '#050f2b', color: '#fff', fontSize: 13, whiteSpace: 'nowrap', boxShadow: 'var(--shadow-lg)' }}>
+        {toast}
+      </div>
+    ) : null;
+
+  const renderBody = () => {
+    if (!preview && loadState === 'loading') {
+      return (
+        <div style={{ minHeight: preview ? 844 : '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
+          <span className="text-muted" style={{ fontSize: 14 }}>Loading this week&apos;s menu…</span>
+        </div>
+      );
+    }
+    if (!preview && loadState === 'error') {
+      return (
+        <div style={{ minHeight: preview ? 844 : '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px 28px', textAlign: 'center' }}>
+          <MatterLogo height={24} style={{ marginBottom: 24 }} />
+          <h2 style={{ margin: '0 0 10px' }}>Link unavailable</h2>
+          <p className="text-muted" style={{ margin: 0, fontSize: 15, lineHeight: 1.6 }}>{loadError}</p>
+        </div>
+      );
+    }
+    return (
+      <>
+        {step === 'signin' && renderSignIn()}
+        {step === 'menu' && account && renderMenu()}
+        {step === 'done' && renderDone()}
+      </>
+    );
+  };
+
+  return (
+    <div className="msl" style={OUTER}>
+      <div>
+        {preview ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, width: 390, margin: '0 auto 12px' }}>
+            <span style={{ fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--color-neutral-600)' }}>
+              Customer link preview
+            </span>
+            <button className="btn btn-secondary" onClick={resetAll} style={{ fontSize: 12, padding: '6px 12px' }}>Restart</button>
+          </div>
+        ) : null}
+
+        <div style={FRAME}>
+          <div className="msl-phone" style={{ height: preview ? '100%' : 'auto', overflowY: preview ? 'auto' : 'visible' }}>
+            {renderBody()}
+          </div>
+          {renderModal()}
+          {renderToast()}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default MenuSelectionLink;

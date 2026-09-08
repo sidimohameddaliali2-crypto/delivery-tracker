@@ -53,6 +53,25 @@ export function formatBusinessDateTime(dateInput) {
   return `${pad2(c.month + 1)}/${pad2(c.day)}/${c.year} ${pad2(c.hours)}:${pad2(c.minutes)}`;
 }
 
+// 12h clock ("h:mm AM/PM") from a count of seconds since business-day
+// midnight — the convention the route-ETA/soft-deadline calculations use.
+// Wraps properly for a negative or >86400 input (an implied "yesterday" or
+// "tomorrow" anchor), unlike a bare `%`, which stays negative in JS for a
+// negative left-hand side.
+export function formatClockFromSecondsSinceMidnight(seconds) {
+  if (seconds == null || Number.isNaN(seconds)) return null;
+  // Round to the nearest whole minute FIRST, then wrap — rounding hours/minutes
+  // separately from raw seconds can carry a fractional minute up to a literal
+  // "60" (e.g. 3599.6s -> 59.99 -> rounds to 60 minutes past the hour).
+  const totalMinutes = Math.round(seconds / 60);
+  const wrapped = ((totalMinutes % 1440) + 1440) % 1440;
+  let h = Math.floor(wrapped / 60);
+  const m = wrapped % 60;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${pad2(m)} ${ampm}`;
+}
+
 // Business-local "YYYY-MM-DD" + "HH:mm" -> the equivalent UTC Date instant.
 export function businessComponentsToUtcDate(dateStr, timeStr) {
   if (!dateStr || !timeStr) return null;

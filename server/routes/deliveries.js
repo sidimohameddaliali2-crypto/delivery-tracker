@@ -6,14 +6,26 @@ import Delivery from '../models/Delivery.js';
 import DeliveryChange from '../models/DeliveryChange.js';
 import Bag from '../models/Bag.js';
 import User from '../models/User.js';
+import Customer from '../models/Customer.js';
 import { protect, authorize, admin } from '../middleware/auth.js'; // Fixed import
 import { upload, handleUploadError } from '../middleware/upload.js';
 import { getUploadToSpaces } from '../config/spaces.js';
 import { detectAreaFromAddress } from '../config/areas.js';
-import { resolveDeliveryCoordinates, extractCoordsFromGoogleMapsUrl } from '../services/geocoding.js';
+import { resolveDeliveryCoordinatesCached, isPlausibleCoordinate } from '../services/geocoding.js';
 import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js';
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
-import { optimizeRoutes, applyRoutePlan } from '../services/routeOptimizationService.js';
+import {
+  optimizeRoutes,
+  applyRoutePlan,
+  TZ_OFFSET_MS,
+  serviceSecondsForVehicleType,
+  KITCHEN_DEPARTURE_DEFAULT_SECONDS,
+  KITCHEN_DEPARTURE_EARLIEST_SECONDS,
+  DELIVERY_WINDOW_SECONDS
+} from '../services/routeOptimizationService.js';
+import { buildOrderedRouteLegs } from '../services/distanceMatrixService.js';
+import Handoff from '../models/Handoff.js';
+import { HANDOFF_DWELL_SECONDS, KITCHEN_RELOAD_DWELL_SECONDS } from '../services/handoffPlanner.js';
 
 // Helper to persist coordinates onto a customer's record via their deliveries
 async function saveCustomerCoords(delivery, lat, lng, link) {
@@ -26,6 +38,17 @@ async function saveCustomerCoords(delivery, lat, lng, link) {
   delivery.lat = lat;
   delivery.lng = lng;
   await delivery.save();
+
+  // A dispatcher manually placing a pin is the most trustworthy source there
+  // is — cache it on the customer so it's reused everywhere (Optimize Routes,
+  // new deliveries, map views) without ever being re-geocoded, and so it
+  // can't later be overwritten by a re-geocode of the same address.
+  if (delivery.customerId) {
+    await Customer.updateOne(
+      { customerId: delivery.customerId },
+      { $set: { gpsLocation: { lat, lng, source: 'manual', address: String(delivery.address || '').trim(), geocodedAt: new Date() } } }
+    ).catch((err) => console.warn('Failed to cache customer coordinates:', err.message));
+  }
 }
 
 // Timezone handling: treat client-supplied local times as LOCAL_TZ when they lack an explicit offset
@@ -357,6 +380,376 @@ async function checkAndApplyPendingChanges(delivery) {
 // All routes are protected
 router.use(protect);
 
+// @desc    Depot (kitchen) location used by map views — same env the route optimizer uses.
+//          Registered before '/:id' so "depot" is never parsed as a delivery id.
+// @route   GET /api/deliveries/depot
+router.get('/depot', authorize(['admin', 'super_admin', 'dispatcher', 'manager']), (req, res) => {
+  const lat = Number(process.env.DELIVERY_DEPOT_LAT);
+  const lng = Number(process.env.DELIVERY_DEPOT_LNG);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.json({ success: true, data: null });
+  }
+  res.json({
+    success: true,
+    data: { lat, lng, label: process.env.DELIVERY_DEPOT_LABEL || 'Depot' }
+  });
+});
+
+// @desc    Resolve coordinates for deliveries that have none stored (map views).
+//          Same customer-cached resolver Optimize Routes uses: a customer's
+//          address is geocoded at most once, ever — see
+//          resolveDeliveryCoordinatesCached / Customer.gpsLocation. Read-only
+//          from this endpoint's point of view — it never writes to the
+//          delivery itself, only (via the shared resolver) to the customer's
+//          cache.
+// @route   POST /api/deliveries/resolve-coords   { deliveryIds: [] }
+const RESOLVE_COORDS_MAX_IDS = 500;
+const RESOLVE_COORDS_CONCURRENCY = 5;
+router.post('/resolve-coords', authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  const { deliveryIds } = req.body || {};
+  const validIds = Array.isArray(deliveryIds)
+    && deliveryIds.length > 0
+    && deliveryIds.length <= RESOLVE_COORDS_MAX_IDS
+    && deliveryIds.every((id) => typeof id === 'string' && /^[a-f\d]{24}$/i.test(id));
+  if (!validIds) {
+    return res.status(400).json({ success: false, message: `deliveryIds must be 1-${RESOLVE_COORDS_MAX_IDS} delivery ids` });
+  }
+
+  try {
+    const deliveries = await Delivery.find({ _id: { $in: deliveryIds } })
+      .select('customerId customerName address gpsLocation location lat lng')
+      .lean();
+
+    const resolved = {};
+    const unresolved = [];
+
+    const resolveOne = async (delivery) => {
+      const id = String(delivery._id);
+      if (isPlausibleCoordinate(delivery.gpsLocation?.lat, delivery.gpsLocation?.lng)) {
+        resolved[id] = { lat: delivery.gpsLocation.lat, lng: delivery.gpsLocation.lng, source: 'stored' };
+        return;
+      }
+      const coords = await resolveDeliveryCoordinatesCached({ ...delivery, mapsUrl: delivery.gpsLocation?.link || undefined });
+      if (coords) resolved[id] = { lat: coords.lat, lng: coords.lng, source: 'geocoded' };
+      else unresolved.push(id);
+    };
+
+    for (let i = 0; i < deliveries.length; i += RESOLVE_COORDS_CONCURRENCY) {
+      await Promise.all(
+        deliveries.slice(i, i + RESOLVE_COORDS_CONCURRENCY).map((d) => resolveOne(d).catch((err) => {
+          console.error('resolve-coords failed for delivery', String(d._id), err.message);
+          unresolved.push(String(d._id));
+        }))
+      );
+    }
+
+    res.json({ success: true, data: { resolved, unresolved } });
+  } catch (error) {
+    console.error('Error resolving delivery coordinates:', error);
+    res.status(500).json({ success: false, message: 'Failed to resolve coordinates' });
+  }
+});
+
+// @desc    Estimate a real (road-time) arrival at each stop of an already-ordered
+//          route, and whether that lands early / on time / late against each
+//          stop's delivery window. Read-only — used by map views, not the optimizer.
+//
+//          Departure follows the kitchen's rule (see KITCHEN_DEPARTURE_* in
+//          routeOptimizationService.js): leave at the usual time; pull it
+//          earlier only if the route's scheduled times need it; never before
+//          the earliest allowed — past that, plan at the earliest and report
+//          the departure that would have been needed. From there the day
+//          cascades forward on real OSRM driving legs + the optimizer's
+//          per-stop service-time estimate (villa/apartment), and finishes
+//          with the drive back to the kitchen so totals cover the whole day.
+//
+//          A stop's scheduledTime is the END of its window (07:00 = 04:00–07:00,
+//          see DELIVERY_WINDOW_SECONDS): after it is late, before it opens is
+//          early, anywhere inside is on time.
+//
+//          Once a stop is actually delivered (Delivery.completedAt set), its
+//          real timestamp replaces the projection for that stop — an actual
+//          early/late instead of a guess — and re-anchors the cascade for the
+//          stops still pending, so the rest of the day's estimate tracks
+//          reality as it happens instead of drifting from a stale morning
+//          assumption.
+// @route   POST /api/deliveries/route-eta
+//          { deliveryIds: [], vehicleType?, driverId?, date? }  (visit order)
+//          vehicleType ('bike' | 'van') picks the flat time-at-the-door figure
+//          for every stop on this route (see serviceSecondsForVehicleType) —
+//          defaults to the slower (bike) figure when omitted.
+//          driverId + date (YYYY-MM-DD) let this look up the driver's planned
+//          second-trip pickup for that day (a van handoff, or a return to the
+//          kitchen) and fold its detour into the ETAs at the right point, so
+//          the times after it are honest about the trip back.
+const ROUTE_ETA_MAX_STOPS = 150;
+router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  const { deliveryIds, vehicleType, driverId, date } = req.body || {};
+  const validIds = Array.isArray(deliveryIds)
+    && deliveryIds.length > 0
+    && deliveryIds.length <= ROUTE_ETA_MAX_STOPS
+    && deliveryIds.every((id) => typeof id === 'string' && /^[a-f\d]{24}$/i.test(id));
+  if (!validIds) {
+    return res.status(400).json({ success: false, message: `deliveryIds must be 1-${ROUTE_ETA_MAX_STOPS} delivery ids, in visit order` });
+  }
+
+  const depotLat = Number(process.env.DELIVERY_DEPOT_LAT);
+  const depotLng = Number(process.env.DELIVERY_DEPOT_LNG);
+  if (!Number.isFinite(depotLat) || !Number.isFinite(depotLng)) {
+    return res.status(400).json({ success: false, message: 'DELIVERY_DEPOT_LAT/DELIVERY_DEPOT_LNG are not configured' });
+  }
+
+  try {
+    const found = await Delivery.find({ _id: { $in: deliveryIds } })
+      .select('customerId customerName address addressDetails gpsLocation location lat lng scheduledTime completedAt')
+      .lean();
+    const byId = new Map(found.map((d) => [String(d._id), d]));
+    // Preserve the caller's visit order, not Mongo's — that order is the whole point.
+    const ordered = deliveryIds.map((id) => byId.get(id)).filter(Boolean);
+
+    const withCoords = [];
+    const droppedIds = [];
+    for (const delivery of ordered) {
+      let coords = isPlausibleCoordinate(delivery.gpsLocation?.lat, delivery.gpsLocation?.lng)
+        ? { lat: delivery.gpsLocation.lat, lng: delivery.gpsLocation.lng }
+        : null;
+      if (!coords) coords = await resolveDeliveryCoordinatesCached(delivery).catch(() => null);
+      if (coords) withCoords.push({ delivery, coords });
+      else droppedIds.push(String(delivery._id));
+    }
+
+    if (withCoords.length === 0) {
+      return res.json({ success: true, data: { departure: null, totals: null, stops: [], droppedIds } });
+    }
+
+    // Kitchen → every stop in order → back to the kitchen. The last leg is the
+    // return, so there are withCoords.length + 1 legs and totals cover the
+    // whole day the driver actually drives.
+    const depot = { lat: depotLat, lng: depotLng };
+    const points = [depot, ...withCoords.map((w) => w.coords), depot];
+    const { legDurations, legDistances } = await buildOrderedRouteLegs(points);
+
+    // The driver's planned second-trip pickup for this day, if any. A bike has
+    // at most one (a van handoff OR a kitchen return); a van can be the
+    // counterpart for several bikes.
+    const validDate = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date);
+    const validDriverId = typeof driverId === 'string' && /^[a-f\d]{24}$/i.test(driverId);
+    let pickup = null;         // this driver's OWN detour (bike side)
+    let meetingBikes = [];     // bikes meeting this driver (van side)
+    if (validDate && validDriverId) {
+      const records = await Handoff.find({ date, status: { $ne: 'cancelled' }, $or: [{ bike: driverId }, { van: driverId }] })
+        .populate('bike', 'profile.firstName profile.lastName')
+        .populate('van', 'profile.firstName profile.lastName')
+        .lean();
+      pickup = records.find((r) => String(r.bike?._id ?? r.bike) === String(driverId)) || null;
+      meetingBikes = records.filter((r) => r.van && String(r.van?._id ?? r.van) === String(driverId));
+    }
+
+    // Where the detour goes: immediately before the first second-trip stop.
+    // Matched by delivery id rather than the stored routeOrder, so a stop
+    // dropped above for having no location can't shift it onto the wrong leg.
+    const nameOf = (u) => [u?.profile?.firstName, u?.profile?.lastName].filter(Boolean).join(' ') || 'Driver';
+    let detour = null;
+    if (pickup) {
+      const secondTripIds = new Set((pickup.deliveryIds || []).map((id) => String(id?._id ?? id)));
+      const insertAt = withCoords.findIndex((w) => secondTripIds.has(String(w.delivery._id)));
+      // Needs a stop before it to leave from; index 0 would mean the whole
+      // route is trip 2, which the planner never produces.
+      const mp = pickup.meetingPoint || {};
+      if (insertAt > 0 && Number.isFinite(mp.lat) && Number.isFinite(mp.lng)) {
+        // Price the real side trip: last trip-1 stop → kitchen/meeting point →
+        // first trip-2 stop, against the direct leg it replaces. Measured
+        // fresh (the planner's per-leg figures aren't stored) so the arrival
+        // AT the pickup can be reported as a clock time, not just a total.
+        const via = await buildOrderedRouteLegs([
+          withCoords[insertAt - 1].coords,
+          { lat: mp.lat, lng: mp.lng },
+          withCoords[insertAt].coords
+        ]).catch(() => null);
+        if (via) {
+          const toPickup = Math.round(via.legDurations[0] || 0);
+          const fromPickup = Math.round(via.legDurations[1] || 0);
+          // A kitchen return is a solo reload; a van handoff also carries the
+          // wait for whichever driver gets there first. expectedWaitSeconds is
+          // the gap between the two planned arrivals, so it's an upper bound.
+          const dwell = pickup.type === 'kitchen_return'
+            ? KITCHEN_RELOAD_DWELL_SECONDS
+            : HANDOFF_DWELL_SECONDS + Math.round(pickup.expectedWaitSeconds || 0);
+          const direct = Math.round(legDurations[insertAt] ?? 0);
+          detour = {
+            type: pickup.type,
+            beforeIndex: insertAt,
+            beforeDeliveryId: String(withCoords[insertAt].delivery._id),
+            toPickupSeconds: toPickup,
+            dwellSeconds: dwell,
+            extraSeconds: Math.max(0, toPickup + dwell + fromPickup - direct),
+            meetingPoint: { lat: mp.lat, lng: mp.lng, name: mp.name, poiType: mp.poiType },
+            counterpartName: pickup.type === 'van_handoff' ? nameOf(pickup.van) : null,
+            // kitchen_return: why no van took it (a van meeting is tried first).
+            vanReason: pickup.vanReason || null,
+            bagCount: (pickup.deliveryIds || []).length,
+            status: pickup.status
+          };
+        }
+      }
+    }
+    // Flat per-vehicle figure, same at every stop on this route (see
+    // serviceSecondsForVehicleType) — villa and apartment no longer differ.
+    const routeServiceSeconds = serviceSecondsForVehicleType(vehicleType);
+    const serviceSeconds = withCoords.map(() => routeServiceSeconds);
+
+    const secondsFromMidnight = (dateLike) => {
+      const local = new Date(new Date(dateLike).getTime() + TZ_OFFSET_MS);
+      return local.getUTCHours() * 3600 + local.getUTCMinutes() * 60 + local.getUTCSeconds();
+    };
+    const scheduledSeconds = withCoords.map((w) => (w.delivery.scheduledTime ? secondsFromMidnight(w.delivery.scheduledTime) : null));
+
+    // Latest departure that still has EVERY scheduled stop arriving by its
+    // scheduled time, given real travel + dwell up to each one.
+    let requiredDepartureSeconds = null;
+    {
+      let elapsed = 0;
+      for (let i = 0; i < withCoords.length; i += 1) {
+        if (detour && i === detour.beforeIndex) elapsed += detour.extraSeconds;
+        elapsed += legDurations[i] ?? 0;
+        if (scheduledSeconds[i] !== null) {
+          const latest = scheduledSeconds[i] - elapsed;
+          if (requiredDepartureSeconds === null || latest < requiredDepartureSeconds) requiredDepartureSeconds = latest;
+        }
+        elapsed += serviceSeconds[i];
+      }
+    }
+
+    // The kitchen's departure rule: usual time; earlier only if this route
+    // needs it; never before the earliest allowed.
+    const earliestDeparture = Math.min(KITCHEN_DEPARTURE_EARLIEST_SECONDS, KITCHEN_DEPARTURE_DEFAULT_SECONDS);
+    const usualDeparture = Math.max(KITCHEN_DEPARTURE_EARLIEST_SECONDS, KITCHEN_DEPARTURE_DEFAULT_SECONDS);
+    let departureSeconds = usualDeparture;
+    let departureReason = 'usual';
+    if (requiredDepartureSeconds !== null && requiredDepartureSeconds < usualDeparture) {
+      if (requiredDepartureSeconds >= earliestDeparture) {
+        departureSeconds = requiredDepartureSeconds;
+        departureReason = 'earlier';
+      } else {
+        departureSeconds = earliestDeparture;
+        departureReason = 'capped';
+      }
+    }
+
+    const etaSeconds = new Array(withCoords.length).fill(null);
+    const isActual = new Array(withCoords.length).fill(false);
+    const lateSeconds = new Array(withCoords.length).fill(null); // > 0: arrived after the scheduled time
+    const earlySeconds = new Array(withCoords.length).fill(null); // > 0: arrived before the window opened
+
+    let clock = departureSeconds;
+    for (let i = 0; i < withCoords.length; i += 1) {
+      const delivery = withCoords[i].delivery;
+      // The second-trip pickup happens on the way to this stop: note the
+      // clock time the driver reaches the kitchen / meeting point, then charge
+      // the whole side trip before the (direct) leg below.
+      if (detour && i === detour.beforeIndex) {
+        detour.arrivalSeconds = clock + detour.toPickupSeconds;
+        detour.departureSeconds = detour.arrivalSeconds + detour.dwellSeconds;
+        clock += detour.extraSeconds;
+      }
+      if (delivery.completedAt) {
+        // Actually delivered: the real timestamp replaces the projection and
+        // re-anchors everything still pending. Early/late straight from the two
+        // real timestamps so a delivery just after local midnight can't wrap.
+        const completedMs = new Date(delivery.completedAt).getTime();
+        etaSeconds[i] = secondsFromMidnight(delivery.completedAt);
+        isActual[i] = true;
+        if (delivery.scheduledTime) {
+          const scheduledMs = new Date(delivery.scheduledTime).getTime();
+          lateSeconds[i] = Math.max(0, (completedMs - scheduledMs) / 1000);
+          earlySeconds[i] = Math.max(0, (scheduledMs - DELIVERY_WINDOW_SECONDS * 1000 - completedMs) / 1000);
+        }
+        clock = etaSeconds[i] + serviceSeconds[i];
+      } else {
+        clock += legDurations[i] ?? 0;
+        etaSeconds[i] = clock;
+        if (scheduledSeconds[i] !== null) {
+          lateSeconds[i] = Math.max(0, clock - scheduledSeconds[i]);
+          earlySeconds[i] = Math.max(0, scheduledSeconds[i] - DELIVERY_WINDOW_SECONDS - clock);
+        }
+        clock += serviceSeconds[i];
+      }
+    }
+    const backAtKitchenSeconds = clock + (legDurations[withCoords.length] ?? 0);
+
+    const statusOf = (i) => {
+      if (lateSeconds[i] === null) return null;
+      if (lateSeconds[i] > 0) return 'late';
+      if (earlySeconds[i] > 0) return 'early';
+      return 'on_time';
+    };
+
+    const stops = withCoords.map((w, i) => ({
+      deliveryId: String(w.delivery._id),
+      etaSeconds: etaSeconds[i],
+      actual: isActual[i],
+      scheduledSeconds: scheduledSeconds[i],
+      windowStartSeconds: scheduledSeconds[i] !== null ? scheduledSeconds[i] - DELIVERY_WINDOW_SECONDS : null,
+      status: statusOf(i), // 'late' | 'early' | 'on_time' | null (no scheduled time)
+      lateSeconds: lateSeconds[i],
+      earlySeconds: earlySeconds[i],
+      legDurationSeconds: legDurations[i] ?? null,
+      legDistanceMeters: legDistances[i] ?? null
+    }));
+
+    const counts = stops.reduce((acc, s) => { if (s.status) acc[s.status] += 1; return acc; }, { late: 0, early: 0, on_time: 0 });
+
+    res.json({
+      success: true,
+      data: {
+        departure: {
+          seconds: departureSeconds,
+          reason: departureReason, // 'usual' | 'earlier' | 'capped'
+          usualSeconds: usualDeparture,
+          earliestSeconds: earliestDeparture,
+          // Departure that would have every stop on time — may be before the
+          // earliest allowed, in which case it's informational only.
+          requiredSeconds: requiredDepartureSeconds
+        },
+        windowSeconds: DELIVERY_WINDOW_SECONDS,
+        totals: {
+          distanceMeters: legDistances.reduce((a, b) => a + (b ?? 0), 0),
+          returnDistanceMeters: legDistances[withCoords.length] ?? 0,
+          drivingSeconds: legDurations.reduce((a, b) => a + (b ?? 0), 0),
+          serviceSeconds: serviceSeconds.reduce((a, b) => a + b, 0),
+          // Extra time for the second-trip side trip, already folded into the
+          // ETAs and backAtKitchenSeconds above (0 when there isn't one).
+          pickupDetourSeconds: detour?.extraSeconds || 0,
+          backAtKitchenSeconds,
+          late: counts.late,
+          early: counts.early,
+          onTime: counts.on_time
+        },
+        // This driver's own second-trip pickup (bike side), with the clock
+        // time it happens — null when the day needs no second trip.
+        detour,
+        // Bikes meeting THIS driver (van side) — informational; the van's own
+        // stop ETAs above don't include its small detour to each meeting.
+        meetingBikes: meetingBikes.map((r) => ({
+          handoffId: String(r._id),
+          bikeName: nameOf(r.bike),
+          afterRouteOrder: r.vanAfterRouteOrder,
+          meetingPoint: r.meetingPoint,
+          plannedVanArrivalSeconds: r.plannedVanArrivalSeconds,
+          expectedWaitSeconds: r.expectedWaitSeconds,
+          bagCount: (r.deliveryIds || []).length,
+          status: r.status
+        })),
+        stops,
+        droppedIds
+      }
+    });
+  } catch (error) {
+    console.error('Error estimating route ETAs:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to estimate route ETAs' });
+  }
+});
+
 // @desc    Get all deliveries
 // @route   GET /api/deliveries
 // @access  Private
@@ -510,6 +903,18 @@ function normalizeLocationPayload(raw) {
     }
   }
 
+  return null;
+}
+
+// Normalizes free-text location-type input (from the bulk import sheet, a
+// batch-wide default, or manual entry) to the schema's enum, or null when it
+// doesn't recognize the value — never lets a stray string reach Mongoose and
+// fail the addressDetails.locationType enum validation.
+function normalizeLocationType(value) {
+  const cleaned = String(value || '').trim().toLowerCase();
+  if (!cleaned) return null;
+  if (['villa', 'house', 'townhouse', 'v'].includes(cleaned)) return 'Villa';
+  if (['apartment', 'apt', 'flat', 'a'].includes(cleaned)) return 'Apartment';
   return null;
 }
 
@@ -960,6 +1365,11 @@ router.post('/', [
       deliveryData.company = 'Matter';
     }
 
+    if (deliveryData.addressDetails || deliveryData.locationType) {
+      const locationType = normalizeLocationType(deliveryData.addressDetails?.locationType || deliveryData.locationType);
+      deliveryData.addressDetails = { ...(deliveryData.addressDetails || {}), locationType };
+    }
+
     // Auto-detect area from address if address is provided and area is empty/missing
     if (deliveryData.address && (!deliveryData.zone || deliveryData.zone.trim() === '')) {
       const detectedArea = detectAreaFromAddress(deliveryData.address, '', {
@@ -975,7 +1385,7 @@ router.post('/', [
     if (!deliveryData.lat || !deliveryData.lng) {
       if (!deliveryData.gpsLocation || !deliveryData.gpsLocation.lat || !deliveryData.gpsLocation.lng) {
         try {
-          const coords = await resolveDeliveryCoordinates(deliveryData);
+          const coords = await resolveDeliveryCoordinatesCached(deliveryData);
           if (coords) {
             deliveryData.gpsLocation = {
               lat: coords.lat,
@@ -1091,7 +1501,12 @@ router.post('/bulk', [
       } else {
         deliveryData.company = deliveryData.company.trim();
       }
-      
+
+      if (deliveryData.addressDetails || deliveryData.locationType) {
+        const locationType = normalizeLocationType(deliveryData.addressDetails?.locationType || deliveryData.locationType);
+        deliveryData.addressDetails = { ...(deliveryData.addressDetails || {}), locationType };
+      }
+
       // Auto-detect area from address if area is empty/missing
       if (deliveryData.address && (!deliveryData.zone || deliveryData.zone.trim() === '')) {
         const detectedArea = detectAreaFromAddress(deliveryData.address, '', {
@@ -1102,53 +1517,30 @@ router.post('/bulk', [
         }
       }
 
-      // Check if this customer exists in database and has coordinates
-      let existingCustomerCoords = null;
-      if (deliveryData.customerId) {
-        try {
-          const existingDelivery = await Delivery.findOne(
-            { customerId: deliveryData.customerId, 'gpsLocation.lat': { $exists: true, $ne: null } },
-            { gpsLocation: 1 }
-          ).sort({ createdAt: -1 }).limit(1);
-          
-          if (existingDelivery && existingDelivery.gpsLocation && existingDelivery.gpsLocation.lat) {
-            existingCustomerCoords = existingDelivery.gpsLocation;
-            console.log(`✅ Found existing coordinates for customer ${deliveryData.customerId}: [${existingCustomerCoords.lat}, ${existingCustomerCoords.lng}]`);
-          }
-        } catch (err) {
-          console.warn('Error checking for existing customer coords:', err.message);
-        }
-      }
-
-      // Try to extract/geocode coordinates from Google Maps URL or address
+      // Try to extract/geocode coordinates from Google Maps URL or address —
+      // resolveDeliveryCoordinatesCached checks the customer's cached location
+      // first (Customer.gpsLocation), so a repeat customer's address is never
+      // re-sent to Google here. (This replaces an older ad-hoc "most recent
+      // delivery for this customer" lookup that didn't validate the result was
+      // even plausible before reusing it — a bad geocode could self-propagate
+      // to every later delivery for that customer. The cached resolver's
+      // depot-proximity check closes that gap.)
       if (!deliveryData.lat || !deliveryData.lng) {
         if (!deliveryData.gpsLocation || !deliveryData.gpsLocation.lat || !deliveryData.gpsLocation.lng) {
-          // Use existing customer coordinates if available
-          if (existingCustomerCoords) {
-            deliveryData.gpsLocation = {
-              lat: existingCustomerCoords.lat,
-              lng: existingCustomerCoords.lng,
-              link: deliveryData.mapsUrl || undefined
-            };
-            deliveryData.lat = existingCustomerCoords.lat;
-            deliveryData.lng = existingCustomerCoords.lng;
-          } else {
-            // Otherwise geocode
-            try {
-              const coords = await resolveDeliveryCoordinates(deliveryData);
-              if (coords) {
-                deliveryData.gpsLocation = {
-                  lat: coords.lat,
-                  lng: coords.lng,
-                  link: deliveryData.mapsUrl || undefined
-                };
-                // Also set top-level for easier access
-                deliveryData.lat = coords.lat;
-                deliveryData.lng = coords.lng;
-              }
-            } catch (err) {
-              console.warn('Geocoding failed for bulk delivery (non-blocking):', err.message);
+          try {
+            const coords = await resolveDeliveryCoordinatesCached(deliveryData);
+            if (coords) {
+              deliveryData.gpsLocation = {
+                lat: coords.lat,
+                lng: coords.lng,
+                link: deliveryData.mapsUrl || undefined
+              };
+              // Also set top-level for easier access
+              deliveryData.lat = coords.lat;
+              deliveryData.lng = coords.lng;
             }
+          } catch (err) {
+            console.warn('Geocoding failed for bulk delivery (non-blocking):', err.message);
           }
         }
       }
@@ -1219,7 +1611,14 @@ router.post('/optimize-routes', [
   body('deliveryIds').isArray({ min: 1 }).withMessage('deliveryIds array is required'),
   body('deliveryIds.*').isMongoId().withMessage('Invalid delivery ID'),
   body('driverIds').isArray({ min: 1 }).withMessage('driverIds array is required'),
-  body('driverIds.*').isMongoId().withMessage('Invalid driver ID')
+  body('driverIds.*').isMongoId().withMessage('Invalid driver ID'),
+  // Dispatcher controls, both one-time/per-plan — nothing is persisted.
+  body('fixedDepartureSeconds').optional({ nullable: true }).isInt({ min: 0, max: 86399 })
+    .withMessage('fixedDepartureSeconds must be seconds from midnight (0-86399)'),
+  body('hubVans').optional().isArray().withMessage('hubVans must be an array'),
+  body('hubVans.*.driverId').isMongoId().withMessage('Invalid hub van driver ID'),
+  body('hubVans.*.hubReadySeconds').isInt({ min: 0, max: 86399 })
+    .withMessage('hubReadySeconds must be seconds from midnight (0-86399)')
 ], authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1227,8 +1626,11 @@ router.post('/optimize-routes', [
       return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
     }
 
-    const { deliveryIds, driverIds } = req.body;
-    const plan = await optimizeRoutes(deliveryIds, driverIds);
+    const { deliveryIds, driverIds, fixedDepartureSeconds, hubVans } = req.body;
+    const plan = await optimizeRoutes(deliveryIds, driverIds, {
+      fixedDepartureSeconds: fixedDepartureSeconds ?? null,
+      hubVans: hubVans || []
+    });
     res.json({ success: true, data: plan });
   } catch (error) {
     console.error('Optimize routes error:', error.message);
@@ -1237,13 +1639,29 @@ router.post('/optimize-routes', [
 });
 
 // Persist a route plan (from /optimize-routes, possibly dispatcher-edited)
-// onto the underlying deliveries — sets driver, routeOrder, routeOptimizedAt.
+// onto the underlying deliveries — sets driver, routeOrder, routeOptimizedAt —
+// plus any van↔bike handoffs the plan included.
 router.post('/optimize-routes/apply', [
   body('routes').isArray({ min: 1 }).withMessage('routes array is required'),
   body('routes.*.driverId').isMongoId().withMessage('Invalid driver ID'),
   body('routes.*.stops').isArray().withMessage('Each route needs a stops array'),
   body('routes.*.stops.*.deliveryId').isMongoId().withMessage('Invalid delivery ID'),
-  body('routes.*.stops.*.routeOrder').isInt({ min: 0 }).withMessage('routeOrder must be a non-negative integer')
+  body('routes.*.stops.*.routeOrder').isInt({ min: 0 }).withMessage('routeOrder must be a non-negative integer'),
+  body('handoffs').optional().isArray().withMessage('handoffs must be an array'),
+  body('handoffs.*.bikeDriverId').isMongoId().withMessage('Invalid bike driver ID'),
+  body('handoffs.*.vanDriverId').isMongoId().withMessage('Invalid van driver ID'),
+  body('handoffs.*.deliveryIds').isArray({ min: 1 }).withMessage('Each handoff needs deliveryIds'),
+  body('handoffs.*.deliveryIds.*').isMongoId().withMessage('Invalid handoff delivery ID'),
+  body('handoffs.*.meetingPoint.lat').isFloat().withMessage('meetingPoint.lat is required'),
+  body('handoffs.*.meetingPoint.lng').isFloat().withMessage('meetingPoint.lng is required'),
+  body('handoffs.*.vanAfterRouteOrder').isInt({ min: 0 }).withMessage('vanAfterRouteOrder must be a non-negative integer'),
+  body('handoffs.*.bikeAfterRouteOrder').isInt({ min: 0 }).withMessage('bikeAfterRouteOrder must be a non-negative integer'),
+  body('kitchenReturns').optional().isArray().withMessage('kitchenReturns must be an array'),
+  body('kitchenReturns.*.bikeDriverId').isMongoId().withMessage('Invalid bike driver ID'),
+  body('kitchenReturns.*.deliveryIds').isArray({ min: 1 }).withMessage('Each kitchen return needs deliveryIds'),
+  body('kitchenReturns.*.deliveryIds.*').isMongoId().withMessage('Invalid kitchen return delivery ID'),
+  body('kitchenReturns.*.afterRouteOrder').isInt({ min: 0 }).withMessage('afterRouteOrder must be a non-negative integer'),
+  body('kitchenReturns.*.vanReason').optional().isString().withMessage('vanReason must be a string')
 ], authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1251,7 +1669,12 @@ router.post('/optimize-routes/apply', [
       return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
     }
 
-    const result = await applyRoutePlan(req.body.routes);
+    const result = await applyRoutePlan(
+      req.body.routes,
+      req.body.handoffs || [],
+      req.body.kitchenReturns || [],
+      { createdBy: req.user?._id }
+    );
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Apply route plan error:', error.message);
@@ -1344,6 +1767,97 @@ router.patch('/assign-driver', [
     });
   } catch (error) {
     console.error('Assign driver to deliveries error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Statuses a delivery can no longer be pulled back from — it's already been
+// carried out, so unassigning would just orphan a finished record.
+const UNASSIGN_LOCKED_STATUSES = ['delivered', 'completed', 'collected'];
+
+router.patch('/unassign-driver', [
+  body('deliveryIds').isArray({ min: 1 }).withMessage('deliveryIds array is required'),
+  body('deliveryIds.*').isMongoId().withMessage('Invalid delivery ID')
+], authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: errors.array()
+      });
+    }
+
+    const { deliveryIds } = req.body;
+
+    const deliveries = await Delivery.find({ _id: { $in: deliveryIds } });
+    if (deliveries.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No deliveries found for the provided IDs'
+      });
+    }
+
+    const unassignerName = resolveUserDisplayName(req.user) || req.user?.email || 'Dispatcher';
+    const updatedDeliveries = [];
+    const removedFromDrivers = [];
+
+    for (const delivery of deliveries) {
+      if (UNASSIGN_LOCKED_STATUSES.includes(delivery.status)) continue;
+
+      const oldDriverId = delivery.driver ? delivery.driver.toString() : null;
+      if (!oldDriverId) continue; // already unassigned
+
+      delivery.driver = null;
+      if (['assigned', 'on_route', 'picked_up'].includes(delivery.status)) {
+        delivery.status = 'pending';
+      }
+
+      if (!Array.isArray(delivery.timeline)) {
+        delivery.timeline = [];
+      }
+      delivery.timeline.push({
+        status: 'driver_unassigned',
+        timestamp: new Date(),
+        notes: `Unassigned by ${unassignerName}`
+      });
+
+      await delivery.save();
+      await delivery.populate('driver', 'profile.firstName profile.lastName profile.colorCode email');
+      updatedDeliveries.push(delivery);
+      removedFromDrivers.push({ driverId: oldDriverId, delivery });
+    }
+
+    if (updatedDeliveries.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Selected deliveries have no driver to unassign, or are already completed'
+      });
+    }
+
+    const io = req.app.get('io');
+    if (io) {
+      updatedDeliveries.forEach(delivery => io.emit('delivery:updated', delivery));
+    } else {
+      console.warn('Socket.io not initialized - cannot emit delivery updates (unassign-driver)');
+    }
+
+    const pushes = removedFromDrivers.map(({ driverId, delivery }) =>
+      sendDeliveryPushToDriver({ driverId, type: 'delivery_removed', delivery })
+    );
+    Promise.allSettled(pushes).catch(() => {});
+
+    res.json({
+      success: true,
+      message: `Unassigned ${updatedDeliveries.length} of ${deliveries.length} selected deliveries`,
+      data: { deliveries: updatedDeliveries }
+    });
+  } catch (error) {
+    console.error('Unassign driver from deliveries error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'
@@ -1922,9 +2436,30 @@ router.get('/driver/today', protect, async (req, res) => {
       .populate('driver', 'profile.firstName profile.lastName profile.colorCode email')
       .lean();
 
+    // Van↔bike handoffs this driver is part of, for the same day window the
+    // deliveries above use (today, plus tomorrow once the early-next-day
+    // cutoff has passed — mirroring getDriverTodaysDeliveries).
+    const nowLocal = new Date(Date.now() + LOCAL_TZ_OFFSET_MS);
+    const todayStr = nowLocal.toISOString().slice(0, 10);
+    const dates = [todayStr];
+    const earlyNextDay = String(process.env.ENABLE_EARLY_NEXT_DAY || '1') === '1';
+    const nextDayHour = parseInt(process.env.NEXT_DAY_AVAILABLE_HOUR || '16', 10);
+    if (earlyNextDay && nowLocal.getUTCHours() >= nextDayHour) {
+      dates.push(new Date(nowLocal.getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10));
+    }
+    const handoffs = await Handoff.find({
+      date: { $in: dates },
+      status: { $ne: 'cancelled' },
+      $or: [{ van: req.user._id }, { bike: req.user._id }]
+    })
+      .populate('van', 'profile.firstName profile.lastName profile.phone profile.vehicleType')
+      .populate('bike', 'profile.firstName profile.lastName profile.phone profile.vehicleType')
+      .populate('deliveryIds', 'customerName address routeOrder status')
+      .lean();
+
     res.json({
       success: true,
-      data: { deliveries }
+      data: { deliveries, handoffs }
     });
   } catch (error) {
     console.error('❌ Get driver deliveries error:', error);

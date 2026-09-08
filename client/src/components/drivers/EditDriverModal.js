@@ -19,6 +19,7 @@ const buildFormFromDriver = (driver) => ({
   shiftTiming: driver?.profile?.shiftTiming || '',
   vehicleType: driver?.profile?.vehicleType || '',
   vehicleId: driver?.profile?.vehicleId || '',
+  stopCapacity: driver?.profile?.stopCapacity ?? '',
   baseSalary: driver?.profile?.baseSalary ?? '',
   contractType: driver?.profile?.contractType || 'full_time',
   joiningDate: toDateInput(driver?.profile?.joiningDate)
@@ -131,6 +132,7 @@ const EditDriverModal = ({ driver, onClose }) => {
             shiftTiming: formData.shiftTiming || undefined,
             vehicleType: formData.vehicleType || undefined,
             vehicleId: formData.vehicleId || undefined,
+            stopCapacity: formData.stopCapacity !== '' ? Number(formData.stopCapacity) : undefined,
             vehiclePaper: vehiclePaperUrl || undefined,
             baseSalary: formData.baseSalary !== '' ? Number(formData.baseSalary) : undefined,
             contractType: formData.contractType || undefined,
@@ -282,6 +284,19 @@ const EditDriverModal = ({ driver, onClose }) => {
                     <option value="van">Van</option>
                     <option value="car">Car</option>
                   </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Max Stops / Route</label>
+                  <input
+                    type="number"
+                    min="1"
+                    name="stopCapacity"
+                    value={formData.stopCapacity}
+                    onChange={handleChange}
+                    placeholder={formData.vehicleType === 'bike' ? 'Default 20' : formData.vehicleType === 'van' ? 'Default 100' : 'Default by vehicle'}
+                    className={inputCls('stopCapacity')}
+                  />
+                  <p className="mt-1 text-[11px] text-gray-500">Leave blank to use the vehicle-type default (bike 20, van 100).</p>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Vehicle ID</label>

@@ -76,6 +76,7 @@ const DispatcherMobile = () => {
   const [selectedDeliveryIds, setSelectedDeliveryIds] = useState([]);
   const [assigningDriverId, setAssigningDriverId] = useState(null);
   const [activeAssignmentDeliveries, setActiveAssignmentDeliveries] = useState([]);
+  const [unassigning, setUnassigning] = useState(false);
   const [feedback, setFeedback] = useState({ message: '', error: false });
   const [areaDropdownOpen, setAreaDropdownOpen] = useState(false);
   const [driverFilterDropdownOpen, setDriverFilterDropdownOpen] = useState(false);
@@ -607,6 +608,48 @@ const DispatcherMobile = () => {
     }
   };
 
+  const handleUnassignDriver = async (deliveriesToUnassign) => {
+    const targets = (deliveriesToUnassign || []).filter((d) => d.driver);
+    if (!targets.length || unassigning) return;
+    if (!window.confirm(
+      targets.length === 1
+        ? 'Unassign the driver from this delivery?'
+        : `Unassign the driver from ${targets.length} deliveries?`
+    )) return;
+
+    setUnassigning(true);
+    try {
+      const { data } = await api.patch('/deliveries/unassign-driver', {
+        deliveryIds: targets.map((delivery) => delivery._id)
+      });
+      setFeedback({
+        message: data?.message || 'Driver unassigned',
+        error: false
+      });
+      const start = new Date(`${selectedDate}T00:00:00`);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+      dispatch(fetchDeliveries({
+        dateRange: 'custom',
+        dateFrom: start.toISOString(),
+        dateTo: end.toISOString(),
+        limit: 1000
+      }));
+      clearDeliverySelection();
+      setSelectedDeliveryDetail(null);
+    } catch (error) {
+      setFeedback({
+        message:
+          error.response?.data?.message ||
+          error.message ||
+          'Unable to unassign this delivery. Please retry.',
+        error: true
+      });
+    } finally {
+      setUnassigning(false);
+    }
+  };
+
   const driverStatusLabel = (status) => {
     const normalized = (status || '').toLowerCase();
     if (normalized.includes('break')) return 'Break';
@@ -698,6 +741,16 @@ const DispatcherMobile = () => {
             >
               {delivery.status === 'assigned' ? 'Reassign' : 'Assign'}
             </button>
+            {delivery.driver && (
+              <button
+                type="button"
+                onClick={() => handleUnassignDriver([delivery])}
+                disabled={unassigning}
+                className="flex-1 px-3 py-2 text-xs sm:text-sm font-semibold text-red-600 bg-white border border-red-300 rounded-lg hover:bg-red-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Unassign
+              </button>
+            )}
           </div>
         </div>
         <button
@@ -774,7 +827,7 @@ const DispatcherMobile = () => {
           </div>
 
           {/* Action Buttons */}
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <button
               type="button"
               onClick={() => setSelectedDeliveryDetail(delivery)}
@@ -792,6 +845,16 @@ const DispatcherMobile = () => {
             >
               Assign
             </button>
+            {delivery.driver && (
+              <button
+                type="button"
+                onClick={() => handleUnassignDriver([delivery])}
+                disabled={unassigning}
+                className="flex-1 px-2 py-1.5 text-xs font-semibold text-red-600 bg-white border border-red-300 rounded-lg hover:bg-red-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Unassign
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1047,6 +1110,14 @@ const DispatcherMobile = () => {
                 className="rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white"
               >
                 Assign selected
+              </button>
+              <button
+                type="button"
+                onClick={() => handleUnassignDriver(selectedDeliveries)}
+                disabled={unassigning || !selectedDeliveries.some((d) => d.driver)}
+                className="rounded-xl border border-red-200 bg-white px-3 py-2 text-xs font-semibold text-red-600 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Unassign
               </button>
               <button
                 type="button"
@@ -1884,6 +1955,15 @@ const DispatcherMobile = () => {
               >
                 Close
               </button>
+              {selectedDeliveryDetail.driver && (
+                <button
+                  onClick={() => handleUnassignDriver([selectedDeliveryDetail])}
+                  disabled={unassigning}
+                  className="flex-1 px-4 py-2 text-sm font-semibold text-red-600 border border-red-300 rounded-lg hover:bg-red-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Unassign
+                </button>
+              )}
               <button
                 onClick={() => {
                   setSelectedDeliveryDetail(null);

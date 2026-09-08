@@ -7,10 +7,12 @@ import { authenticate } from '../middleware/auth.js';
 const router = express.Router();
 
 // Generate JWT Token
+// No `expiresIn` — sessions never expire (drivers and dispatchers stay
+// logged in indefinitely; a token is only invalidated by explicit logout
+// or by the account being deactivated, checked on every request in
+// middleware/auth.js's `protect`).
 const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN
-  });
+  return jwt.sign({ id }, process.env.JWT_SECRET);
 };
 
 // @desc    Register user

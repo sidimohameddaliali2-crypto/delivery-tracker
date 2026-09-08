@@ -5,6 +5,8 @@ import api from '../utils/api';
 // Google Maps API Key - stored server-side to avoid exposure
 // Component will request key from backend if needed
 const GOOGLE_API_KEY = process.env.REACT_APP_GOOGLE_MAPS_API_KEY || '';
+// Dedicated Geocoding API key; falls back to the Maps key.
+const GEOCODING_API_KEY = process.env.REACT_APP_GOOGLE_GEOCODING_API_KEY || GOOGLE_API_KEY;
 const libraries = ['drawing', 'geometry', 'places'];
 const mapContainerStyle = { width: '100%', height: '100%' };
 
@@ -15,7 +17,7 @@ const cityConfigs = {
 
 async function geocodeAddress(address) {
   try {
-    const resp = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_API_KEY}`);
+    const resp = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GEOCODING_API_KEY}&region=AE`);
     const data = await resp.json();
     if (data.status === 'OK' && data.results && data.results.length > 0) {
       const { lat, lng } = data.results[0].geometry.location;

@@ -4,6 +4,26 @@ import { Navigation, Package, MapPin, Clock, Phone } from 'lucide-react';
 import api from '../utils/api';
 
 const GOOGLE_MAPS_API_KEY = process.env.REACT_APP_GOOGLE_MAPS_API_KEY || '';
+// Dedicated Geocoding API key; falls back to the Maps key.
+const GEOCODING_API_KEY = process.env.REACT_APP_GOOGLE_GEOCODING_API_KEY || GOOGLE_MAPS_API_KEY;
+
+// Geocode a single address via the Geocoding REST API (uses the geocoding key,
+// independent of the map's JS SDK key).
+async function geocodeAddressRest(address) {
+  try {
+    const resp = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GEOCODING_API_KEY}&region=AE`
+    );
+    const data = await resp.json();
+    if (data.status === 'OK' && data.results && data.results[0]) {
+      const loc = data.results[0].geometry.location;
+      return { lat: loc.lat, lng: loc.lng };
+    }
+  } catch (err) {
+    console.error('Geocode error', err);
+  }
+  return null;
+}
 
 const mapContainerStyle = {
   width: '100%',
@@ -67,9 +87,6 @@ const DriverDeliveryMap = ({
 
   // Geocode addresses missing coordinates (limited batch to avoid quota issues)
   useEffect(() => {
-    if (!isLoaded || !window.google || !window.google.maps) return;
-
-    const geocoder = new window.google.maps.Geocoder();
     const missing = deliveries
       .filter(d => d && d.address && d._id && !getDeliveryCoords(d) && !geocodedCoords[d._id]);
 
@@ -79,35 +96,26 @@ const DriverDeliveryMap = ({
     let cancelled = false;
     setIsGeocoding(true);
 
-    const processNext = (idx) => {
-      if (cancelled || idx >= toProcess.length) {
-        setIsGeocoding(false);
-        return;
-      }
-
-      const delivery = toProcess[idx];
-      geocoder.geocode({ address: delivery.address }, (results, status) => {
-        if (!cancelled && status === 'OK' && results && results[0]) {
-          const loc = results[0].geometry.location;
-          setGeocodedCoords(prev => ({
-            ...prev,
-            [delivery._id]: { lat: loc.lat(), lng: loc.lng() }
-          }));
+    (async () => {
+      for (const delivery of toProcess) {
+        if (cancelled) break;
+        const coords = await geocodeAddressRest(delivery.address);
+        if (!cancelled && coords) {
+          setGeocodedCoords(prev => ({ ...prev, [delivery._id]: coords }));
           // Persist to backend so we don't geocode again later
           api.post(`/deliveries/${delivery._id}/manual-coords`, {
-            lat: loc.lat(),
-            lng: loc.lng(),
+            lat: coords.lat,
+            lng: coords.lng,
             mapsUrl: delivery.mapsUrl || delivery.gpsLocation?.link,
             address: delivery.address
           }).catch(() => {});
         }
-        processNext(idx + 1);
-      });
-    };
+      }
+      if (!cancelled) setIsGeocoding(false);
+    })();
 
-    processNext(0);
     return () => { cancelled = true; };
-  }, [deliveries, geocodedCoords, isLoaded]);
+  }, [deliveries, geocodedCoords]);
 
   const getCoordsWithFallback = useCallback((delivery) => {
     if (!delivery) return null;

@@ -23,6 +23,23 @@ const customerSchema = new mongoose.Schema({
   phone: String,
   company: String,
   address: String,
+
+  // Geocoded location, cached here (not just per-delivery) so a customer's
+  // address is only ever sent to Google Geocoding once. Every delivery for
+  // this customer — past, present, and future — and every Optimize Routes
+  // run reuses this instead of re-geocoding. `address` records which address
+  // string produced it: if the stored address is edited, it no longer
+  // matches and the cache is treated as stale (re-resolved on next use).
+  // `source: 'unresolved'` is a deliberate negative cache — the address
+  // failed to geocode plausibly last time, so don't retry it against Google
+  // on every single lookup, only when the address actually changes.
+  gpsLocation: {
+    lat: { type: Number, default: null },
+    lng: { type: Number, default: null },
+    source: { type: String, default: null }, // 'google' | 'link' | 'manual' | 'unresolved'
+    address: { type: String, default: null },
+    geocodedAt: { type: Date, default: null }
+  },
   macros: {
     C: { type: Number, default: 0 },
     P: { type: Number, default: 0 },

@@ -45,6 +45,7 @@ import { storePhotoOffline, queueDeliveryUpdate, getPendingCount } from '../util
 import { syncOfflineData, setupAutoSync, setupAutoRetry, onSyncStatusChange } from '../utils/offlineSync';
 import { useSyncStatus, getSyncStatusIndicator } from '../hooks/useSyncStatus';
 import api from '../utils/api';
+import HandoffCard from '../components/driver/HandoffCard';
 import { motion } from 'framer-motion';
 import offlineStorage from '../utils/offlineStorage';
 
@@ -240,7 +241,7 @@ const DriverMobile = () => {
   const lastLocationSentRef = useRef(0);
   const fileInputRef = useRef(null);
   const { user } = useSelector(state => state.auth);
-  const { deliveries, currentDelivery, isLoading, error } = useSelector(state => state.driverMobile);
+  const { deliveries, handoffs = [], currentDelivery, isLoading, error } = useSelector(state => state.driverMobile);
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const driverAccuracyRate = typeof user?.kpi?.accuracyRate === 'number'
@@ -2183,6 +2184,28 @@ const DriverMobile = () => {
           </div>
         ) : pendingDeliveries.length > 0 ? (
           <div className="space-y-2 px-4 pb-24">
+            {/* Van↔bike handoffs sit at the top of the route list. Only shown in
+                the natural route order — with a search, letter filter or
+                alphabetical sort active the order is meaningless, so the
+                card is hidden rather than misplaced. */}
+            {!filterState.searchTerm && !filterState.selectedLetter && !filterState.sortAlphabetical
+              && handoffs.filter((h) => h.status !== 'cancelled').map((h) => {
+                const isBike = String(h.bike?._id ?? h.bike) === String(user?._id);
+                // Bike: due once every trip-1 stop (the ones WITHOUT a handoff
+                // link) is done. Van: due once the stop it detours after is done.
+                const due = isBike
+                  ? !pendingDeliveries.some((d) => !d.handoff)
+                  : !pendingDeliveries.some((d) => (d.routeOrder ?? 0) <= (h.vanAfterRouteOrder ?? 0));
+                return (
+                  <HandoffCard
+                    key={h._id}
+                    handoff={h}
+                    currentUserId={user?._id}
+                    due={due}
+                    onChanged={() => dispatch(fetchDriverDeliveries())}
+                  />
+                );
+              })}
             {pendingDeliveries.map(delivery => (
               <div
                 key={delivery._id}

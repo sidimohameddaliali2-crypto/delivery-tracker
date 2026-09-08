@@ -75,6 +75,20 @@
   }
 }
 
+/* Stop mobile browsers (iOS Safari especially) from auto-zooming the page when
+   a form control is focused. That zoom fires whenever the focused field's
+   font-size is < 16px, which our search inputs / filter selects hit via
+   Tailwind text-sm / text-xs. Forcing 16px on the mobile view (matches the
+   <1024px "mobile" breakpoint used by ResponsiveDispatcher) removes the zoom
+   without disabling pinch-to-zoom. */
+@media (max-width: 1023px) {
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
 /* Leaflet map styles */
 .leaflet-container {
   height: 100%;

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
+import { groupExclusions } from '../../constants/exclusionList';
 import MatterLogo from './MatterLogo';
 import {
   DEMO_ACCOUNTS,
@@ -71,7 +72,9 @@ const initialsOf = (name) =>
 /* ---------------------------------------------------------- data models */
 
 // Normalized meal shape used by the renderer regardless of source:
-//   { key, dayIndex, dayKey, type, name, sub, allergens[], dietTags[], exclText, item? }
+//   { key, dayIndex, dayKey, type, name, sub, allergens[], dietTags[],
+//     allergenMatchTokens[], exclMatchTokens[], item? }
+// (demo meals carry `allergens` / `dietTags` and are matched directly.)
 
 function buildDemoModel() {
   const dayKeys = [0, 1, 2, 3, 4, 5, 6].map((i) => {
@@ -88,7 +91,6 @@ function buildDemoModel() {
     sub: m.sub,
     allergens: m.allergens,
     dietTags: m.exclusions,
-    exclText: '',
   }));
   return { menuName: DEMO_MENU_NAME, menuRange: DEMO_MENU_RANGE, dayKeys, meals };
 }
@@ -119,11 +121,29 @@ function buildRealModel(weeklyMenu, profile) {
     (row?.items || []).forEach((item) => {
       if (!item) return;
       const itemId = String(item._id || item);
-      const allergens = Array.from(
-        new Set([
-          ...(Array.isArray(item.allergens) ? item.allergens : tokens(item.allergens)),
-          ...tokens(item.intolerances),
-        ].map((a) => titleCase(String(a).trim())).filter(Boolean))
+
+      // Dietary tokens live on the MenuItem's intolerances / carbs / veg
+      // (comma/semicolon/pipe separated), matched by exact token — same fields
+      // and matching the live MenuSelection.jsx uses.
+      const intoleranceTokens = tokens(item.intolerances);
+      const carbTokens = tokens(item.carbs);
+      const vegTokens = tokens(item.veg);
+      const declaredAllergens = Array.isArray(item.allergens)
+        ? item.allergens.map((a) => String(a).trim().toLowerCase()).filter(Boolean)
+        : tokens(item.allergens);
+
+      // Hard-block set (vs the customer's allergies): allergens + intolerances +
+      // carbs + veg, as in the live component's allergenBlockedIds.
+      const allergenMatchTokens = Array.from(
+        new Set([...declaredAllergens, ...intoleranceTokens, ...carbTokens, ...vegTokens])
+      );
+      // Soft-warn set (vs the customer's exclusion phrases).
+      const exclMatchTokens = Array.from(
+        new Set([...intoleranceTokens, ...carbTokens, ...vegTokens])
+      );
+
+      const allergensDisplay = Array.from(
+        new Set([...declaredAllergens, ...intoleranceTokens].map((a) => titleCase(a)).filter(Boolean))
       );
       const dietTags = [];
       if (item.isVegan) dietTags.push('Vegan');
@@ -139,20 +159,10 @@ function buildRealModel(weeklyMenu, profile) {
         type,
         name: item.mealName || 'Meal',
         sub: subParts.join(' · '),
-        allergens,
+        allergens: allergensDisplay,
+        allergenMatchTokens,
+        exclMatchTokens,
         dietTags,
-        exclText: [
-          item.mealName,
-          item.ingredients,
-          item.proteinSource,
-          item.veg,
-          item.sauce,
-          item.carbs,
-          item.description,
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase(),
         item,
       });
     });
@@ -241,7 +251,6 @@ const MenuSelectionLink = ({ token }) => {
         allergensLc: found.allergens.map((x) => x.toLowerCase()),
         exclusionsDisplay: found.exclusions,
         exclusionsLc: found.exclusions.map((x) => x.toLowerCase()),
-        exclusions: found.exclusions.map((x) => x.toLowerCase()),
       });
       setModel(buildDemoModel());
       setStep('menu');
@@ -252,16 +261,21 @@ const MenuSelectionLink = ({ token }) => {
 
     try {
       setEmailError('');
-      const menuIdParam = rawMenu?._id ? `&menuId=${encodeURIComponent(rawMenu._id)}` : '';
+      // No menuId param on purpose: the server only serves this from its 30-min
+      // cache when menuId is present. Without it the profile (plan, meals/day,
+      // exclusions, allergies) is always read fresh from the DB, so a change
+      // made in Customer Management shows up on the link immediately.
       const res = await api.get(
-        `/menus/customers/${encodeURIComponent(v)}/meal-profile?email=${encodeURIComponent(v)}${menuIdParam}`
+        `/menus/customers/${encodeURIComponent(v)}/meal-profile?email=${encodeURIComponent(v)}`
       );
       const profile = res.data?.data;
       if (!profile) throw new Error('not found');
 
       const built = buildRealModel(rawMenu, profile);
       const allergensDisplay = (profile.allergies || []).map((x) => titleCase(String(x)));
-      const exclTokens = tokens(profile.mealExclusion);
+      // Same parser the live component uses — turns the stored mealExclusion
+      // string into canonical exclusion phrases.
+      const exclusionPhrases = groupExclusions(profile.mealExclusion);
 
       setAccount({
         name: `${profile.firstName || ''} ${profile.lastName || ''}`.trim() || profile.email || v,
@@ -270,9 +284,9 @@ const MenuSelectionLink = ({ token }) => {
         perDay: Number(profile.mealPerDay) || 1,
         allergensDisplay,
         allergensLc: allergensDisplay.map((x) => x.toLowerCase()),
-        exclusionsDisplay: exclTokens.map(titleCase),
-        exclusionsLc: exclTokens,
-        exclusions: exclTokens,
+        exclusionsDisplay: exclusionPhrases,
+        exclusionPhrases,
+        exclusionsLc: exclusionPhrases.map((x) => x.toLowerCase()),
       });
       setModel(built);
 
@@ -318,15 +332,23 @@ const MenuSelectionLink = ({ token }) => {
   const conflictOf = useCallback(
     (m) => {
       if (!account) return null;
-      const al = (m.allergens || []).filter((a) => account.allergensLc.includes(String(a).toLowerCase()));
-      if (al.length) return { kind: 'allergen', items: al };
+
+      // hard block — meal's allergen tokens ∩ customer's allergy list
+      const allergenTokens = preview ? m.allergens || [] : m.allergenMatchTokens || [];
+      const al = allergenTokens
+        .map((a) => String(a).toLowerCase())
+        .filter((a) => account.allergensLc.includes(a));
+      if (al.length) return { kind: 'allergen', items: Array.from(new Set(al.map(titleCase))) };
+
+      // soft warn — customer's exclusions found among the meal's dietary tokens
       let ex;
       if (preview) {
         ex = (m.dietTags || []).filter((t) => account.exclusionsLc.includes(String(t).toLowerCase()));
       } else {
-        ex = (account.exclusions || []).filter((x) => x && m.exclText.includes(x)).map(titleCase);
+        const set = new Set(m.exclMatchTokens || []);
+        ex = (account.exclusionPhrases || []).filter((p) => set.has(String(p).toLowerCase()));
       }
-      if (ex.length) return { kind: 'exclusion', items: ex };
+      if (ex.length) return { kind: 'exclusion', items: Array.from(new Set(ex)) };
       return null;
     },
     [account, preview]
@@ -335,6 +357,22 @@ const MenuSelectionLink = ({ token }) => {
   const bump = useCallback((key, delta) => {
     setQty((s) => ({ ...s, [key]: Math.max(0, (s[key] || 0) + delta) }));
   }, []);
+
+  // Adds one meal but never lets a day exceed the customer's meals-per-day.
+  const addWithCap = useCallback(
+    (m) => {
+      const dayTotal = (model?.meals || [])
+        .filter((mm) => mm.dayIndex === m.dayIndex)
+        .reduce((a, mm) => a + (qty[mm.key] || 0), 0);
+      if (dayTotal >= target) {
+        flash(`You can pick up to ${target} meal${target === 1 ? '' : 's'} for this day.`);
+        return false;
+      }
+      bump(m.key, 1);
+      return true;
+    },
+    [bump, flash, model, qty, target]
+  );
 
   const openAllergen = useCallback(
     (items) => {
@@ -375,14 +413,13 @@ const MenuSelectionLink = ({ token }) => {
             onClick: () => {
               setModal(null);
               setAcknowledged((s) => ({ ...s, [m.key]: true }));
-              bump(m.key, 1);
-              flash('Added — exclusion acknowledged');
+              if (addWithCap(m)) flash('Added — exclusion acknowledged');
             },
           },
         ],
       });
     },
-    [bump, flash]
+    [addWithCap, flash]
   );
 
   const tryAdd = useCallback(
@@ -390,9 +427,9 @@ const MenuSelectionLink = ({ token }) => {
       const c = conflictOf(m);
       if (c && c.kind === 'allergen') return openAllergen(c.items);
       if (c && c.kind === 'exclusion' && !acknowledged[m.key]) return openExclusion(m, c.items);
-      bump(m.key, 1);
+      addWithCap(m);
     },
-    [acknowledged, bump, conflictOf, openAllergen, openExclusion]
+    [acknowledged, addWithCap, conflictOf, openAllergen, openExclusion]
   );
 
   /* -- submit -- */
@@ -458,6 +495,7 @@ const MenuSelectionLink = ({ token }) => {
   const skippedToday = !!skipped[day];
   const dayHeading = dayKeys[day] ? fmtDayLong(dayKeys[day]) : `Day ${day + 1}`;
   const selectedToday = dayCount(day);
+  const dayFull = !skippedToday && selectedToday >= target;
 
   const courses = useMemo(() => {
     if (!model || !account) return [];
@@ -521,6 +559,7 @@ const MenuSelectionLink = ({ token }) => {
             selectable: !blocked,
             qty: q,
             minusDisabled: q === 0,
+            plusDisabled: dayFull,
             onCard: () => {
               if (blocked) return openAllergen(conflict.items);
               if (warned && !acknowledged[m.key]) return openExclusion(m, conflict.items);
@@ -531,7 +570,7 @@ const MenuSelectionLink = ({ token }) => {
         }),
       };
     }).filter((c) => c.meals.length > 0);
-  }, [account, acknowledged, bump, conflictOf, day, model, openAllergen, openExclusion, qty, tryAdd]);
+  }, [account, acknowledged, bump, conflictOf, day, dayFull, model, openAllergen, openExclusion, qty, tryAdd]);
 
   const dayTabs = useMemo(
     () =>
@@ -729,7 +768,7 @@ const MenuSelectionLink = ({ token }) => {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
           <h5 style={{ margin: 0 }}>{dayHeading}</h5>
           <span className="text-muted" style={{ fontSize: 12 }}>
-            {skippedToday ? 'Skipped' : `${selectedToday} of ${target} chosen`}
+            {skippedToday ? 'Skipped' : dayFull ? `${target} of ${target} chosen · full` : `${selectedToday} of ${target} chosen`}
           </span>
         </div>
         <div style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 8 }}>
@@ -821,7 +860,7 @@ const MenuSelectionLink = ({ token }) => {
                               &#8722;
                             </button>
                             <div style={{ flex: 1, textAlign: 'center', fontFamily: 'var(--font-heading)', fontSize: 19, fontVariantNumeric: 'tabular-nums' }}>{mc.qty}</div>
-                            <button className="btn btn-primary" onClick={mc.onPlus} style={{ width: 44, height: 44, padding: 0, fontSize: 19, lineHeight: 1 }}>+</button>
+                            <button className="btn btn-primary" onClick={mc.onPlus} disabled={mc.plusDisabled} style={{ width: 44, height: 44, padding: 0, fontSize: 19, lineHeight: 1 }}>+</button>
                           </div>
                         )}
                       </div>

@@ -38,20 +38,34 @@ initializeSpaces();
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io setup
+// Origins allowed to call the API with credentials. The SPA is served by this
+// same server, so genuine same-origin requests never need an entry (the browser
+// doesn't CORS-check them) — this list is for real cross-origin callers and
+// Socket.IO. Add more via ALLOWED_ORIGINS (comma-separated) without a code change.
 const defaultOrigins = [
   process.env.CLIENT_URL,
+  process.env.FRONTEND_URL,
   process.env.API_BASE_URL,
+  process.env.SERVER_PUBLIC_URL,
   'https://matterapp.online',
-  'http://localhost:3000'
+  'http://localhost:3000',
+  'http://localhost:5000',
+  ...String(process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim()),
 ].filter(Boolean);
 
 const corsOptions = {
   origin: (origin, callback) => {
+    // No Origin header → same-origin page, curl, or server-to-server: allow.
     if (!origin || defaultOrigins.includes(origin)) {
       return callback(null, true);
     }
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
+    // Unknown cross-origin: withhold CORS headers so the browser blocks it,
+    // but do NOT throw — erroring here turns every stray request into a 500
+    // and floods the logs. Same-origin requests are unaffected.
+    console.warn(`CORS: origin not in allow-list, headers withheld: ${origin}`);
+    return callback(null, false);
   },
   credentials: true,
 };

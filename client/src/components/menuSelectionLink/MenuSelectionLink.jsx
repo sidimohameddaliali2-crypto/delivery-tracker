@@ -159,6 +159,8 @@ function buildRealModel(weeklyMenu, profile) {
         type,
         name: item.mealName || 'Meal',
         sub: subParts.join(' · '),
+        carbText: String(item.carbs || '').trim(),
+        vegText: String(item.veg || '').trim(),
         allergens: allergensDisplay,
         allergenMatchTokens,
         exclMatchTokens,
@@ -531,6 +533,8 @@ const MenuSelectionLink = ({ token }) => {
             m,
             name: m.name,
             sub: m.sub,
+            carbText: m.carbText,
+            vegText: m.vegText,
             typeLabel: c.label,
             bagBg: blocked ? 'var(--color-neutral-200)' : bag.bg,
             bagFg: blocked ? 'var(--color-neutral-700)' : bag.fg,
@@ -846,6 +850,22 @@ const MenuSelectionLink = ({ token }) => {
                               {mc.tags.map((t, i) => (
                                 <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: t.bg, color: t.fg }}>{t.label}</span>
                               ))}
+                            </div>
+                          ) : null}
+                          {(mc.carbText || mc.vegText) ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: 14 }}>
+                              {mc.carbText ? (
+                                <div style={{ fontSize: 12, lineHeight: 1.45 }}>
+                                  <span style={{ color: 'var(--color-neutral-600)', fontWeight: 600 }}>Carb: </span>
+                                  <span className="text-muted">{mc.carbText}</span>
+                                </div>
+                              ) : null}
+                              {mc.vegText ? (
+                                <div style={{ fontSize: 12, lineHeight: 1.45 }}>
+                                  <span style={{ color: 'var(--color-neutral-600)', fontWeight: 600 }}>Veg: </span>
+                                  <span className="text-muted">{mc.vegText}</span>
+                                </div>
+                              ) : null}
                             </div>
                           ) : null}
                         </div>

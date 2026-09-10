@@ -24,6 +24,7 @@ import DeliveryChanges from './pages/DeliveryChanges';
 import AddDeliveryChange from './pages/AddDeliveryChange';
 import DispatcherMobile from './pages/DispatcherMobile';
 import DispatcherDesktop from './pages/DispatcherDesktop';
+import DriverRoutesPage from './pages/DriverRoutesPage';
 import StoreKeeper from './pages/StoreKeeper';
 import Customers from './pages/Customers';
 import Events from './pages/Events';
@@ -319,6 +320,13 @@ function App() {
               <ProtectedRoute allowDispatchers>
                 <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager', 'dispatcher']}>
                   <ResponsiveDispatcher />
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+            <Route path="/dispatcher/driver-routes" element={
+              <ProtectedRoute allowDispatchers>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager', 'dispatcher']}>
+                  <DriverRoutesPage />
                 </RoleBasedRoute>
               </ProtectedRoute>
             } />

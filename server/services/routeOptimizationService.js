@@ -12,6 +12,7 @@ import {
   BIKE_TRIP_CAPACITY,
   HANDOFF_RESERVE_SECONDS
 } from './handoffPlanner.js';
+import { sendRouteAssignedPushToDriver } from './pushNotificationService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -202,9 +203,15 @@ async function resolveCoordinatesForAll(deliveries) {
  *   preference — freeing the rest of its true shift for handoffPlanner's van-
  *   as-hub matching (which still sees the van's full shift for that purpose;
  *   only the solve's own-delivery budget is reduced). One-time per plan.
+ * @param {number|null} [options.bikeTripCapacity] - Simulation-only override
+ *   of the real 20-stops-per-trip rule for every bike in this plan (both the
+ *   solve's capacity dimension and handoffPlanner's trip-split point). Real
+ *   dispatching should never pass this — it exists so a "what if bikes could
+ *   carry more/fewer per trip" run can be previewed without touching any
+ *   driver's actual profile.stopCapacity.
  */
 export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
-  const { fixedDepartureSeconds = null, hubVans = [] } = options;
+  const { fixedDepartureSeconds = null, hubVans = [], bikeTripCapacity = null } = options;
   if (!Number.isFinite(DEPOT.lat) || !Number.isFinite(DEPOT.lng)) {
     throw new Error('DELIVERY_DEPOT_LAT/DELIVERY_DEPOT_LNG are not configured');
   }
@@ -216,6 +223,9 @@ export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
   }
   if (fixedDepartureSeconds != null && (!Number.isFinite(fixedDepartureSeconds) || fixedDepartureSeconds < 0 || fixedDepartureSeconds >= 24 * 3600)) {
     throw new Error('fixedDepartureSeconds must be seconds from midnight (0-86399)');
+  }
+  if (bikeTripCapacity != null && (!Number.isFinite(bikeTripCapacity) || bikeTripCapacity < 1 || bikeTripCapacity > 200)) {
+    throw new Error('bikeTripCapacity must be a positive number of stops (1-200)');
   }
 
   const [deliveries, drivers] = await Promise.all([
@@ -274,7 +284,13 @@ export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
   const deliveryById = new Map(solvableDeliveries.map((d) => [String(d._id), d]));
   const subIndexByStopId = new Map(solvableStopIds.map((id, i) => [id, i + 1]));
 
-  const baseCapacities = drivers.map(driverStopCapacity);
+  // A simulation-only bikeTripCapacity overrides EVERY bike's capacity here
+  // (even one with its own profile.stopCapacity set) — the whole point is
+  // previewing "what if bikes could carry more/fewer per trip" without
+  // touching real driver profiles.
+  const baseCapacities = drivers.map((d) => (
+    bikeTripCapacity != null && d.profile?.vehicleType === 'bike' ? bikeTripCapacity : driverStopCapacity(d)
+  ));
   const shiftSeconds = drivers.map(driverShiftSeconds);
 
   // Dispatcher-designated "hub" vans (this plan only — see optimizeRoutes
@@ -437,7 +453,8 @@ export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
       // using the usual departure as the reference point (never negative —
       // a batch with no scheduled-time awareness still gets a sane offset).
       hubModeStartSeconds: Math.max(0, HUB_MODE_START_WALLCLOCK_SECONDS - KITCHEN_DEPARTURE_DEFAULT_SECONDS),
-      hubModeShiftGraceSeconds: HUB_MODE_SHIFT_GRACE_SECONDS
+      hubModeShiftGraceSeconds: HUB_MODE_SHIFT_GRACE_SECONDS,
+      ...(bikeTripCapacity != null ? { tripCapacity: bikeTripCapacity } : {})
     });
 
     routes = planned.adjustedRoutes.map((r, i) => ({
@@ -509,6 +526,16 @@ export async function applyRoutePlan(routes, handoffs = [], kitchenReturns = [],
 
   if (bulkOps.length === 0) return { modifiedCount: 0, handoffsCreated: 0 };
   const result = await Delivery.bulkWrite(bulkOps);
+
+  // This is the main day-to-day path deliveries actually get assigned to
+  // drivers through, and it previously sent no signal to the driver at all
+  // — a route only ever showed up once the driver happened to reopen the
+  // app and it re-fetched. One push per driver (not per stop), fire-and-
+  // forget so a slow/failed push never delays the API response.
+  const pushJobs = routes
+    .filter(({ stops }) => Array.isArray(stops) && stops.length > 0)
+    .map(({ driverId, stops }) => sendRouteAssignedPushToDriver({ driverId, stopCount: stops.length }));
+  Promise.allSettled(pushJobs).catch(() => {});
 
   let handoffsCreated = 0;
   const vanHandoffs = Array.isArray(handoffs) ? handoffs : [];

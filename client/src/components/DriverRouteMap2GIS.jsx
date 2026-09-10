@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { load } from '@2gis/mapgl';
-import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2 } from 'lucide-react';
+import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft } from 'lucide-react';
 import api from '../utils/api';
 import { getDeliveryLatLng } from '../utils/deliveryCoords';
-import { formatBusinessTime, formatClockFromSecondsSinceMidnight } from '../utils/businessTime';
+import { formatBusinessTime, formatClockFromSecondsSinceMidnight, toBusinessComponents } from '../utils/businessTime';
 
 // Driver Routes map, rendered with 2GIS MapGL. Shows the day's deliveries grouped
 // by driver, numbered in route order, with a road-following line (2GIS Routing
@@ -59,6 +59,42 @@ const stopSort = (a, b) => {
 
 const escapeAttr = (s) => String(s || '').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
+// "HH:MM" -> seconds-from-midnight, for the simulation's time inputs.
+const clockToSeconds = (hhmm) => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim());
+  if (!m) return null;
+  return Number(m[1]) * 3600 + Number(m[2]) * 60;
+};
+
+// Scheduled delivery time, as seconds since business-timezone midnight — the
+// same basis every pin's color is drawn from, so two drivers' maps use a
+// directly comparable scale.
+const scheduledSecondsOf = (scheduledTime) => {
+  const c = toBusinessComponents(scheduledTime);
+  return c ? c.hours * 3600 + c.minutes * 60 : null;
+};
+
+// Owner (2026-09-09): "we have 3am,4am,...10am — create a color code for
+// this timing" — a fixed color per delivery HOUR (not a continuous gradient
+// scaled to whatever's on screen), so a given hour reads as the same color
+// every time you open the map, and doubles as this same list's filter chips.
+const HOUR_COLORS = {
+  3: '#1d4ed8',  // blue
+  4: '#0891b2',  // cyan
+  5: '#059669',  // emerald
+  6: '#65a30d',  // lime
+  7: '#ca8a04',  // amber
+  8: '#ea580c',  // orange
+  9: '#dc2626',  // red
+  10: '#db2777'  // pink
+};
+const TIMING_HOURS = [3, 4, 5, 6, 7, 8, 9, 10];
+const OTHER_HOUR_COLOR = '#9ca3af'; // outside 3am-10am, or no scheduled time
+const NO_TIME_COLOR = OTHER_HOUR_COLOR;
+
+const hourOf = (seconds) => (seconds == null ? null : Math.floor(seconds / 3600));
+const colorForHour = (hour) => (hour != null && HOUR_COLORS[hour]) || OTHER_HOUR_COLOR;
+
 const clock = formatClockFromSecondsSinceMidnight;
 
 const fmtDuration = (seconds) => {
@@ -84,10 +120,14 @@ function stopStatusLabel(stopEta) {
   return { text: 'on time', className: 'text-emerald-600' };
 }
 
+// `color` may be a hex string or an hsl(...) string (pins are colored by
+// scheduled time, not a fixed per-driver hex palette) — the active-state ring
+// below is drawn as a separate rgba() shadow layer rather than appending an
+// alpha suffix to `color` itself, since that only works for hex.
 const markerHtml = (n, color, active, done, approx, editable) =>
   `<div style="width:28px;height:28px;border-radius:9999px;background:${color};` +
   `border:${editable ? 3 : active ? 3 : 2}px ${editable ? 'dashed #fff' : approx ? 'dashed #fff' : 'solid #fff'};` +
-  `box-shadow:0 1px 4px rgba(0,0,0,.45)${active ? `,0 0 0 4px ${color}55` : ''}${editable ? ',0 0 0 3px #ffffffaa' : ''};color:#fff;` +
+  `box-shadow:0 1px 4px rgba(0,0,0,.45)${active ? ',0 0 0 4px rgba(37,99,235,.35)' : ''}${editable ? ',0 0 0 3px #ffffffaa' : ''};color:#fff;` +
   `font:700 12px/${active ? 22 : 24}px system-ui,sans-serif;text-align:center;cursor:${editable ? 'grab' : 'pointer'};user-select:none;` +
   `opacity:${done ? 0.55 : 1}">${n}</div>`;
 
@@ -100,6 +140,14 @@ const meetingHtml = (label) =>
 const depotHtml = (label) =>
   `<div title="${escapeAttr(label)}" style="width:32px;height:32px;border-radius:8px;background:#111827;border:2px solid #fff;` +
   `box-shadow:0 1px 4px rgba(0,0,0,.5);font:16px/28px system-ui,sans-serif;text-align:center">🏠</div>`;
+
+// A van the dispatcher has marked as a Simulation hub — shown at roughly
+// where that van is/works today, so choosing a hub isn't just picking a name
+// off a list (owner, 2026-09-09: "I should be able to pin his location on
+// the map").
+const hubVanHtml = (label) =>
+  `<div title="${escapeAttr(label)}" style="width:34px;height:34px;border-radius:8px;background:#ea580c;border:2px solid #fff;` +
+  `box-shadow:0 1px 4px rgba(0,0,0,.5);font:16px/30px system-ui,sans-serif;text-align:center;color:#fff">🚚</div>`;
 
 // 2GIS returns geometry as WKT "LINESTRING(lng lat, lng lat, …)".
 function parseWkt(selection) {
@@ -225,7 +273,7 @@ function destroyMapSuppressingSdkNoise(map) {
   safeDestroy(map);
 }
 
-function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date, onOptimizeRoutes }) {
+function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date, onOptimizeRoutes, asPage = false, onDateChange }) {
   const [selected, setSelected] = useState(ALL);
   const [depot, setDepot] = useState(null); // null = not loaded, false = not configured
   const [mapReady, setMapReady] = useState(false);
@@ -243,6 +291,31 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const [savingId, setSavingId] = useState(null);
   const [saveMsg, setSaveMsg] = useState(null); // { text, error }
 
+  // Filter by scheduled-time hour (owner, 2026-09-09) — the same hour buckets
+  // (and colors) the pins/legend use. Empty = show every hour, same "no
+  // filter" convention as DispatcherDesktop's own Timing filter.
+  const [timingFilters, setTimingFilters] = useState([]);
+
+  // "What if" simulation (owner, 2026-09-09): set rules — kitchen departure
+  // time, a van as hub with a ready-by time, bike trip capacity — and preview
+  // the resulting plan on this same map. Read-only: it calls the same
+  // never-writes optimizeRoutes the Optimize Routes modal previews with, and
+  // never calls apply — real assignments are untouched either way.
+  const [simMode, setSimMode] = useState(false);
+  const [simDeparture, setSimDeparture] = useState('');
+  const [simBikeCapacity, setSimBikeCapacity] = useState('');
+  const [simHubVanIds, setSimHubVanIds] = useState([]);
+  const [simHubReady, setSimHubReady] = useState({}); // driverId -> 'HH:MM'
+  // Which drivers/areas take part in the run — "excluded" (not "included") so
+  // the default (nothing excluded) means "everyone/everywhere," matching what
+  // the map already shows without the dispatcher having to opt every driver
+  // back in first.
+  const [simExcludedDriverIds, setSimExcludedDriverIds] = useState([]);
+  const [simExcludedAreas, setSimExcludedAreas] = useState([]);
+  const [simStatus, setSimStatus] = useState('idle'); // idle | loading | ok | error
+  const [simError, setSimError] = useState('');
+  const [simPlan, setSimPlan] = useState(null);
+
   const mapglRef = useRef(null);
   const mapRef = useRef(null);
   const markersRef = useRef([]);
@@ -251,6 +324,46 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const etaCacheRef = useRef(new Map());
   const routeCacheRef = useRef(new Map());
   const activeRowRef = useRef(null);
+
+  // deliveryId -> where the simulated plan put it (or nothing, if the sim
+  // left it unassigned/unresolved) — active only while simMode is on AND a
+  // plan has been run, so turning Simulate off always falls straight back to
+  // the real map with no stale overrides.
+  const simMetaByDeliveryId = useMemo(() => {
+    const m = new Map();
+    if (!simMode || !simPlan) return m;
+    (simPlan.routes || []).forEach((r) => {
+      r.stops.forEach((s) => {
+        m.set(s.deliveryId, {
+          driverId: r.driverId, vehicleType: r.vehicleType, routeOrder: s.routeOrder, hubReadySeconds: r.hubReadySeconds
+        });
+      });
+    });
+    return m;
+  }, [simMode, simPlan]);
+  const simulating = simMode && simPlan != null;
+
+  // Every distinct area/zone across today's deliveries, for the Simulation's
+  // "exclude areas" picker.
+  const areaOptionsForSim = useMemo(() => {
+    const zones = new Set();
+    deliveries.forEach((d) => { if (d.zone && d.zone.trim()) zones.add(d.zone.trim()); });
+    return [...zones].sort((a, b) => a.localeCompare(b));
+  }, [deliveries]);
+
+  // Roughly where each driver is/works today (their first resolvable real
+  // stop) — used only to place the hub-van pin on the map, independent of
+  // whatever the simulation's own result later says.
+  const driverAnchorPoint = useMemo(() => {
+    const m = new Map();
+    for (const d of deliveries) {
+      const driverId = d.driver?._id ? String(d.driver._id) : (typeof d.driver === 'string' ? d.driver : null);
+      if (!driverId || m.has(driverId)) continue;
+      const coords = manualOverrides[d._id] || getDeliveryLatLng(d, depot || null) || resolved[d._id] || null;
+      if (coords) m.set(driverId, coords);
+    }
+    return m;
+  }, [deliveries, manualOverrides, depot, resolved]);
 
   // Group the day's deliveries by driver, splitting out those with no usable location.
   const groups = useMemo(() => {
@@ -267,8 +380,20 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     });
     const unassigned = { id: UNASSIGNED, name: 'Unassigned', vehicleType: '', color: UNASSIGNED_COLOR, stops: [], missing: [] };
 
-    deliveries.forEach((d) => {
-      const driverId = d.driver?._id ? String(d.driver._id) : (typeof d.driver === 'string' ? d.driver : null);
+    // Filter by timing hour (owner, 2026-09-09) — applied before grouping so
+    // marker counts, the driver dropdown, and the side list all agree.
+    const timingFiltered = timingFilters.length === 0
+      ? deliveries
+      : deliveries.filter((d) => timingFilters.includes(hourOf(scheduledSecondsOf(d.scheduledTime))));
+
+    timingFiltered.forEach((d) => {
+      // Simulating overrides who a delivery is "assigned to" and its stop
+      // order with the what-if plan's answer — a delivery the simulation
+      // left unassigned falls into the Unassigned bucket, same as real life.
+      const simMeta = simMetaByDeliveryId.get(d._id);
+      const driverId = simulating
+        ? (simMeta ? simMeta.driverId : null)
+        : (d.driver?._id ? String(d.driver._id) : (typeof d.driver === 'string' ? d.driver : null));
       let group = driverId ? byId.get(driverId) : unassigned;
       if (driverId && !group) {
         // Assigned to a driver not in the current list (e.g. inactive) — still show them.
@@ -286,11 +411,19 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       const stored = getDeliveryLatLng(d, depot || null);
       const coords = override || stored || resolved[d._id] || null;
       if (coords) {
+        const timeSeconds = scheduledSecondsOf(d.scheduledTime);
         group.stops.push({
           ...d,
           coords,
           approx: !override && !stored && resolved[d._id]?.source === 'geocoded',
-          manuallyPlaced: !!override
+          manuallyPlaced: !!override,
+          timeSeconds,
+          // Each pin colored by its own scheduled HOUR (owner, 2026-09-09) —
+          // a fixed color per 3am..10am bucket, not by driver — so timing is
+          // readable at a glance and the same hour always reads the same color.
+          timeColor: colorForHour(hourOf(timeSeconds)),
+          // In simulation, order by the WHAT-IF route, not the real stored one.
+          routeOrder: simulating ? (simMeta ? simMeta.routeOrder : null) : d.routeOrder
         });
       } else group.missing.push(d);
     });
@@ -301,7 +434,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       .sort((a, b) => a.name.localeCompare(b.name));
     unassigned.stops.sort(stopSort);
     return { assigned, unassigned };
-  }, [deliveries, drivers, resolved, depot, manualOverrides]);
+  }, [deliveries, drivers, resolved, depot, manualOverrides, timingFilters, simulating, simMetaByDeliveryId]);
 
   const visibleGroups = useMemo(() => {
     if (selected === ALL) return groups.assigned;
@@ -466,7 +599,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         const isActive = activeId === stop._id;
         const marker = new mapgl.HtmlMarker(map, {
           coordinates: toLngLat(stop.coords),
-          html: markerHtml(idx + 1, g.color, isActive, stop.status === 'delivered', stop.approx, editMode),
+          html: markerHtml(idx + 1, stop.timeColor, isActive, stop.status === 'delivered', stop.approx, editMode),
           anchor: [14, 14],
           zIndex: isActive ? 20 : (editMode ? 15 : 10)
         });
@@ -503,7 +636,24 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         }));
       });
     }
-  }, [mapReady, visibleGroups, depot, activeId, eta, editMode, handlePinDrop]);
+
+    // Simulation hub-van pins — shown regardless of which driver is
+    // currently selected, so choosing a hub is a map action, not just a
+    // name in a list.
+    if (simMode) {
+      simHubVanIds.forEach((driverId) => {
+        const van = drivers.find((d) => String(d._id) === driverId);
+        const point = driverAnchorPoint.get(driverId) || (depot ? { lat: depot.lat, lng: depot.lng } : null);
+        if (!point) return;
+        markersRef.current.push(new mapgl.HtmlMarker(map, {
+          coordinates: [point.lng, point.lat],
+          html: hubVanHtml(`Hub: ${driverDisplayName(van)}`),
+          anchor: [17, 17],
+          zIndex: 8
+        }));
+      });
+    }
+  }, [mapReady, visibleGroups, depot, activeId, eta, editMode, handlePinDrop, simMode, simHubVanIds, driverAnchorPoint, drivers]);
 
   // Fit the view when the selection (not the highlighted stop) changes.
   useEffect(() => {
@@ -601,7 +751,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       return undefined;
     }
     const ids = singleGroup.stops.map((s) => s._id);
-    const cacheKey = `${singleGroup.id}|${date}|${ids.join(',')}`;
+    const cacheKey = `${simulating ? 'sim' : 'real'}|${singleGroup.id}|${date}|${ids.join(',')}`;
     const cached = etaCacheRef.current.get(cacheKey);
     if (cached) {
       setEta(cached);
@@ -613,8 +763,12 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       deliveryIds: ids,
       vehicleType: singleGroup.vehicleType,
       // Lets the server fold this driver's planned second-trip pickup (van
-      // handoff or kitchen return) into the ETAs at the right point.
-      driverId: singleGroup.id,
+      // handoff or kitchen return) into the ETAs at the right point — only
+      // meaningful for the REAL assignment; a simulated route has no Handoff
+      // record of its own, so passing driverId here would fold in whatever
+      // that real driver's actual handoff happens to be for this date, which
+      // has nothing to do with the what-if plan being previewed.
+      ...(simulating ? {} : { driverId: singleGroup.id }),
       date
     })
       .then((res) => {
@@ -639,7 +793,85 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         setEta({ status: 'error', error: err?.response?.data?.message || err.message });
       });
     return () => { cancelled = true; };
-  }, [singleGroup, date]);
+  }, [singleGroup, date, simulating]);
+
+  // Runs the same read-only optimizeRoutes the Optimize Routes modal previews
+  // with — it never writes anything, so nothing here can ever assign a real
+  // delivery. driverIds/deliveryIds are every driver/delivery currently
+  // loaded for the day (not a checkbox selection — Driver Routes has none),
+  // so the simulation answers "what would the WHOLE day look like" under
+  // these rules, matching what the map is already showing.
+  const runSimulation = async () => {
+    setSimStatus('loading');
+    setSimError('');
+    try {
+      const fixedDepartureSeconds = simDeparture ? clockToSeconds(simDeparture) : null;
+      if (simDeparture && fixedDepartureSeconds == null) throw new Error('Invalid departure time.');
+      const includedDriverIds = drivers.map((d) => String(d._id)).filter((id) => !simExcludedDriverIds.includes(id));
+      if (includedDriverIds.length === 0) throw new Error('At least one active driver must be included.');
+      const hubVans = [];
+      for (const driverId of simHubVanIds) {
+        if (!includedDriverIds.includes(driverId)) continue; // excluded as a driver — drop its hub designation too
+        const hubReadySeconds = clockToSeconds(simHubReady[driverId]);
+        if (hubReadySeconds == null) {
+          const van = drivers.find((d) => String(d._id) === driverId);
+          throw new Error(`Set a "ready for hub duty by" time for ${driverDisplayName(van)}.`);
+        }
+        hubVans.push({ driverId, hubReadySeconds });
+      }
+      const bikeTripCapacity = simBikeCapacity ? Number(simBikeCapacity) : null;
+      if (simBikeCapacity && (!Number.isFinite(bikeTripCapacity) || bikeTripCapacity < 1)) {
+        throw new Error('Bike capacity must be a positive number of stops.');
+      }
+      const includedDeliveryIds = deliveries
+        .filter((d) => !d.zone || !simExcludedAreas.includes(d.zone.trim()))
+        .map((d) => d._id);
+      if (includedDeliveryIds.length === 0) throw new Error('Every delivery was excluded by area — nothing left to simulate.');
+      const res = await api.post('/deliveries/optimize-routes', {
+        deliveryIds: includedDeliveryIds,
+        driverIds: includedDriverIds,
+        // A fixed departure here is a deliberate what-if override — it is NOT
+        // clamped to the real KITCHEN_EARLIEST_DEPARTURE_TIME (01:00) floor,
+        // by design (owner, 2026-09-09): choosing an earlier time in the
+        // simulation is exactly how you'd test bypassing that rule.
+        ...(fixedDepartureSeconds != null ? { fixedDepartureSeconds } : {}),
+        ...(hubVans.length > 0 ? { hubVans } : {}),
+        ...(bikeTripCapacity != null ? { bikeTripCapacity } : {})
+      });
+      setSimPlan(res.data?.data || null);
+      setSimStatus('ok');
+    } catch (err) {
+      setSimError(err.response?.data?.message || err.message || 'Simulation failed.');
+      setSimStatus('error');
+    }
+  };
+
+  const exitSimulation = () => {
+    setSimMode(false);
+    setSimPlan(null);
+    setSimStatus('idle');
+    setSimError('');
+  };
+
+  const toggleSimExcludedDriver = (driverId) => {
+    setSimExcludedDriverIds((prev) => (
+      prev.includes(driverId) ? prev.filter((id) => id !== driverId) : [...prev, driverId]
+    ));
+  };
+
+  const toggleSimExcludedArea = (zone) => {
+    setSimExcludedAreas((prev) => (prev.includes(zone) ? prev.filter((z) => z !== zone) : [...prev, zone]));
+  };
+
+  const toggleSimHubVan = (driverId) => {
+    setSimHubVanIds((prev) => {
+      if (prev.includes(driverId)) {
+        setSimHubReady((r) => { const next = { ...r }; delete next[driverId]; return next; });
+        return prev.filter((id) => id !== driverId);
+      }
+      return [...prev, driverId];
+    });
+  };
 
   if (!open) return null;
 
@@ -664,14 +896,43 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const assignedTotal = groups.assigned.reduce((n, g) => n + g.stops.length + g.missing.length, 0);
   const hasOptimizedOrder = listGroup ? listGroup.stops.some((s) => s.routeOrder != null) : false;
 
+  // A full page (owner, 2026-09-09: "it should not be a window but another
+  // page") drops the modal overlay/backdrop/centered-card chrome in favor of
+  // a normal full-viewport layout — everything else below is unchanged.
+  //
+  // A real page needs a FIXED height (h-screen), not just a minimum
+  // (min-h-screen) — otherwise the flex chain below has no definite height to
+  // constrain against, so the whole page grows and scrolls instead of just
+  // the customer list scrolling inside its own panel (owner, 2026-09-09:
+  // "fix the scrolling down when I want to see the list of customers").
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden">
+    <div className={asPage ? 'h-screen bg-white flex flex-col overflow-hidden' : 'fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4'}>
+      <div className={asPage ? 'flex-1 flex flex-col overflow-hidden min-h-0' : 'bg-white rounded-lg shadow-xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden'}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200">
           <div className="flex items-center gap-2">
+            {asPage ? (
+              <button
+                type="button"
+                onClick={onClose}
+                className="mr-1 p-1.5 rounded-lg hover:bg-gray-100 text-gray-600"
+                aria-label="Back to Dispatcher Hub"
+                title="Back to Dispatcher Hub"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+            ) : null}
             <Route className="w-5 h-5 text-blue-600" />
             <h2 className="text-lg font-semibold text-gray-900">Driver Routes</h2>
-            {date ? <span className="text-sm text-gray-500">· {date}</span> : null}
+            {asPage && onDateChange ? (
+              <input
+                type="date"
+                value={date || ''}
+                onChange={(e) => onDateChange(e.target.value)}
+                className="ml-1 border border-gray-300 rounded-lg px-2 py-1 text-sm text-gray-700"
+              />
+            ) : date ? (
+              <span className="text-sm text-gray-500">· {date}</span>
+            ) : null}
             <span className="ml-2 text-[11px] uppercase tracking-wide text-gray-400">2GIS</span>
           </div>
           <div className="flex items-center gap-2">
@@ -688,22 +949,201 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
             ) : null}
             <button
               type="button"
-              onClick={() => setEditMode((v) => !v)}
+              onClick={() => {
+                if (simMode) { exitSimulation(); return; }
+                setEditMode(false);
+                setSimMode(true);
+              }}
               className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 ${
+                simMode ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50'
+              }`}
+              title="Preview a what-if plan (departure time, hub van, bike capacity) without assigning anything for real"
+            >
+              <FlaskConical className="w-4 h-4" />
+              {simMode ? 'Exit Simulation' : 'Simulate'}
+            </button>
+            <button
+              type="button"
+              disabled={simMode}
+              onClick={() => setEditMode((v) => !v)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed ${
                 editMode ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50'
               }`}
-              title="Drag a pin on the map to correct a wrong location"
+              title={simMode ? 'Exit Simulation to fix a pin' : 'Drag a pin on the map to correct a wrong location'}
             >
               {editMode ? <CheckCircle2 className="w-4 h-4" /> : <Pencil className="w-4 h-4" />}
               {editMode ? 'Done fixing pins' : 'Fix a pin'}
             </button>
-            <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-gray-100" aria-label="Close">
-              <X className="w-5 h-5 text-gray-600" />
-            </button>
+            {!asPage ? (
+              <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-gray-100" aria-label="Close">
+                <X className="w-5 h-5 text-gray-600" />
+              </button>
+            ) : null}
           </div>
         </div>
 
-        {editMode ? (
+        {simMode ? (
+          <div data-testid="sim-panel" className="px-5 py-3 bg-indigo-50 border-b border-indigo-200 space-y-2.5">
+            <div className="flex items-center gap-2 text-sm text-indigo-900">
+              <FlaskConical className="w-4 h-4 flex-shrink-0" />
+              <span className="font-medium">Simulation</span>
+              <span className="text-indigo-700">— set rules, then Run. Nothing here is ever assigned or saved; the real plan is untouched.</span>
+            </div>
+            <div className="flex flex-wrap items-end gap-4">
+              <label className="flex flex-col gap-1 text-xs font-medium text-indigo-900">
+                Kitchen departure
+                <input
+                  type="time"
+                  value={simDeparture}
+                  onChange={(e) => setSimDeparture(e.target.value)}
+                  className="border border-indigo-200 rounded-lg px-2 py-1 text-sm bg-white"
+                  title="A time set here overrides the normal 1:00 AM earliest-departure rule for this simulation only"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium text-indigo-900">
+                Bike capacity (stops/trip)
+                <input
+                  type="number"
+                  min="1"
+                  placeholder="20"
+                  value={simBikeCapacity}
+                  onChange={(e) => setSimBikeCapacity(e.target.value)}
+                  className="border border-indigo-200 rounded-lg px-2 py-1 text-sm bg-white w-32"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={runSimulation}
+                disabled={simStatus === 'loading'}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {simStatus === 'loading' ? <Loader2 className="w-4 h-4 animate-spin" /> : <FlaskConical className="w-4 h-4" />}
+                {simStatus === 'loading' ? 'Running… up to ~1 min' : 'Run Simulation'}
+              </button>
+              {simulating ? (
+                <button type="button" onClick={() => setSimPlan(null)} className="text-xs text-indigo-700 underline">
+                  Clear result
+                </button>
+              ) : null}
+            </div>
+            <p className="text-[11px] text-indigo-600">
+              A departure time set above overrides the normal 1:00 AM earliest-departure rule — this simulation only.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-xs font-medium text-indigo-900">Active drivers (click to exclude)</p>
+                  {simExcludedDriverIds.length > 0 ? (
+                    <button type="button" onClick={() => setSimExcludedDriverIds([])} className="text-[11px] text-indigo-600 underline">
+                      Include all
+                    </button>
+                  ) : null}
+                </div>
+                <div data-testid="sim-drivers" className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                  {drivers.map((d) => {
+                    const id = String(d._id);
+                    const excluded = simExcludedDriverIds.includes(id);
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => toggleSimExcludedDriver(id)}
+                        className={`text-xs rounded-full px-2 py-0.5 border ${
+                          excluded
+                            ? 'bg-gray-100 border-gray-300 text-gray-400 line-through'
+                            : 'bg-white border-indigo-200 text-indigo-800'
+                        }`}
+                        title={excluded ? 'Excluded — click to include' : 'Included — click to exclude'}
+                      >
+                        {driverDisplayName(d)}{d.profile?.vehicleType ? ` · ${d.profile.vehicleType}` : ''}
+                      </button>
+                    );
+                  })}
+                  {drivers.length === 0 ? <span className="text-xs text-indigo-400">No drivers loaded.</span> : null}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-xs font-medium text-indigo-900">Exclude areas</p>
+                  {simExcludedAreas.length > 0 ? (
+                    <button type="button" onClick={() => setSimExcludedAreas([])} className="text-[11px] text-indigo-600 underline">
+                      Clear
+                    </button>
+                  ) : null}
+                </div>
+                <div data-testid="sim-areas" className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                  {areaOptionsForSim.map((zone) => {
+                    const excluded = simExcludedAreas.includes(zone);
+                    return (
+                      <button
+                        key={zone}
+                        type="button"
+                        onClick={() => toggleSimExcludedArea(zone)}
+                        className={`text-xs rounded-full px-2 py-0.5 border ${
+                          excluded ? 'bg-red-50 border-red-300 text-red-700 line-through' : 'bg-white border-indigo-200 text-indigo-800'
+                        }`}
+                        title={excluded ? 'Excluded from this simulation — click to include' : 'Click to exclude this area'}
+                      >
+                        {zone}
+                      </button>
+                    );
+                  })}
+                  {areaOptionsForSim.length === 0 ? <span className="text-xs text-indigo-400">No areas found on today's deliveries.</span> : null}
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs font-medium text-indigo-900 mb-1">Hub van (click a van, then set when it must be ready — 🚚 pin shows where on the map)</p>
+              <div data-testid="sim-hub-vans" className="flex flex-wrap gap-1.5">
+                {drivers.filter((d) => d.profile?.vehicleType === 'van' && !simExcludedDriverIds.includes(String(d._id))).map((d) => {
+                  const id = String(d._id);
+                  const isHub = simHubVanIds.includes(id);
+                  return (
+                    <div
+                      key={id}
+                      className={`flex items-center gap-1.5 text-xs rounded-full px-2 py-0.5 border ${
+                        isHub ? 'bg-orange-100 border-orange-300 text-orange-900' : 'bg-white border-indigo-200 text-indigo-800'
+                      }`}
+                    >
+                      <button type="button" onClick={() => toggleSimHubVan(id)} className="font-medium">
+                        {isHub ? '🚚 ' : ''}{driverDisplayName(d)}
+                      </button>
+                      {isHub ? (
+                        <input
+                          type="time"
+                          value={simHubReady[id] || ''}
+                          onChange={(e) => setSimHubReady((r) => ({ ...r, [id]: e.target.value }))}
+                          className="border border-orange-300 rounded px-1 py-0 text-[11px]"
+                        />
+                      ) : null}
+                    </div>
+                  );
+                })}
+                {drivers.filter((d) => d.profile?.vehicleType === 'van' && !simExcludedDriverIds.includes(String(d._id))).length === 0 ? (
+                  <span className="text-xs text-indigo-400">No active van drivers to choose from.</span>
+                ) : null}
+              </div>
+            </div>
+            {simError ? (
+              <p className="text-xs text-red-700 flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5" />{simError}</p>
+            ) : null}
+            {simulating ? (
+              <p className="text-xs text-indigo-800">
+                Simulated: <strong>{simPlan.routes.reduce((n, r) => n + r.stops.length, 0)}</strong> assigned
+                {simPlan.unassignedDeliveries?.length ? <>, <strong>{simPlan.unassignedDeliveries.length}</strong> unassigned</> : null}
+                {simPlan.scheduleAware ? <>, <strong>{simPlan.lateStops}</strong> predicted late</> : null}
+                {simPlan.handoffs?.length ? <>, <strong>{simPlan.handoffs.length}</strong> van↔bike {simPlan.handoffs.length === 1 ? 'handoff' : 'handoffs'}</> : null}
+                {simPlan.kitchenReturns?.length ? <>, <strong>{simPlan.kitchenReturns.length}</strong> kitchen {simPlan.kitchenReturns.length === 1 ? 'return' : 'returns'}</> : null}
+                {' '}— the pins/list below now show this plan.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {editMode && !simMode ? (
           <div className="px-5 py-2 bg-amber-50 border-b border-amber-200 text-sm text-amber-800 flex items-center gap-2">
             <Pencil className="w-4 h-4 flex-shrink-0" />
             Drag any pin on the map to its correct spot — it saves as soon as you drop it, and also fills in the same location for any other delivery this customer has that doesn't have a pin yet.
@@ -744,7 +1184,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
             ) : null}
             {mapReady && selected === ALL && groups.assigned.length > 0 ? (
               <div className="absolute bottom-4 left-4 bg-white/95 rounded-lg shadow px-3 py-2 max-w-xs">
-                <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Drivers</p>
+                <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Drivers (click to filter)</p>
                 <div className="flex flex-wrap gap-1.5">
                   {groups.assigned.map((g) => (
                     <button
@@ -761,12 +1201,28 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                 </div>
               </div>
             ) : null}
+            {mapReady && totalOnMap > 0 ? (
+              <div className="absolute bottom-4 right-4 bg-white/95 rounded-lg shadow px-3 py-2">
+                <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Pins by hour</p>
+                <div className="flex flex-wrap gap-x-2 gap-y-1 max-w-[220px]">
+                  {TIMING_HOURS.map((hour) => (
+                    <span key={hour} className="flex items-center gap-1 text-[10px] text-gray-600">
+                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: HOUR_COLORS[hour] }} />
+                      {hour}am
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </div>
 
           {/* Side panel */}
           <aside className="w-[340px] border-l border-gray-200 flex flex-col min-h-0">
             <div className="p-4 border-b border-gray-200 space-y-3">
-              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide">Driver</label>
+              <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                Driver
+                {simulating ? <span className="ml-2 normal-case font-semibold text-indigo-600">· showing simulated plan</span> : null}
+              </label>
               <select
                 value={selected}
                 onChange={(e) => setSelected(e.target.value)}
@@ -782,6 +1238,38 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                   Unassigned ({groups.unassigned.stops.length + groups.unassigned.missing.length})
                 </option>
               </select>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide">Timing</label>
+                  {timingFilters.length > 0 ? (
+                    <button type="button" onClick={() => setTimingFilters([])} className="text-[11px] text-blue-600 hover:underline">
+                      Clear
+                    </button>
+                  ) : null}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {TIMING_HOURS.map((hour) => {
+                    const active = timingFilters.includes(hour);
+                    return (
+                      <button
+                        key={hour}
+                        type="button"
+                        onClick={() => setTimingFilters((prev) => (
+                          prev.includes(hour) ? prev.filter((h) => h !== hour) : [...prev, hour]
+                        ))}
+                        className="px-2 py-1 rounded-full text-[11px] font-semibold border flex items-center gap-1"
+                        style={active
+                          ? { backgroundColor: HOUR_COLORS[hour], borderColor: HOUR_COLORS[hour], color: '#fff' }
+                          : { backgroundColor: '#fff', borderColor: HOUR_COLORS[hour], color: HOUR_COLORS[hour] }}
+                        title={`Show only ${hour}am deliveries`}
+                      >
+                        {hour}am
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
               <div className="flex flex-wrap gap-2 text-xs">
                 <span className="px-2 py-1 rounded-full bg-blue-50 text-blue-700 font-medium">{totalOnMap} on map</span>
@@ -985,7 +1473,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                         >
                           <span
                             className="w-6 h-6 rounded-full text-white text-[11px] font-bold flex items-center justify-center flex-shrink-0"
-                            style={{ backgroundColor: listGroup.color, opacity: stop.status === 'delivered' ? 0.55 : 1 }}
+                            style={{ backgroundColor: stop.timeColor, opacity: stop.status === 'delivered' ? 0.55 : 1 }}
                           >
                             {idx + 1}
                           </span>

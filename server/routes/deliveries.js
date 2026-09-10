@@ -14,6 +14,7 @@ import { detectAreaFromAddress } from '../config/areas.js';
 import { resolveDeliveryCoordinatesCached, isPlausibleCoordinate } from '../services/geocoding.js';
 import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js';
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
+import { syncDeliveryToSheet, syncDeliveriesToSheet } from '../services/googleSheetSync.js';
 import {
   optimizeRoutes,
   applyRoutePlan,
@@ -1440,6 +1441,9 @@ router.post('/', [
       });
     }
 
+    // Mirror the new delivery into the Google Sheet (no-op unless configured)
+    syncDeliveryToSheet(delivery, { event: 'created' });
+
     res.status(201).json({
       success: true,
       message: appliedChangesCount > 0 
@@ -1578,6 +1582,9 @@ router.post('/bulk', [
       console.log(`📡 Emitted delivery:created events for ${createdDeliveries.length} deliveries`);
     }
 
+    // Mirror every uploaded delivery into the Google Sheet (no-op unless configured)
+    syncDeliveriesToSheet(createdDeliveries, { event: 'created' });
+
     const elapsedMs = Date.now() - startTime;
     console.log(`⏱️ Bulk delivery creation completed in ${elapsedMs}ms (${(elapsedMs / createdDeliveries.length).toFixed(2)}ms per delivery)`);
 
@@ -1618,7 +1625,11 @@ router.post('/optimize-routes', [
   body('hubVans').optional().isArray().withMessage('hubVans must be an array'),
   body('hubVans.*.driverId').isMongoId().withMessage('Invalid hub van driver ID'),
   body('hubVans.*.hubReadySeconds').isInt({ min: 0, max: 86399 })
-    .withMessage('hubReadySeconds must be seconds from midnight (0-86399)')
+    .withMessage('hubReadySeconds must be seconds from midnight (0-86399)'),
+  // Simulation-only — previews "what if bikes carried more/fewer per trip"
+  // without touching any driver's real profile.stopCapacity.
+  body('bikeTripCapacity').optional({ nullable: true }).isInt({ min: 1, max: 200 })
+    .withMessage('bikeTripCapacity must be 1-200')
 ], authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1626,10 +1637,11 @@ router.post('/optimize-routes', [
       return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
     }
 
-    const { deliveryIds, driverIds, fixedDepartureSeconds, hubVans } = req.body;
+    const { deliveryIds, driverIds, fixedDepartureSeconds, hubVans, bikeTripCapacity } = req.body;
     const plan = await optimizeRoutes(deliveryIds, driverIds, {
       fixedDepartureSeconds: fixedDepartureSeconds ?? null,
-      hubVans: hubVans || []
+      hubVans: hubVans || [],
+      bikeTripCapacity: bikeTripCapacity ?? null
     });
     res.json({ success: true, data: plan });
   } catch (error) {
@@ -1750,6 +1762,9 @@ router.patch('/assign-driver', [
     } else {
       console.warn('Socket.io not initialized - cannot emit delivery updates (assign-driver)');
     }
+
+    // Reflect the new driver on each delivery's Google Sheet row
+    syncDeliveriesToSheet(updatedDeliveries, { event: 'assigned' });
 
     const pushes = reassignments.flatMap(({ delivery, oldDriverId }) => {
       const jobs = [sendDeliveryPushToDriver({ driverId, type: 'delivery_reassigned', delivery })];
@@ -1977,6 +1992,9 @@ router.put('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']),
       });
     }
 
+    // Push the edited fields onto the delivery's Google Sheet row
+    syncDeliveryToSheet(delivery, { event: 'updated' });
+
     res.json({
       success: true,
       message: 'Delivery updated successfully',
@@ -2150,6 +2168,8 @@ router.post('/:id/collect', upload.single('proofImage'), handleUploadError, auth
     const io = req.app.get('io');
     if (io) io.emit('delivery:updated', delivery);
 
+    syncDeliveryToSheet(delivery, { event: 'collected' });
+
     return res.json({ success: true, message: 'Collection marked as collected', data: { delivery } });
   } catch (error) {
     console.error('Collect endpoint error:', error);
@@ -2291,6 +2311,10 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
     } else {
       console.warn('Socket.io not initialized - cannot emit status updates (complete)');
     }
+
+    // Push delivered time, proof and the early/on-time/late verdict onto the
+    // delivery's Google Sheet row
+    syncDeliveryToSheet(delivery, { event: 'delivered' });
 
     res.json({
       success: true,
@@ -2709,7 +2733,11 @@ router.patch('/:id/status', async (req, res) => {
     
     // Populate driver information before returning
     await delivery.populate('driver');
-    
+
+    // Push the status change (and, when delivered, timing + proof) onto the
+    // delivery's Google Sheet row
+    syncDeliveryToSheet(delivery, { event: status === 'delivered' ? 'delivered' : 'status' });
+
     res.json({
       success: true,
       message: 'Delivery status updated successfully',

@@ -120,12 +120,20 @@ function bboxAround(points, padKm) {
  *   null (default) disables the grace entirely — the check stays exactly as
  *   strict as it always was.
  * @param {number} [args.hubModeShiftGraceSeconds]
+ * @param {number} [args.tripCapacity] simulation-only override of the real
+ *   BIKE_TRIP_CAPACITY (20/trip) rule — every real (non-simulated) call
+ *   should leave this unset.
  * @returns {Promise<{handoffs, kitchenReturns, adjustedRoutes, unassignedFromTruncation, diagnostics}>}
  */
 export async function findHandoffs({
   routes, durations, serviceTimes, indexOf, pointOf, depot, drivers,
-  fetchTable, fetchPois, hubModeStartSeconds = null, hubModeShiftGraceSeconds = 0
+  fetchTable, fetchPois, hubModeStartSeconds = null, hubModeShiftGraceSeconds = 0,
+  tripCapacity = BIKE_TRIP_CAPACITY
 }) {
+  // Simulation-only override of the real 20/trip rule (see optimizeRoutes'
+  // bikeTripCapacity option) — every caller that doesn't pass one gets
+  // exactly the real BIKE_TRIP_CAPACITY, unchanged.
+  const TRIP = Number.isFinite(tripCapacity) && tripCapacity > 0 ? tripCapacity : BIKE_TRIP_CAPACITY;
   const driverById = new Map(drivers.map((d) => [String(d._id), d]));
   const shiftOf = (driverId) => driverById.get(driverId)?.profile?.shiftTiming || 'unset';
 
@@ -142,7 +150,7 @@ export async function findHandoffs({
     committedBagCount: 0
   }));
 
-  const bikes = work.filter((r) => r.vehicleType === 'bike' && r.stops.length > BIKE_TRIP_CAPACITY);
+  const bikes = work.filter((r) => r.vehicleType === 'bike' && r.stops.length > TRIP);
   const vans = work.filter((r) => r.vehicleType === 'van' && r.stops.length > 0);
 
   const handoffs = [];
@@ -151,7 +159,7 @@ export async function findHandoffs({
   const diagnostics = [];
 
   const truncate = (bike, reason) => {
-    const { batch1, batch2 } = splitBikeRoute(bike.stops);
+    const { batch1, batch2 } = splitBikeRoute(bike.stops, TRIP);
     unassignedFromTruncation.push(...batch2.map((s) => s.deliveryId));
     bike.stops = batch1;
     // Recompute its duration as trip 1 + return to depot, exactly as the solver would.
@@ -173,8 +181,8 @@ export async function findHandoffs({
   const kitchenTablePoints = [depot];
   const kitchenIndexByBike = new Map(); // driverId -> { s20: tableIndex, s21: tableIndex }
   for (const bike of bikes) {
-    const s20 = bike.stops[BIKE_TRIP_CAPACITY - 1];
-    const s21 = bike.stops[BIKE_TRIP_CAPACITY];
+    const s20 = bike.stops[TRIP - 1];
+    const s21 = bike.stops[TRIP];
     kitchenIndexByBike.set(bike.driverId, { s20: kitchenTablePoints.length, s21: kitchenTablePoints.length + 1 });
     kitchenTablePoints.push(pointOf(s20.deliveryId), pointOf(s21.deliveryId));
   }
@@ -184,8 +192,8 @@ export async function findHandoffs({
   // round trip + reload, minus the direct leg it replaces.
   const kitchenDetourSeconds = (bike) => {
     const idx = kitchenIndexByBike.get(bike.driverId);
-    const s20Idx = indexOf(bike.stops[BIKE_TRIP_CAPACITY - 1].deliveryId);
-    const s21Idx = indexOf(bike.stops[BIKE_TRIP_CAPACITY].deliveryId);
+    const s20Idx = indexOf(bike.stops[TRIP - 1].deliveryId);
+    const s21Idx = indexOf(bike.stops[TRIP].deliveryId);
     return Math.round(
       kitchenTable[idx.s20][0] + KITCHEN_RELOAD_DWELL_SECONDS + kitchenTable[0][idx.s21]
       - durations[s20Idx][s21Idx]
@@ -202,19 +210,19 @@ export async function findHandoffs({
     if (projected > bikeShiftSeconds) {
       return { ok: false, shortfallSeconds: projected - bikeShiftSeconds };
     }
-    const s20Idx = indexOf(bike.stops[BIKE_TRIP_CAPACITY - 1].deliveryId);
-    const plannedDepartSeconds = bike.arrivals[BIKE_TRIP_CAPACITY - 1] + Math.round(serviceTimes[s20Idx]);
+    const s20Idx = indexOf(bike.stops[TRIP - 1].deliveryId);
+    const plannedDepartSeconds = bike.arrivals[TRIP - 1] + Math.round(serviceTimes[s20Idx]);
     bike.estimatedDurationSeconds += detourSeconds;
-    for (let j = BIKE_TRIP_CAPACITY; j < bike.arrivals.length; j += 1) bike.arrivals[j] += detourSeconds;
+    for (let j = TRIP; j < bike.arrivals.length; j += 1) bike.arrivals[j] += detourSeconds;
     kitchenReturns.push({
       bikeDriverId: bike.driverId,
       bikeName: bike.driverName,
-      afterRouteOrder: BIKE_TRIP_CAPACITY - 1,
+      afterRouteOrder: TRIP - 1,
       plannedDepartSeconds,
       detourSeconds,
       // Why this bike is riding back instead of meeting a van.
       vanReason,
-      deliveryIds: bike.stops.slice(BIKE_TRIP_CAPACITY).map((s) => s.deliveryId)
+      deliveryIds: bike.stops.slice(TRIP).map((s) => s.deliveryId)
     });
     diagnostics.push({
       bikeDriverId: bike.driverId,
@@ -236,21 +244,21 @@ export async function findHandoffs({
   let pois = [];
   if (bikes.length > 0) {
     try {
-      pois = await fetchPois(bboxAround(bikes.map((b) => pointOf(b.stops[BIKE_TRIP_CAPACITY - 1].deliveryId)), 1));
+      pois = await fetchPois(bboxAround(bikes.map((b) => pointOf(b.stops[TRIP - 1].deliveryId)), 1));
     } catch (err) {
       pois = []; // fall back to unsnapped meeting points at the bike's own location
     }
   }
   const meetingPointByBike = new Map(); // bike.driverId -> {lat,lng,name,poiType,osmId}
   for (const bike of bikes) {
-    const p = pointOf(bike.stops[BIKE_TRIP_CAPACITY - 1].deliveryId);
+    const p = pointOf(bike.stops[TRIP - 1].deliveryId);
     const poi = nearestPoi(p, pois, POI_SNAP_RADIUS_M);
     meetingPointByBike.set(bike.driverId, poi
       ? { lat: poi.lat, lng: poi.lng, name: poi.name, poiType: poi.type, osmId: poi.osmId }
       : {
         lat: p.lat,
         lng: p.lng,
-        name: `Near ${bike.stops[BIKE_TRIP_CAPACITY - 1].address || "the bike's route"}`,
+        name: `Near ${bike.stops[TRIP - 1].address || "the bike's route"}`,
         poiType: 'unsnapped',
         osmId: null
       });
@@ -287,8 +295,8 @@ export async function findHandoffs({
     addPoint(c.vanStopPoint);
     const next = c.van.stops[c.k + 1];
     addPoint(next ? pointOf(next.deliveryId) : depot);
-    addPoint(pointOf(c.bike.stops[BIKE_TRIP_CAPACITY - 1].deliveryId));
-    addPoint(pointOf(c.bike.stops[BIKE_TRIP_CAPACITY].deliveryId));
+    addPoint(pointOf(c.bike.stops[TRIP - 1].deliveryId));
+    addPoint(pointOf(c.bike.stops[TRIP].deliveryId));
   }
   let table = null;
   if (candidates.length > 0) {
@@ -299,13 +307,13 @@ export async function findHandoffs({
   // ---- 4. Greedy assignment, bikes with the biggest second trip first.
   bikes.sort((a, b) => b.stops.length - a.stops.length);
   for (const bike of bikes) {
-    const s20 = bike.stops[BIKE_TRIP_CAPACITY - 1];
-    const s21 = bike.stops[BIKE_TRIP_CAPACITY];
+    const s20 = bike.stops[TRIP - 1];
+    const s21 = bike.stops[TRIP];
     const p20 = pointOf(s20.deliveryId);
     const p21 = pointOf(s21.deliveryId);
     // Bike is ready to leave its last trip-1 stop once it has served it.
-    const tB = bike.arrivals[BIKE_TRIP_CAPACITY - 1] + Math.round(serviceTimes[indexOf(s20.deliveryId)]);
-    const batch2 = bike.stops.slice(BIKE_TRIP_CAPACITY);
+    const tB = bike.arrivals[TRIP - 1] + Math.round(serviceTimes[indexOf(s20.deliveryId)]);
+    const batch2 = bike.stops.slice(TRIP);
     // The shift the bike really has: its (reserve-reduced) cap plus the reserve back.
     const bikeShiftSeconds = bike.maxDurationSeconds + HANDOFF_RESERVE_SECONDS;
 
@@ -413,7 +421,7 @@ export async function findHandoffs({
       vanDriverId: van.driverId,
       vanName: van.driverName,
       vanAfterRouteOrder: c.k,
-      bikeAfterRouteOrder: BIKE_TRIP_CAPACITY - 1,
+      bikeAfterRouteOrder: TRIP - 1,
       meetingPoint: c.meetingPoint,
       plannedVanArrivalSeconds: tV,
       plannedBikeArrivalSeconds: tB,

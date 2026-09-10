@@ -168,6 +168,26 @@ test('drivers on different shifts are never paired for a van handoff, but a kitc
   assert.equal(out.unassignedFromTruncation.length, 0);
 });
 
+test('a simulation-only tripCapacity override moves the second-trip split point', async () => {
+  // Van shift far too small to ever help, regardless of tripCapacity, so this
+  // isolates the split-point behavior from van-matching geometry.
+  const w = makeWorld({ bikeStops: 12, vanShift: 1 });
+  const out = await findHandoffs({ ...w, tripCapacity: 10 });
+  assert.equal(out.handoffs.length, 0);
+  assert.equal(out.kitchenReturns.length, 1);
+  const k = out.kitchenReturns[0];
+  assert.equal(k.afterRouteOrder, 9, 'split after the 10th stop (tripCapacity - 1), not the real 20th');
+  assert.deepEqual(k.deliveryIds, ['B11', 'B12']);
+});
+
+test('tripCapacity left unset keeps the real BIKE_TRIP_CAPACITY (20) behavior unchanged', async () => {
+  const w = makeWorld({ bikeStops: 12 });
+  const out = await findHandoffs({ ...w }); // no tripCapacity passed
+  assert.equal(out.handoffs.length, 0);
+  assert.equal(out.kitchenReturns.length, 0);
+  assert.equal(out.adjustedRoutes[0].stops.length, 12, '12 <= real 20/trip cap, so no second trip is needed at all');
+});
+
 test('no van in the plan at all: the bike still gets its second trip via a kitchen return', async () => {
   const w = makeWorld();
   const out = await findHandoffs({ ...w, routes: [w.routes[0]], drivers: [w.drivers[0]] }); // drop the van entirely

@@ -25,7 +25,6 @@ import EventDetailModal from '../components/events/EventDetailModal';
 import api from '../utils/api';
 import DispatcherMapAssignModal from '../components/DispatcherMapAssignModal';
 import RouteOptimizationModal from '../components/RouteOptimizationModal';
-import DriverRouteMap2GIS from '../components/DriverRouteMap2GIS';
 import { fetchDeliveries } from '../store/slices/deliverySlice';
 import { fetchDrivers } from '../store/slices/driverSlice';
 import { logout } from '../store/slices/authSlice';
@@ -81,12 +80,6 @@ const DispatcherDesktop = () => {
   const [printMode, setPrintMode] = useState(false);
   const [mapModalOpen, setMapModalOpen] = useState(false);
   const [routeModalOpen, setRouteModalOpen] = useState(false);
-  // 'selection' = the checkbox-selected deliveries (Selection Bar's own
-  // "Optimize Routes" button); 'all' = every currently-filtered delivery for
-  // the day (opened from within Driver Routes, which has no checkbox
-  // selection of its own to draw from).
-  const [routeModalSource, setRouteModalSource] = useState('selection');
-  const [driverMapOpen, setDriverMapOpen] = useState(false);
   const [printDriverFilter, setPrintDriverFilter] = useState(null);
   const [selectedDeliveryDetail, setSelectedDeliveryDetail] = useState(null);
   const [selectedDate, setSelectedDate] = useState(() => getTomorrowDate());
@@ -829,7 +822,7 @@ const DispatcherDesktop = () => {
             Map
           </button>
           <button
-            onClick={() => setDriverMapOpen(true)}
+            onClick={() => navigate(`/dispatcher/driver-routes?date=${selectedDate}`)}
             className="w-full sm:w-auto px-4 py-2 rounded-lg font-semibold text-sm bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 flex items-center gap-2"
             title="See each driver's assigned deliveries and route on a 2GIS map"
           >
@@ -857,7 +850,7 @@ const DispatcherDesktop = () => {
                 Unassign
               </button>
               <button
-                onClick={() => { setRouteModalSource('selection'); setRouteModalOpen(true); }}
+                onClick={() => setRouteModalOpen(true)}
                 className="px-4 py-2 bg-white border border-blue-300 text-blue-700 rounded-lg font-semibold hover:bg-blue-50"
               >
                 Optimize Routes
@@ -1592,7 +1585,7 @@ const DispatcherDesktop = () => {
       <RouteOptimizationModal
         open={routeModalOpen}
         onClose={() => setRouteModalOpen(false)}
-        deliveries={routeModalSource === 'all' ? filteredDeliveries : selectedDeliveries}
+        deliveries={selectedDeliveries}
         drivers={drivers}
         onApplied={() => {
           setFeedback({ message: 'Routes applied', error: false });
@@ -1601,19 +1594,6 @@ const DispatcherDesktop = () => {
         }}
       />
 
-      {/* Driver Routes map (2GIS) */}
-      <DriverRouteMap2GIS
-        open={driverMapOpen}
-        onClose={() => setDriverMapOpen(false)}
-        deliveries={filteredDeliveries}
-        drivers={drivers}
-        date={selectedDate}
-        onOptimizeRoutes={() => {
-          setDriverMapOpen(false);
-          setRouteModalSource('all');
-          setRouteModalOpen(true);
-        }}
-      />
 
       {/* Feedback Toast */}
       {feedback.message && (

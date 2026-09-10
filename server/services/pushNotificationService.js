@@ -33,30 +33,18 @@ const COPY = {
 };
 
 /**
- * Send an Expo push notification to every device registered to a driver.
- * Self-contained (does its own DB lookup) and never throws past its own
- * boundary — callers should fire this with `.catch(...)`, never `await`
- * it in a way that would block the HTTP response, same pattern as
- * `sendAndLogSlack`.
- *
- * @param {Object} params
- * @param {string} params.driverId
- * @param {'delivery_created'|'delivery_reassigned'|'delivery_removed'|'delivery_updated'} params.type
- * @param {Object} params.delivery - plain delivery fields used for message copy (customerName, zone, address, deliveryTime, status) and the deep-link id (_id)
+ * Shared low-level sender: pushes one title/body/data payload to every
+ * device registered to a driver, drops tokens Expo reports as no-longer-
+ * registered, and never throws past its own boundary — callers should fire
+ * this with `.catch(...)`, never `await` it in a way that would block the
+ * HTTP response, same pattern as `sendAndLogSlack`.
  */
-export async function sendDeliveryPushToDriver({ driverId, type, delivery }) {
+async function sendPushToDriver(driverId, title, body, data) {
   try {
     if (!driverId) return;
 
     const user = await User.findById(driverId).select('pushTokens');
     if (!user || !user.pushTokens || user.pushTokens.length === 0) return;
-
-    const buildCopy = COPY[type];
-    if (!buildCopy) {
-      console.warn('pushNotificationService: unknown notification type', type);
-      return;
-    }
-    const { title, body } = buildCopy(delivery);
 
     const validTokens = user.pushTokens
       .map((entry) => entry.token)
@@ -69,7 +57,7 @@ export async function sendDeliveryPushToDriver({ driverId, type, delivery }) {
       sound: 'default',
       title,
       body,
-      data: { type, deliveryId: delivery._id?.toString?.() || String(delivery._id) }
+      data
     }));
 
     const chunks = expo.chunkPushNotifications(messages);
@@ -96,4 +84,48 @@ export async function sendDeliveryPushToDriver({ driverId, type, delivery }) {
   } catch (error) {
     console.warn('pushNotificationService: failed to send push:', error?.message || error);
   }
+}
+
+/**
+ * Send an Expo push notification to every device registered to a driver, for
+ * a single-delivery event.
+ *
+ * @param {Object} params
+ * @param {string} params.driverId
+ * @param {'delivery_created'|'delivery_reassigned'|'delivery_removed'|'delivery_updated'} params.type
+ * @param {Object} params.delivery - plain delivery fields used for message copy (customerName, zone, address, deliveryTime, status) and the deep-link id (_id)
+ */
+export async function sendDeliveryPushToDriver({ driverId, type, delivery }) {
+  const buildCopy = COPY[type];
+  if (!buildCopy) {
+    console.warn('pushNotificationService: unknown notification type', type);
+    return;
+  }
+  const { title, body } = buildCopy(delivery);
+  const deliveryId = delivery._id?.toString?.() || String(delivery._id);
+  await sendPushToDriver(driverId, title, body, { type, deliveryId });
+}
+
+/**
+ * Send a single batched push to a driver after a route plan is applied
+ * (Optimize Routes → Apply). This is the main day-to-day path deliveries
+ * actually get assigned to drivers through, and — unlike the single-delivery
+ * create/assign/update paths above — it previously sent no signal to the
+ * driver at all (no push, no socket event), so a route only ever showed up
+ * once the driver happened to reopen the app and it re-fetched. One push per
+ * driver here (not one per stop) to avoid spamming a driver with dozens of
+ * notifications for a single route assignment.
+ *
+ * @param {Object} params
+ * @param {string} params.driverId
+ * @param {number} params.stopCount
+ */
+export async function sendRouteAssignedPushToDriver({ driverId, stopCount }) {
+  if (!stopCount || stopCount <= 0) return;
+  const title = 'Your route is ready';
+  const body =
+    stopCount === 1
+      ? '1 delivery assigned for today. Tap to view your route.'
+      : `${stopCount} deliveries assigned for today. Tap to view your route.`;
+  await sendPushToDriver(driverId, title, body, { type: 'route_assigned', stopCount });
 }

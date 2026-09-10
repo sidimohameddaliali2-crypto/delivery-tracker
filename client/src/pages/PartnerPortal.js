@@ -38,12 +38,6 @@ const abbr = (s = '') => {
 // Single fixed delivery window.
 const DELIVERY_WINDOW = 'Morning · 5–6am';
 
-const PAY_METHODS = [
-  { id: 'card', abbr: 'VISA', name: 'Card •• 4421', sub: 'Charged on delivery', tileBg: '#1a3fb0', tileColor: '#ede5de' },
-  { id: 'apple', abbr: 'Pay', name: 'Apple Pay', sub: 'On file', tileBg: '#ede5de', tileColor: '#051747' },
-  { id: 'invoice', abbr: 'INV', name: 'Monthly invoice', sub: 'Settled by Matter', tileBg: '#bcf679', tileColor: '#051747' },
-];
-
 const buildCalendar = (year, month) => {
   const first = new Date(year, month, 1);
   const lead = (first.getDay() + 6) % 7; // Mon = 0
@@ -112,7 +106,6 @@ const PartnerPortal = () => {
   const [sel, setSel] = useState(firstOrderableISO());
   const [cart, setCart] = useState({}); // { [menuItemId]: qty }
   const [sheet, setSheet] = useState(null); // null | 'checkout'  (mobile only)
-  const [pay, setPay] = useState('card');
   const [placing, setPlacing] = useState(false);
   const [orderErr, setOrderErr] = useState('');
   const [done, setDone] = useState(null);
@@ -504,28 +497,7 @@ const PartnerPortal = () => {
         ))}
       </div>
 
-      <div className="mt-4 text-[11px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5]">Pay with</div>
-      <div className="flex flex-col gap-2 mt-2">
-        {PAY_METHODS.map((p) => {
-          const on = pay === p.id;
-          return (
-            <button key={p.id} onClick={() => setPay(p.id)}
-              className="flex items-center gap-2.5 w-full text-left bg-[#0a1230] rounded-[16px] px-3.5 py-3 border-[1.5px] transition-colors"
-              style={{ borderColor: on ? '#bcf679' : '#12275e' }}>
-              <span className="w-[34px] h-[24px] rounded-[6px] flex items-center justify-center flex-none text-[9.5px]"
-                style={{ background: p.tileBg, color: p.tileColor, ...AB }}>{p.abbr}</span>
-              <span className="flex-1 min-w-0">
-                <span className="block text-[13px] font-bold">{p.name}</span>
-                <span className="block text-[11px] text-[#a8ccf5] mt-px">{p.sub}</span>
-              </span>
-              <span className="w-[18px] h-[18px] rounded-full border-2 flex-none"
-                style={{ borderColor: on ? '#bcf679' : '#12275e', background: on ? '#bcf679' : 'transparent' }} />
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="mt-[18px] flex flex-col gap-1.5 text-[13px]">
+      <div className="mt-4 flex flex-col gap-1.5 text-[13px]">
         <div className="flex justify-between text-[#a8ccf5]"><span>Subtotal</span><span>AED {fmtAED(subtotal)}</span></div>
         <div className="flex justify-between text-[#a8ccf5]"><span>Delivery</span><span className="text-[#bcf679] font-bold">Free · partner</span></div>
         <div className="flex justify-between items-baseline mt-1.5 pt-2.5 border-t border-[#12275e]">

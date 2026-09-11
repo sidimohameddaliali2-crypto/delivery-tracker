@@ -176,6 +176,7 @@ import matterApiRoutes from './routes/matterApi.js';
 import xeroRoutes from './routes/xero.js';
 import vehicleRoutes from './routes/vehicles.js';
 import yellowblockRoutes from './routes/yellowblock.js';
+import externalDeliveryApiRoutes from './routes/externalDeliveryApi.js';
 
 // Import cache initialization
 import { initRedis } from './config/cache.js';
@@ -212,6 +213,10 @@ app.use('/api/matter', matterApiRoutes);
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/xero', xeroRoutes);
 app.use('/api/yellowblock', yellowblockRoutes);
+// External/third-party read-only delivery API — authenticated with a static
+// API key (DELIVERY_API_KEYS), not the app's own JWT login. See
+// middleware/apiKeyAuth.js and docs/EXTERNAL_DELIVERY_API.md.
+app.use('/api/external/deliveries', externalDeliveryApiRoutes);
 
 
 // Health check endpoint (supports both GET and HEAD methods)

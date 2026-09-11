@@ -133,6 +133,25 @@ test('feasible handoff: van arrives within the wait window, snaps to the fuel PO
   assert.equal(out.unassignedFromTruncation.length, 0);
 });
 
+test('a pinned hub location: the bike meets that van at the fixed point, not the auto POI', async () => {
+  const w = makeWorld({ v0Dwell: 11500 });
+  const pinned = { lat: 25.101, lng: 55.301 };
+  const out = await findHandoffs({ ...w, hubLocationByDriverId: { van1: pinned } });
+  assert.equal(out.handoffs.length, 1, 'the meeting still happens at the pinned point');
+  const h = out.handoffs[0];
+  assert.equal(h.meetingPoint.poiType, 'pinned');
+  assert.equal(h.meetingPoint.name, 'Pinned hub location');
+  assert.equal(h.meetingPoint.lat, pinned.lat);
+  assert.equal(h.meetingPoint.lng, pinned.lng);
+});
+
+test('a hub pin on a different van does not change van1\'s meeting point', async () => {
+  const w = makeWorld({ v0Dwell: 11500 });
+  const out = await findHandoffs({ ...w, hubLocationByDriverId: { someOtherVan: { lat: 25.5, lng: 55.5 } } });
+  assert.equal(out.handoffs[0].meetingPoint.poiType, 'fuel', 'van1 still uses the auto POI');
+  assert.equal(out.handoffs[0].meetingPoint.name, 'Emarat');
+});
+
 test('van handoff fails outside the wait window, but the bike still gets trip 2 via a kitchen return', async () => {
   const w = makeWorld({ v0Dwell: 30000 }); // van arrives far too late
   const out = await findHandoffs({ ...w });

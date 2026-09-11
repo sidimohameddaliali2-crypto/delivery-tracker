@@ -10,6 +10,7 @@ import {
   DollarSign, Settings, AlertCircle, RefreshCw
 } from 'lucide-react';
 import api from '../utils/api';
+import { groupExclusions } from '../constants/exclusionList';
 
 const fmt = (n) => Number(n || 0).toFixed(2);
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
@@ -224,6 +225,8 @@ const AdminPartners = () => {
   const [editingSpace, setEditingSpace] = useState(null);
   const [expandedSpace, setExpandedSpace] = useState(null);
   const [spaceOrders, setSpaceOrders] = useState({});
+  const [expandedMembersSpace, setExpandedMembersSpace] = useState(null);
+  const [spaceMembers, setSpaceMembers] = useState({});
 
   // ── Master items state ─────────────────────────────────────────────────────
   const [menuItems, setMenuItems] = useState([]);
@@ -347,6 +350,22 @@ const AdminPartners = () => {
     if (spaceOrders[spaceId]) return;
     try { const r = await api.get(`/admin/partners/${spaceId}/orders`); setSpaceOrders(prev => ({ ...prev, [spaceId]: r.data.data || [] })); }
     catch { }
+  };
+
+  const loadSpaceMembers = async (spaceId) => {
+    if (spaceMembers[spaceId]) return;
+    try { const r = await api.get(`/admin/partners/${spaceId}/members`); setSpaceMembers(prev => ({ ...prev, [spaceId]: r.data.data || [] })); }
+    catch { }
+  };
+
+  const toggleMemberActive = async (spaceId, member) => {
+    try {
+      const r = await api.patch(`/admin/partners/${spaceId}/members/${member._id}`, { isActive: !member.isActive });
+      setSpaceMembers(prev => ({
+        ...prev,
+        [spaceId]: (prev[spaceId] || []).map(m => m._id === member._id ? { ...m, isActive: r.data.data.isActive } : m)
+      }));
+    } catch (err) { alert(err.response?.data?.message || 'Failed to update member'); }
   };
 
   // ── Space setup actions ────────────────────────────────────────────────────
@@ -522,6 +541,11 @@ const AdminPartners = () => {
                           <ClipboardList className="w-3.5 h-3.5" />Orders
                           {expandedSpace === space._id ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                         </button>
+                        <button onClick={() => { setExpandedMembersSpace(expandedMembersSpace === space._id ? null : space._id); loadSpaceMembers(space._id); }}
+                          className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800 font-medium px-2 py-1 rounded-lg hover:bg-indigo-50 transition-colors">
+                          <Building2 className="w-3.5 h-3.5" />Members
+                          {expandedMembersSpace === space._id ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                        </button>
                         {!isKitchen && (
                           <>
                             <button onClick={() => setEditingSpace(space)} className="p-1.5 text-gray-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50 transition-colors"><Edit className="w-4 h-4" /></button>
@@ -556,6 +580,46 @@ const AdminPartners = () => {
                                     ))}
                                   </tbody>
                                 </table>
+                              )}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                    <AnimatePresence>
+                      {expandedMembersSpace === space._id && (
+                        <motion.div initial={{ height: 0 }} animate={{ height: 'auto' }} exit={{ height: 0 }} className="overflow-hidden">
+                          <div className="border-t border-gray-100 bg-gray-50 px-5 py-4">
+                            {!spaceMembers[space._id] ? <div className="flex items-center gap-2 text-sm text-gray-400"><Loader className="w-4 h-4 animate-spin" />Loading…</div>
+                              : spaceMembers[space._id].length === 0 ? <p className="text-sm text-gray-400 italic">No members have joined via the QR link yet.</p>
+                              : (
+                                <div className="space-y-2">
+                                  {spaceMembers[space._id].map(m => {
+                                    const chips = groupExclusions(m.dietaryExclusions || '');
+                                    return (
+                                      <div key={m._id} className="bg-white rounded-lg border border-gray-200 px-3 py-2.5">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className="font-semibold text-gray-900 text-sm">{m.name}</span>
+                                          <span className="text-xs text-gray-500">{m.email}</span>
+                                          {!m.isActive && <span className="px-1.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-600">Inactive</span>}
+                                          <span className="ml-auto text-xs text-gray-400">{m.orderCount || 0} order{(m.orderCount || 0) !== 1 ? 's' : ''} · joined {fmtDate(m.createdAt)}</span>
+                                          {!isKitchen && (
+                                            <button onClick={() => toggleMemberActive(space._id, m)}
+                                              className={`text-xs px-2 py-0.5 rounded-lg font-medium transition-colors ${m.isActive ? 'text-red-600 hover:bg-red-50' : 'text-green-600 hover:bg-green-50'}`}>
+                                              {m.isActive ? 'Deactivate' : 'Activate'}
+                                            </button>
+                                          )}
+                                        </div>
+                                        {chips.length > 0 && (
+                                          <div className="flex flex-wrap gap-1 mt-1.5">
+                                            {chips.map(c => (
+                                              <span key={c} className="bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full text-xs font-medium">{c}</span>
+                                            ))}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
                               )}
                           </div>
                         </motion.div>

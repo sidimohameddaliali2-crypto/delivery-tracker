@@ -123,12 +123,16 @@ function bboxAround(points, padKm) {
  * @param {number} [args.tripCapacity] simulation-only override of the real
  *   BIKE_TRIP_CAPACITY (20/trip) rule — every real (non-simulated) call
  *   should leave this unset.
+ * @param {Object<string,{lat:number,lng:number}>} [args.hubLocationByDriverId]
+ *   simulation-only: a dispatcher-pinned meeting location per van driverId.
+ *   For a van listed here, every bike meets it at that fixed point instead of
+ *   near the bike's own route.
  * @returns {Promise<{handoffs, kitchenReturns, adjustedRoutes, unassignedFromTruncation, diagnostics}>}
  */
 export async function findHandoffs({
   routes, durations, serviceTimes, indexOf, pointOf, depot, drivers,
   fetchTable, fetchPois, hubModeStartSeconds = null, hubModeShiftGraceSeconds = 0,
-  tripCapacity = BIKE_TRIP_CAPACITY
+  tripCapacity = BIKE_TRIP_CAPACITY, hubLocationByDriverId = null
 }) {
   // Simulation-only override of the real 20/trip rule (see optimizeRoutes'
   // bikeTripCapacity option) — every caller that doesn't pass one gets
@@ -272,9 +276,15 @@ export async function findHandoffs({
   const candidates = []; // { bike, van, k, vanStopPoint, meetingPoint }
   for (const bike of bikes) {
     const bikeShift = shiftOf(bike.driverId);
-    const meetingPoint = meetingPointByBike.get(bike.driverId);
+    const bikeMeetingPoint = meetingPointByBike.get(bike.driverId);
     for (const van of vans) {
       if (shiftOf(van.driverId) !== bikeShift) continue;
+      // If the dispatcher dragged this van's hub pin, every bike meets it at
+      // that fixed point instead of near the bike's own route.
+      const pinned = hubLocationByDriverId && hubLocationByDriverId[van.driverId];
+      const meetingPoint = pinned
+        ? { lat: pinned.lat, lng: pinned.lng, name: 'Pinned hub location', poiType: 'pinned', osmId: null }
+        : bikeMeetingPoint;
       van.stops.forEach((stop, k) => {
         candidates.push({ bike, van, k, vanStopPoint: pointOf(stop.deliveryId), meetingPoint });
       });

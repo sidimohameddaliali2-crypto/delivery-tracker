@@ -485,7 +485,14 @@ router.post('/resolve-coords', authorize(['admin', 'super_admin', 'dispatcher', 
 //          the times after it are honest about the trip back.
 const ROUTE_ETA_MAX_STOPS = 150;
 router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
-  const { deliveryIds, vehicleType, driverId, date } = req.body || {};
+  const { deliveryIds, vehicleType, driverId, date, fixedDepartureSeconds } = req.body || {};
+  // Simulation-only: a dispatcher-set departure that deliberately overrides
+  // the normal 1:00 AM earliest-departure rule for a what-if preview. Any
+  // other caller leaves this out and the usual rule applies.
+  const forcedDepartureSeconds = Number.isFinite(fixedDepartureSeconds)
+    && fixedDepartureSeconds >= 0 && fixedDepartureSeconds < 24 * 3600
+    ? Math.round(fixedDepartureSeconds)
+    : null;
   const validIds = Array.isArray(deliveryIds)
     && deliveryIds.length > 0
     && deliveryIds.length <= ROUTE_ETA_MAX_STOPS
@@ -627,7 +634,11 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
     const usualDeparture = Math.max(KITCHEN_DEPARTURE_EARLIEST_SECONDS, KITCHEN_DEPARTURE_DEFAULT_SECONDS);
     let departureSeconds = usualDeparture;
     let departureReason = 'usual';
-    if (requiredDepartureSeconds !== null && requiredDepartureSeconds < usualDeparture) {
+    if (forcedDepartureSeconds !== null) {
+      // Dispatcher pinned this exact time in a simulation — no earliest cap.
+      departureSeconds = forcedDepartureSeconds;
+      departureReason = 'fixed';
+    } else if (requiredDepartureSeconds !== null && requiredDepartureSeconds < usualDeparture) {
       if (requiredDepartureSeconds >= earliestDeparture) {
         departureSeconds = requiredDepartureSeconds;
         departureReason = 'earlier';
@@ -705,7 +716,7 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
       data: {
         departure: {
           seconds: departureSeconds,
-          reason: departureReason, // 'usual' | 'earlier' | 'capped'
+          reason: departureReason, // 'usual' | 'earlier' | 'capped' | 'fixed'
           usualSeconds: usualDeparture,
           earliestSeconds: earliestDeparture,
           // Departure that would have every stop on time — may be before the
@@ -1626,6 +1637,11 @@ router.post('/optimize-routes', [
   body('hubVans.*.driverId').isMongoId().withMessage('Invalid hub van driver ID'),
   body('hubVans.*.hubReadySeconds').isInt({ min: 0, max: 86399 })
     .withMessage('hubReadySeconds must be seconds from midnight (0-86399)'),
+  // Optional dispatcher-pinned meeting location for a hub van (dragged pin).
+  body('hubVans.*.hubLocation.lat').optional().isFloat({ min: -90, max: 90 })
+    .withMessage('hubLocation.lat must be a valid latitude'),
+  body('hubVans.*.hubLocation.lng').optional().isFloat({ min: -180, max: 180 })
+    .withMessage('hubLocation.lng must be a valid longitude'),
   // Simulation-only — previews "what if bikes carried more/fewer per trip"
   // without touching any driver's real profile.stopCapacity.
   body('bikeTripCapacity').optional({ nullable: true }).isInt({ min: 1, max: 200 })

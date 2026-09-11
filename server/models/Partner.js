@@ -21,6 +21,8 @@ const partnerSchema = new mongoose.Schema({
   address: { type: String, default: '' },
   minimumOrder: { type: Number, default: 0, min: 0 },
   defaultDeliveryTime: { type: String, default: null },
+  // Stable opaque token for the member self-registration link / QR. Generated lazily.
+  memberInviteToken: { type: String, unique: true, index: true, sparse: true },
   isActive: { type: Boolean, default: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   lastLogin: Date

@@ -41,6 +41,8 @@ import PrivacyPolicy from './pages/PrivacyPolicy';
 import YellowblockApp from './pages/YellowblockApp';
 import PartnerLogin from './pages/PartnerLogin';
 import PartnerPortal from './pages/PartnerPortal';
+import MemberJoin from './pages/MemberJoin';
+import MemberPortal from './pages/MemberPortal';
 import AdminPartners from './pages/AdminPartners';
 import Subscription from './pages/Subscription';
 import WebsiteSubscription from './pages/WebsiteSubscription';
@@ -244,6 +246,14 @@ const PartnerRoute = ({ children }) => {
   return children;
 };
 
+// Guard for the member portal — uses memberToken; no member login page, so
+// fall back to the last-used join link (or home).
+const MemberRoute = ({ children }) => {
+  const memberToken = localStorage.getItem('memberToken');
+  if (!memberToken) return <Navigate to={localStorage.getItem('memberInvitePath') || '/'} replace />;
+  return children;
+};
+
 function App() {
   return (
     <Provider store={store}>
@@ -255,6 +265,8 @@ function App() {
             <Route path="/privacy-policy" element={<PrivacyPolicy />} />
             <Route path="/partner/login" element={<PartnerLogin />} />
             <Route path="/partner/portal" element={<PartnerRoute><PartnerPortal /></PartnerRoute>} />
+            <Route path="/join/:token" element={<MemberJoin />} />
+            <Route path="/member/portal" element={<MemberRoute><MemberPortal /></MemberRoute>} />
             
             <Route path="/" element={
               <ProtectedRoute>

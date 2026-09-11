@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Loader2 } from 'lucide-react';
+import { QRCodeCanvas } from 'qrcode.react';
 import { partnerLogout } from '../store/slices/partnerAuthSlice';
 import partnerApi from '../utils/partnerApi';
+import { groupExclusions } from '../constants/exclusionList';
 
 /*  MATTER — Partner portal
  *  Dark navy / lime brand. Design source: "MATTER Partner.dc.html" (mobile)
@@ -72,10 +74,12 @@ const orderItemsLine = (o) =>
 const NAV_ICON = {
   order: 'M3 5h18v16H3zM3 10h18M8 3v4M16 3v4',
   orders: 'M4 7h16M4 12h16M4 17h10',
+  members: 'M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM3 20a6 6 0 0 1 12 0M17 11a3 3 0 1 0-2-5.2M21 20a6 6 0 0 0-6-6',
   profile: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0',
 };
-const TITLE = { order: 'New Order', orders: 'My Orders', profile: 'Profile' };
-const NAV_LABEL = { order: 'New Order', orders: 'My Orders', profile: 'Profile' };
+const TABS = ['order', 'orders', 'members', 'profile'];
+const TITLE = { order: 'New Order', orders: 'My Orders', members: 'Members', profile: 'Profile' };
+const NAV_LABEL = { order: 'New Order', orders: 'My Orders', members: 'Members', profile: 'Profile' };
 
 const useIsDesktop = () => {
   const q = '(min-width: 1024px)';
@@ -118,6 +122,13 @@ const PartnerPortal = () => {
   const [reports, setReports] = useState(null);
   const [copied, setCopied] = useState(false);
 
+  // members
+  const [members, setMembers] = useState([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [invite, setInvite] = useState(null); // { inviteToken, joinUrl }
+  const [linkCopied, setLinkCopied] = useState(false);
+  const qrRef = useRef(null);
+
   const minISO = firstOrderableISO();
   const todayISO = toISO(new Date());
 
@@ -152,9 +163,31 @@ const PartnerPortal = () => {
     }
   }, []);
 
+  const loadMembers = useCallback(async () => {
+    setMembersLoading(true);
+    try {
+      const [mRes, tRes] = await Promise.all([
+        partnerApi.get('/partner/members'),
+        partnerApi.get('/partner/members/invite-token'),
+      ]);
+      setMembers(mRes.data.data || []);
+      let inviteData = tRes.data.data;
+      if (!inviteData?.inviteToken) {
+        const cRes = await partnerApi.post('/partner/members/invite-token');
+        inviteData = cRes.data.data;
+      }
+      setInvite(inviteData);
+    } catch {
+      /* silent */
+    } finally {
+      setMembersLoading(false);
+    }
+  }, []);
+
   useEffect(() => { loadOrders(); }, [loadOrders]);
   useEffect(() => { if (tab === 'order') loadMenu(sel); }, [tab, sel, loadMenu]);
   useEffect(() => { if (tab === 'profile' && !reports) loadReports(); }, [tab, reports, loadReports]);
+  useEffect(() => { if (tab === 'members') loadMembers(); }, [tab, loadMembers]);
 
   // ── derived ───────────────────────────────────────────────────────────────
   const ordersByDate = useMemo(() => {
@@ -484,6 +517,95 @@ const PartnerPortal = () => {
     </>
   );
 
+  const downloadQR = () => {
+    const canvas = qrRef.current?.querySelector('canvas');
+    if (!canvas) return;
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = 'member-join-qr.png';
+    a.click();
+  };
+
+  const copyJoinLink = () => {
+    if (!invite?.joinUrl) return;
+    try { navigator.clipboard?.writeText(invite.joinUrl); } catch { /* noop */ }
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 1600);
+  };
+
+  const renderMembers = () => (
+    <div className="max-w-[640px]">
+      <div className="text-[13px] tracking-[0.12em] uppercase text-[#a8ccf5] mb-2.5">Invite link</div>
+      {membersLoading && !invite ? (
+        <div className="flex justify-center py-12"><Loader2 className="w-7 h-7 animate-spin text-[#bcf679]" /></div>
+      ) : (
+        <div className={`${card} p-[18px] flex flex-col sm:flex-row gap-4 items-start`}>
+          <div ref={qrRef} className="bg-white rounded-[14px] p-2.5 flex-none">
+            {invite?.joinUrl && <QRCodeCanvas value={invite.joinUrl} size={160} includeMargin={false} />}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-[12.5px] text-[#a8ccf5] leading-relaxed">
+              Clients scan this code to join {partner?.businessName || 'you'} as a member. It stays the same — print it or share the link.
+            </div>
+            <div className="mt-3 bg-[#0a1230] border-[1.5px] border-[#12275e] rounded-[12px] px-3 py-2 text-[11.5px] text-[#ede5de] break-all">
+              {invite?.joinUrl || '—'}
+            </div>
+            <div className="flex gap-2 mt-3">
+              <button onClick={copyJoinLink}
+                className="rounded-full px-3.5 py-2 text-[12.5px] font-bold border-[1.5px] transition-colors"
+                style={{
+                  background: linkCopied ? '#bcf679' : '#0a1230',
+                  borderColor: linkCopied ? '#bcf679' : '#12275e',
+                  color: linkCopied ? '#051747' : '#ede5de',
+                }}>
+                {linkCopied ? 'Copied ✓' : 'Copy link'}
+              </button>
+              <button onClick={downloadQR}
+                className="rounded-full px-3.5 py-2 text-[12.5px] font-bold border-[1.5px] border-[#12275e] text-[#ede5de] hover:border-[#bcf679] transition-colors">
+                Download QR
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="flex justify-between items-baseline mt-6 mb-2.5">
+        <div className="text-[13px] tracking-[0.12em] uppercase text-[#a8ccf5]">Members</div>
+        <div className="text-[12.5px] text-[#a8ccf5]">{members.length} joined</div>
+      </div>
+      {members.length === 0 ? (
+        <div className={`${card} px-4 py-10 text-center text-[13px] text-[#a8ccf5]`}>No members yet.</div>
+      ) : (
+        <div className="flex flex-col gap-2.5">
+          {members.map((m) => {
+            const chips = groupExclusions(m.dietaryExclusions || '');
+            return (
+              <div key={m._id} className="bg-[#051747] rounded-[18px] px-4 py-3.5 border-[1.5px] border-[#12275e]">
+                <div className="flex items-center gap-2.5">
+                  <div className="text-[14px] font-bold truncate">{m.name}</div>
+                  {!m.isActive && (
+                    <span className="rounded-full px-2 py-0.5 text-[10px] font-bold" style={{ background: 'rgba(255,59,0,.16)', color: '#ff8a66' }}>Inactive</span>
+                  )}
+                  <span className="ml-auto text-[11.5px] text-[#a8ccf5]">
+                    {m.createdAt ? new Date(m.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''}
+                  </span>
+                </div>
+                <div className="text-[12px] text-[#a8ccf5] mt-0.5 truncate">{m.email}</div>
+                {chips.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {chips.map((c) => (
+                      <span key={c} className="bg-[rgba(188,246,121,.15)] text-[#bcf679] px-2 py-0.5 rounded-full text-[10px] font-bold">{c}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
   // checkout body — shared by the mobile sheet and the desktop rail
   const renderCheckoutBody = () => (
     <>
@@ -561,7 +683,7 @@ const PartnerPortal = () => {
           </div>
 
           <nav className="flex flex-col gap-[3px] mt-[30px]">
-            {['order', 'orders', 'profile'].map((id) => {
+            {TABS.map((id) => {
               const on = tab === id;
               return (
                 <button key={id} onClick={() => setTab(id)}
@@ -619,6 +741,13 @@ const PartnerPortal = () => {
                 <div className="text-[24px]" style={AB}>My Orders</div>
                 <div className="mt-[18px]">{renderOrdersToggle('w-[260px]')}</div>
                 <div className="mt-4">{renderOrdersList('grid grid-cols-1 2xl:grid-cols-2 gap-3')}</div>
+              </div>
+            )}
+
+            {tab === 'members' && (
+              <div>
+                <div className="text-[24px]" style={AB}>Members</div>
+                <div className="mt-[18px]">{renderMembers()}</div>
               </div>
             )}
 
@@ -745,6 +874,12 @@ const PartnerPortal = () => {
           <div className="flex-1 min-h-0 overflow-y-auto px-[18px] pt-4 pb-[100px]">
             {renderOrdersToggle()}
             <div className="mt-3.5">{renderOrdersList('flex flex-col gap-2.5')}</div>
+          </div>
+        )}
+
+        {tab === 'members' && (
+          <div className="flex-1 min-h-0 overflow-y-auto px-[18px] pt-4 pb-[100px]">
+            {renderMembers()}
           </div>
         )}
 

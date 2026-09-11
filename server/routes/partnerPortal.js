@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'crypto';
 import PartnerMenuItem from '../models/PartnerMenuItem.js';
 import SpaceMenu from '../models/SpaceMenu.js';
 import SpacePrice from '../models/SpacePrice.js';
@@ -10,9 +11,15 @@ import WasteLog, { WASTE_REASONS } from '../models/WasteLog.js';
 import { partnerProtect } from '../middleware/partnerAuth.js';
 import { sendNewOrderEmail } from '../services/emailService.js';
 import Partner from '../models/Partner.js';
+import Member from '../models/Member.js';
 
 const router = express.Router();
 router.use(partnerProtect);
+
+const buildJoinUrl = (req, token) => {
+  const fallbackOrigin = req.get('origin') || `${req.protocol}://${req.get('host')}`;
+  return `${process.env.FRONTEND_URL || fallbackOrigin}/join/${token}`;
+};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -54,6 +61,48 @@ router.patch('/profile', async (req, res) => {
       }
     });
   } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── Members ─────────────────────────────────────────────────────────────────
+
+// GET /api/partner/members — this partner's member roster
+router.get('/members', async (req, res) => {
+  try {
+    const members = await Member.find({ partner: req.partner._id })
+      .select('name email dietaryExclusions isActive createdAt lastLogin')
+      .sort({ createdAt: -1 });
+    res.json({ success: true, data: members });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/partner/members/invite-token — current invite token + join URL (may be null)
+router.get('/members/invite-token', async (req, res) => {
+  try {
+    const token = req.partner.memberInviteToken || null;
+    res.json({
+      success: true,
+      data: { inviteToken: token, joinUrl: token ? buildJoinUrl(req, token) : null }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// POST /api/partner/members/invite-token — lazily create the invite token
+router.post('/members/invite-token', async (req, res) => {
+  try {
+    let token = req.partner.memberInviteToken;
+    if (!token) {
+      token = crypto.randomBytes(24).toString('hex');
+      await Partner.findByIdAndUpdate(req.partner._id, { memberInviteToken: token });
+    }
+    res.json({ success: true, data: { inviteToken: token, joinUrl: buildJoinUrl(req, token) } });
+  } catch (err) {
+    console.error('Member invite-token error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

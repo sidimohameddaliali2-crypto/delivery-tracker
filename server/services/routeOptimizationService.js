@@ -196,13 +196,15 @@ async function resolveCoordinatesForAll(deliveries) {
  *   midnight) instead of letting the solver float between
  *   KITCHEN_EARLIEST_DEPARTURE_TIME and KITCHEN_DEPARTURE_TIME. Dispatcher-set,
  *   one-time per plan — nothing is persisted.
- * @param {{driverId: string, hubReadySeconds: number}[]} [options.hubVans] -
+ * @param {{driverId: string, hubReadySeconds: number, hubLocation?: {lat:number,lng:number}}[]} [options.hubVans] -
  *   Vans the dispatcher has dragged into "Hub" for this plan. Each entry hard-
  *   caps that van's OWN deliveries so it finishes them (incl. the modeled
  *   return-to-depot leg) by hubReadySeconds — a real wall-clock cutoff, not a
  *   preference — freeing the rest of its true shift for handoffPlanner's van-
  *   as-hub matching (which still sees the van's full shift for that purpose;
- *   only the solve's own-delivery budget is reduced). One-time per plan.
+ *   only the solve's own-delivery budget is reduced). An optional hubLocation
+ *   (a dragged 🚚 pin) forces every bike to meet that van at that exact point
+ *   instead of near the bike's own route. One-time per plan.
  * @param {number|null} [options.bikeTripCapacity] - Simulation-only override
  *   of the real 20-stops-per-trip rule for every bike in this plan (both the
  *   solve's capacity dimension and handoffPlanner's trip-split point). Real
@@ -304,6 +306,17 @@ export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
   );
   const vehicleHubReadySeconds = drivers.map((d) => hubReadyByDriverId.get(String(d._id)) ?? null);
   const hasHubVans = vehicleHubReadySeconds.some((v) => v != null);
+  // Optional dispatcher-pinned meeting location per hub van (a dragged 🚚
+  // pin in the simulation). When present, every bike meets that van at this
+  // exact point instead of near wherever the bike is working.
+  const hubLocationByDriverId = {};
+  (hubVans || []).forEach((h) => {
+    const lat = Number(h?.hubLocation?.lat);
+    const lng = Number(h?.hubLocation?.lng);
+    if (h?.driverId != null && Number.isFinite(lat) && Number.isFinite(lng)) {
+      hubLocationByDriverId[String(h.driverId)] = { lat, lng };
+    }
+  });
   // Flat per-vehicle dwell time (bike vs van — see serviceSecondsForVehicleType),
   // the same at every stop that vehicle visits. The solver needs this per
   // vehicle (it's choosing which vehicle serves which stop); handoffPlanner
@@ -454,7 +467,8 @@ export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
       // a batch with no scheduled-time awareness still gets a sane offset).
       hubModeStartSeconds: Math.max(0, HUB_MODE_START_WALLCLOCK_SECONDS - KITCHEN_DEPARTURE_DEFAULT_SECONDS),
       hubModeShiftGraceSeconds: HUB_MODE_SHIFT_GRACE_SECONDS,
-      ...(bikeTripCapacity != null ? { tripCapacity: bikeTripCapacity } : {})
+      ...(bikeTripCapacity != null ? { tripCapacity: bikeTripCapacity } : {}),
+      ...(Object.keys(hubLocationByDriverId).length > 0 ? { hubLocationByDriverId } : {})
     });
 
     routes = planned.adjustedRoutes.map((r, i) => ({

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { load } from '@2gis/mapgl';
-import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft } from 'lucide-react';
+import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft, ChevronDown } from 'lucide-react';
 import api from '../utils/api';
 import { getDeliveryLatLng } from '../utils/deliveryCoords';
 import { formatBusinessTime, formatClockFromSecondsSinceMidnight, toBusinessComponents } from '../utils/businessTime';
@@ -302,10 +302,20 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   // never-writes optimizeRoutes the Optimize Routes modal previews with, and
   // never calls apply — real assignments are untouched either way.
   const [simMode, setSimMode] = useState(false);
+  // The rules panel is a collapsible dropdown so it can be tucked away to see
+  // the whole map (owner, 2026-09-10).
+  const [simPanelOpen, setSimPanelOpen] = useState(true);
   const [simDeparture, setSimDeparture] = useState('');
+  // Seconds-from-midnight the last run actually departed at (null = the
+  // normal rule) — so the per-driver ETA panel honours the what-if departure.
+  const [simRunDeparture, setSimRunDeparture] = useState(null);
   const [simBikeCapacity, setSimBikeCapacity] = useState('');
   const [simHubVanIds, setSimHubVanIds] = useState([]);
   const [simHubReady, setSimHubReady] = useState({}); // driverId -> 'HH:MM'
+  // Dispatcher-pinned meeting location for a hub van, from dragging its 🚚
+  // pin on the map. driverId -> {lat, lng}. When set, every bike meets that
+  // van HERE instead of near wherever the bike happens to be working.
+  const [simHubLocation, setSimHubLocation] = useState({});
   // Which drivers/areas take part in the run — "excluded" (not "included") so
   // the default (nothing excluded) means "everyone/everywhere," matching what
   // the map already shows without the dispatcher having to opt every driver
@@ -639,21 +649,34 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
 
     // Simulation hub-van pins — shown regardless of which driver is
     // currently selected, so choosing a hub is a map action, not just a
-    // name in a list.
+    // name in a list. Drag one to pin exactly where that van should meet
+    // bikes; the pinned point is then used as the meeting location in the
+    // run.
     if (simMode) {
       simHubVanIds.forEach((driverId) => {
         const van = drivers.find((d) => String(d._id) === driverId);
-        const point = driverAnchorPoint.get(driverId) || (depot ? { lat: depot.lat, lng: depot.lng } : null);
+        const pinned = simHubLocation[driverId];
+        const point = pinned || driverAnchorPoint.get(driverId) || (depot ? { lat: depot.lat, lng: depot.lng } : null);
         if (!point) return;
-        markersRef.current.push(new mapgl.HtmlMarker(map, {
+        const marker = new mapgl.HtmlMarker(map, {
           coordinates: [point.lng, point.lat],
-          html: hubVanHtml(`Hub: ${driverDisplayName(van)}`),
+          html: hubVanHtml(`Hub: ${driverDisplayName(van)}${pinned ? ' (pinned — drag to move)' : ' (drag to pin its location)'}`),
           anchor: [17, 17],
-          zIndex: 8
-        }));
+          // Above every delivery pin (which top out at 20 when active) — the
+          // hub pin sits right on top of the van's first stop, so it has to
+          // win the pointer to be draggable.
+          zIndex: 30
+        });
+        marker.getContent().setAttribute('data-hub-van-id', driverId);
+        if (container) {
+          makeMarkerDraggable(marker, map, container, ([lng, lat]) => {
+            setSimHubLocation((prev) => ({ ...prev, [driverId]: { lat, lng } }));
+          });
+        }
+        markersRef.current.push(marker);
       });
     }
-  }, [mapReady, visibleGroups, depot, activeId, eta, editMode, handlePinDrop, simMode, simHubVanIds, driverAnchorPoint, drivers]);
+  }, [mapReady, visibleGroups, depot, activeId, eta, editMode, handlePinDrop, simMode, simHubVanIds, simHubLocation, driverAnchorPoint, drivers]);
 
   // Fit the view when the selection (not the highlighted stop) changes.
   useEffect(() => {
@@ -751,7 +774,8 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       return undefined;
     }
     const ids = singleGroup.stops.map((s) => s._id);
-    const cacheKey = `${simulating ? 'sim' : 'real'}|${singleGroup.id}|${date}|${ids.join(',')}`;
+    const simDep = simulating && simRunDeparture != null ? simRunDeparture : null;
+    const cacheKey = `${simulating ? 'sim' : 'real'}|${simDep ?? 'x'}|${singleGroup.id}|${date}|${ids.join(',')}`;
     const cached = etaCacheRef.current.get(cacheKey);
     if (cached) {
       setEta(cached);
@@ -769,6 +793,9 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       // that real driver's actual handoff happens to be for this date, which
       // has nothing to do with the what-if plan being previewed.
       ...(simulating ? {} : { driverId: singleGroup.id }),
+      // In a simulation the ETAs must use the what-if departure, not the
+      // normal 1:00 AM-floored rule.
+      ...(simDep != null ? { fixedDepartureSeconds: simDep } : {}),
       date
     })
       .then((res) => {
@@ -793,7 +820,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         setEta({ status: 'error', error: err?.response?.data?.message || err.message });
       });
     return () => { cancelled = true; };
-  }, [singleGroup, date, simulating]);
+  }, [singleGroup, date, simulating, simRunDeparture]);
 
   // Runs the same read-only optimizeRoutes the Optimize Routes modal previews
   // with — it never writes anything, so nothing here can ever assign a real
@@ -817,7 +844,14 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
           const van = drivers.find((d) => String(d._id) === driverId);
           throw new Error(`Set a "ready for hub duty by" time for ${driverDisplayName(van)}.`);
         }
-        hubVans.push({ driverId, hubReadySeconds });
+        const pinned = simHubLocation[driverId];
+        hubVans.push({
+          driverId,
+          hubReadySeconds,
+          ...(pinned && Number.isFinite(pinned.lat) && Number.isFinite(pinned.lng)
+            ? { hubLocation: { lat: pinned.lat, lng: pinned.lng } }
+            : {})
+        });
       }
       const bikeTripCapacity = simBikeCapacity ? Number(simBikeCapacity) : null;
       if (simBikeCapacity && (!Number.isFinite(bikeTripCapacity) || bikeTripCapacity < 1)) {
@@ -839,7 +873,13 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         ...(bikeTripCapacity != null ? { bikeTripCapacity } : {})
       });
       setSimPlan(res.data?.data || null);
+      // Remember the departure this run actually used, so the per-driver ETA
+      // panel below honours it too instead of re-applying the 1:00 AM floor.
+      setSimRunDeparture(fixedDepartureSeconds);
       setSimStatus('ok');
+      // Tuck the rules away so the result is visible on the full map — expand
+      // again from the ▸ chevron to change anything.
+      setSimPanelOpen(false);
     } catch (err) {
       setSimError(err.response?.data?.message || err.message || 'Simulation failed.');
       setSimStatus('error');
@@ -849,6 +889,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const exitSimulation = () => {
     setSimMode(false);
     setSimPlan(null);
+    setSimRunDeparture(null);
     setSimStatus('idle');
     setSimError('');
   };
@@ -867,10 +908,15 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     setSimHubVanIds((prev) => {
       if (prev.includes(driverId)) {
         setSimHubReady((r) => { const next = { ...r }; delete next[driverId]; return next; });
+        setSimHubLocation((l) => { const next = { ...l }; delete next[driverId]; return next; });
         return prev.filter((id) => id !== driverId);
       }
       return [...prev, driverId];
     });
+  };
+
+  const resetSimHubLocation = (driverId) => {
+    setSimHubLocation((l) => { const next = { ...l }; delete next[driverId]; return next; });
   };
 
   if (!open) return null;
@@ -952,6 +998,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
               onClick={() => {
                 if (simMode) { exitSimulation(); return; }
                 setEditMode(false);
+                setSimPanelOpen(true);
                 setSimMode(true);
               }}
               className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 ${
@@ -983,12 +1030,45 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         </div>
 
         {simMode ? (
-          <div data-testid="sim-panel" className="px-5 py-3 bg-indigo-50 border-b border-indigo-200 space-y-2.5">
+          <div data-testid="sim-panel" className="px-5 py-2.5 bg-indigo-50 border-b border-indigo-200">
             <div className="flex items-center gap-2 text-sm text-indigo-900">
+              <button
+                type="button"
+                onClick={() => setSimPanelOpen((v) => !v)}
+                className="p-0.5 rounded hover:bg-indigo-100"
+                aria-label={simPanelOpen ? 'Collapse simulation panel' : 'Expand simulation panel'}
+                title={simPanelOpen ? 'Collapse to see the map' : 'Expand to set rules'}
+              >
+                <ChevronDown className={`w-4 h-4 transition-transform ${simPanelOpen ? '' : '-rotate-90'}`} />
+              </button>
               <FlaskConical className="w-4 h-4 flex-shrink-0" />
               <span className="font-medium">Simulation</span>
-              <span className="text-indigo-700">— set rules, then Run. Nothing here is ever assigned or saved; the real plan is untouched.</span>
+              {simPanelOpen ? (
+                <span className="text-indigo-700">— set rules, then Run. Nothing here is ever assigned or saved; the real plan is untouched.</span>
+              ) : (
+                <span className="text-indigo-700 truncate min-w-0">
+                  {simulating
+                    ? <>showing a what-if plan — <strong>{simPlan.routes.reduce((n, r) => n + r.stops.length, 0)}</strong> assigned{simPlan.unassignedDeliveries?.length ? `, ${simPlan.unassignedDeliveries.length} unassigned` : ''}</>
+                    : 'collapsed — expand to set the rules'}
+                </span>
+              )}
+              {!simPanelOpen ? (
+                <button
+                  type="button"
+                  onClick={runSimulation}
+                  disabled={simStatus === 'loading'}
+                  className="ml-auto inline-flex items-center gap-1.5 px-3 py-1 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {simStatus === 'loading' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FlaskConical className="w-3.5 h-3.5" />}
+                  {simStatus === 'loading' ? 'Running…' : 'Run'}
+                </button>
+              ) : null}
             </div>
+            {!simPanelOpen && simError ? (
+              <p className="text-xs text-red-700 mt-1 flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5" />{simError}</p>
+            ) : null}
+            {simPanelOpen ? (
+            <div className="space-y-2.5 mt-2.5">
             <div className="flex flex-wrap items-end gap-4">
               <label className="flex flex-col gap-1 text-xs font-medium text-indigo-900">
                 Kitchen departure
@@ -1096,11 +1176,14 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
             </div>
 
             <div>
-              <p className="text-xs font-medium text-indigo-900 mb-1">Hub van (click a van, then set when it must be ready — 🚚 pin shows where on the map)</p>
+              <p className="text-xs font-medium text-indigo-900 mb-1">
+                Hub van (click a van, set when it must be ready — then drag its 🚚 pin on the map to fix exactly where bikes meet it)
+              </p>
               <div data-testid="sim-hub-vans" className="flex flex-wrap gap-1.5">
                 {drivers.filter((d) => d.profile?.vehicleType === 'van' && !simExcludedDriverIds.includes(String(d._id))).map((d) => {
                   const id = String(d._id);
                   const isHub = simHubVanIds.includes(id);
+                  const pinned = !!simHubLocation[id];
                   return (
                     <div
                       key={id}
@@ -1118,6 +1201,16 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                           onChange={(e) => setSimHubReady((r) => ({ ...r, [id]: e.target.value }))}
                           className="border border-orange-300 rounded px-1 py-0 text-[11px]"
                         />
+                      ) : null}
+                      {isHub && pinned ? (
+                        <button
+                          type="button"
+                          onClick={() => resetSimHubLocation(id)}
+                          className="text-[10px] text-orange-700 underline"
+                          title="Stop pinning — go back to meeting bikes wherever they're working"
+                        >
+                          📍 pinned · reset
+                        </button>
                       ) : null}
                     </div>
                   );
@@ -1139,6 +1232,8 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                 {simPlan.kitchenReturns?.length ? <>, <strong>{simPlan.kitchenReturns.length}</strong> kitchen {simPlan.kitchenReturns.length === 1 ? 'return' : 'returns'}</> : null}
                 {' '}— the pins/list below now show this plan.
               </p>
+            ) : null}
+            </div>
             ) : null}
           </div>
         ) : null}
@@ -1315,6 +1410,12 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                       <p>
                         {eta.departure.reason === 'usual' ? (
                           <>Leave the kitchen at the usual <span className="font-semibold">{clock(eta.departure.seconds)}</span>.</>
+                        ) : null}
+                        {eta.departure.reason === 'fixed' ? (
+                          <span className="text-indigo-700">
+                            Simulation: leaving the kitchen at <span className="font-semibold">{clock(eta.departure.seconds)}</span>
+                            {' '}— your what-if time, overriding the usual 1:00 AM earliest-departure rule.
+                          </span>
                         ) : null}
                         {eta.departure.reason === 'earlier' ? (
                           <>

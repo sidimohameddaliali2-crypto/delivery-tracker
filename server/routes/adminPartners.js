@@ -10,6 +10,8 @@ import OrderLine from '../models/OrderLine.js';
 import Invoice from '../models/Invoice.js';
 import InvoiceLine from '../models/InvoiceLine.js';
 import WasteLog, { WASTE_REASONS } from '../models/WasteLog.js';
+import Member from '../models/Member.js';
+import MemberOrder from '../models/MemberOrder.js';
 import { protect, admin, authorize } from '../middleware/auth.js';
 
 const adminOrKitchen = authorize(['admin', 'super_admin', 'kitchen']);
@@ -585,6 +587,41 @@ router.get('/:id/orders', async (req, res) => {
   try {
     const orders = await SpaceOrder.find({ space: req.params.id }).sort({ deliveryDate: -1 });
     res.json({ success: true, data: orders });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/partners/:id/members — members of a partner + their order counts
+router.get('/:id/members', async (req, res) => {
+  try {
+    const members = await Member.find({ partner: req.params.id }).sort({ createdAt: -1 });
+    const counts = await MemberOrder.aggregate([
+      { $match: { partner: new mongoose.Types.ObjectId(req.params.id) } },
+      { $group: { _id: '$member', count: { $sum: 1 } } }
+    ]);
+    const countMap = {};
+    counts.forEach(c => { countMap[String(c._id)] = c.count; });
+    res.json({
+      success: true,
+      data: members.map(m => ({ ...m.toObject(), orderCount: countMap[String(m._id)] || 0 }))
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// PATCH /api/admin/partners/:id/members/:memberId — activate / deactivate a member
+router.patch('/:id/members/:memberId', admin, async (req, res) => {
+  try {
+    const { isActive } = req.body;
+    const member = await Member.findOneAndUpdate(
+      { _id: req.params.memberId, partner: req.params.id },
+      { isActive },
+      { new: true }
+    );
+    if (!member) return res.status(404).json({ success: false, message: 'Member not found' });
+    res.json({ success: true, data: member });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
   }

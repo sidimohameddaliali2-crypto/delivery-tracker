@@ -10,6 +10,7 @@ import deliveryChangeSlice from './slices/deliveryChangeSlice';
 import eventSlice from './slices/eventSlice';
 import yellowblockSlice from './slices/yellowblockSlice';
 import partnerAuthSlice from './slices/partnerAuthSlice';
+import memberAuthSlice from './slices/memberAuthSlice';
 import employeeSlice from './slices/employeeSlice';
 
 
@@ -28,6 +29,7 @@ export const store = configureStore({
     events: eventSlice,
     yellowblock: yellowblockSlice,
     partnerAuth: partnerAuthSlice,
+    memberAuth: memberAuthSlice,
     employee: employeeSlice,
   },
   middleware: (getDefaultMiddleware) =>

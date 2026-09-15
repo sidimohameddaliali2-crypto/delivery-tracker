@@ -67,6 +67,7 @@ const DriverRoutesPage = () => {
         date={selectedDate}
         onDateChange={setSelectedDate}
         onOptimizeRoutes={() => setOptimizeOpen(true)}
+        onAssigned={refresh}
       />
       <RouteOptimizationModal
         open={optimizeOpen}

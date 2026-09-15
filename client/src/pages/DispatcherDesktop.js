@@ -16,7 +16,8 @@ import {
   Printer,
   CalendarDays,
   Briefcase,
-  Route
+  Route,
+  Package
 } from 'lucide-react';
 import { fetchEvents } from '../store/slices/eventSlice';
 import { setSelectedEvent } from '../store/slices/eventSlice';
@@ -28,6 +29,7 @@ import RouteOptimizationModal from '../components/RouteOptimizationModal';
 import { fetchDeliveries } from '../store/slices/deliverySlice';
 import { fetchDrivers } from '../store/slices/driverSlice';
 import { logout } from '../store/slices/authSlice';
+import { formatClockFromSecondsSinceMidnight } from '../utils/businessTime';
 
 const AREA_FILTER_OPTIONS = [
   'All',
@@ -71,6 +73,13 @@ const DispatcherDesktop = () => {
   const [assigningDriverId, setAssigningDriverId] = useState(null);
   const [activeAssignmentDeliveries, setActiveAssignmentDeliveries] = useState([]);
   const [unassigning, setUnassigning] = useState(false);
+  // "Generate Route" preview in the Assign Driver modal (owner, 2026-09-14):
+  // shows the route a driver would follow — their existing stops for the day
+  // plus the delivery about to be assigned — and whether each one lands
+  // early/on-time/late, all before actually assigning anything.
+  const [routePreviewLoadingId, setRoutePreviewLoadingId] = useState(null);
+  const [routePreview, setRoutePreview] = useState(null);
+  const [routePreviewError, setRoutePreviewError] = useState('');
   const [feedback, setFeedback] = useState({ message: '', error: false });
   const [areaDropdownOpen, setAreaDropdownOpen] = useState(false);
   const [driverFilterDropdownOpen, setDriverFilterDropdownOpen] = useState(false);
@@ -360,6 +369,8 @@ const DispatcherDesktop = () => {
       setAreaFilters([]);
       setTimingFilters([]);
       setDriverFilters([]);
+      setRoutePreview(null);
+      setRoutePreviewError('');
     } catch (error) {
       setFeedback({
         message:
@@ -370,6 +381,55 @@ const DispatcherDesktop = () => {
       });
     } finally {
       setAssigningDriverId(null);
+    }
+  };
+
+  // Preview-only: does not assign anything. Orders this driver's existing
+  // stops for the selected date plus the delivery/deliveries about to be
+  // assigned (by scheduled time, same fallback the driver app itself uses
+  // for an unoptimized day), then asks the real /route-eta calculation for
+  // each stop's predicted arrival and early/on-time/late status.
+  const handleGenerateRoute = async (driver) => {
+    setRoutePreviewError('');
+    setRoutePreview(null);
+    setRoutePreviewLoadingId(driver._id);
+    try {
+      const incomingIds = new Set(activeAssignmentDeliveries.map((d) => d._id));
+      const existing = deliveries.filter(
+        (d) => d.driver?._id === driver._id && d.status !== 'delivered' && !incomingIds.has(d._id)
+      );
+      const candidates = [...existing, ...activeAssignmentDeliveries].sort(
+        (a, b) => new Date(a.scheduledTime).getTime() - new Date(b.scheduledTime).getTime()
+      );
+      const deliveryIds = candidates.map((d) => d._id);
+      if (deliveryIds.length === 0) {
+        setRoutePreview({ driverId: driver._id, stops: [], totals: null, departure: null, droppedCount: 0 });
+        return;
+      }
+      const byId = new Map(candidates.map((d) => [d._id, d]));
+      const { data } = await api.post('/deliveries/route-eta', {
+        deliveryIds,
+        vehicleType: driver.profile?.vehicleType,
+        driverId: driver._id,
+        date: selectedDate
+      });
+      const result = data?.data;
+      const stops = (result?.stops || []).map((s) => ({
+        ...s,
+        customerName: byId.get(s.deliveryId)?.customerName || 'Customer',
+        isNew: incomingIds.has(s.deliveryId)
+      }));
+      setRoutePreview({
+        driverId: driver._id,
+        departure: result?.departure || null,
+        totals: result?.totals || null,
+        stops,
+        droppedCount: result?.droppedIds?.length || 0
+      });
+    } catch (error) {
+      setRoutePreviewError(error.response?.data?.message || error.message || 'Could not generate the route.');
+    } finally {
+      setRoutePreviewLoadingId(null);
     }
   };
 
@@ -920,7 +980,18 @@ const DispatcherDesktop = () => {
                     />
                   </td>
                   <td className="px-6 py-4 text-sm font-medium text-gray-900">{delivery.customerId}</td>
-                  <td className="px-6 py-4 text-sm text-gray-700">{delivery.customerName}</td>
+                  <td className="px-6 py-4 text-sm text-gray-700">
+                    {delivery.customerName}
+                    {delivery.combinedSunday && (
+                      <span
+                        title="Sunday's delivery is included — no separate Sunday trip needed for this customer."
+                        className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-100 text-indigo-700 align-middle"
+                      >
+                        <Package className="w-3 h-3" />
+                        +Sun
+                      </span>
+                    )}
+                  </td>
                   <td className="px-6 py-4 text-sm text-gray-600">{formatTime(delivery.scheduledTime)}</td>
                   <td className="px-6 py-4 text-sm text-gray-600">{delivery.address || '-'}</td>
                   <td className="px-6 py-4 text-sm text-gray-600">{delivery.zone || '-'}</td>
@@ -991,11 +1062,15 @@ const DispatcherDesktop = () => {
       {/* Driver Assignment Modal */}
       {activeAssignmentDeliveries.length > 0 && (
         <div className="fixed inset-0 bg-black bg-opacity-50 z-40 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg shadow-lg max-w-2xl w-full max-h-96 flex flex-col">
+          <div className="bg-white rounded-lg shadow-lg max-w-3xl w-full max-h-[85vh] flex flex-col">
             <div className="flex justify-between items-center p-6 border-b border-gray-200">
               <h2 className="text-xl font-bold text-gray-900">Assign Driver</h2>
               <button
-                onClick={() => setActiveAssignmentDeliveries([])}
+                onClick={() => {
+                  setActiveAssignmentDeliveries([]);
+                  setRoutePreview(null);
+                  setRoutePreviewError('');
+                }}
                 className="p-1 hover:bg-gray-100 rounded"
               >
                 <X className="w-6 h-6 text-gray-600" />
@@ -1013,24 +1088,98 @@ const DispatcherDesktop = () => {
               <h3 className="font-semibold text-gray-900 mb-4">Select Driver:</h3>
               <div className="space-y-2">
                 {sortedDrivers.map((driver) => (
-                  <button
-                    key={driver._id}
-                    onClick={() => handleAssignDriver(driver)}
-                    disabled={assigningDriverId === driver._id}
-                    className="w-full p-4 border border-gray-300 rounded-lg hover:bg-blue-50 text-left transition disabled:opacity-50"
-                  >
-                    <div className="flex items-center justify-between">
+                  <div key={driver._id} className="border border-gray-300 rounded-lg transition">
+                    <div className="w-full p-4 flex items-center justify-between gap-3">
                       <div>
                         <p className="font-semibold text-gray-900">{getDriverDisplayName(driver)}</p>
                         <p className="text-xs text-gray-500">{driverLoadCounts[driver._id] || 0} deliveries</p>
                       </div>
-                      {assigningDriverId === driver._id && (
-                        <span className="text-blue-600 font-semibold">Assigning...</span>
-                      )}
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleGenerateRoute(driver)}
+                          disabled={routePreviewLoadingId === driver._id}
+                          className="px-3 py-1.5 text-xs font-semibold text-indigo-700 border border-indigo-300 rounded-lg hover:bg-indigo-50 disabled:opacity-50 flex items-center gap-1.5"
+                          title="Preview the route this driver would follow with this delivery included, and whether each stop lands early or late"
+                        >
+                          <Route className="w-3.5 h-3.5" />
+                          {routePreviewLoadingId === driver._id ? 'Generating…' : 'Generate Route'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAssignDriver(driver)}
+                          disabled={assigningDriverId === driver._id}
+                          className="px-4 py-1.5 text-sm font-semibold text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          {assigningDriverId === driver._id ? 'Assigning…' : 'Assign'}
+                        </button>
+                      </div>
                     </div>
-                  </button>
+
+                    {routePreview?.driverId === driver._id ? (
+                      <div className="px-4 pb-4 -mt-1 border-t border-gray-100 pt-3">
+                        {routePreview.stops.length === 0 ? (
+                          <p className="text-xs text-gray-500">No other stops today — this would be the only delivery.</p>
+                        ) : (
+                          <>
+                            {routePreview.departure ? (
+                              <p className="text-xs text-gray-600 mb-2">
+                                Leaving the kitchen at <strong>{formatClockFromSecondsSinceMidnight(routePreview.departure.seconds)}</strong>
+                                {routePreview.departure.reason === 'capped' ? ' (earliest allowed)' : ''}
+                                {routePreview.departure.reason === 'earlier' ? ' (earlier than usual, for this route)' : ''}
+                              </p>
+                            ) : null}
+                            <ol className="space-y-1.5">
+                              {routePreview.stops.map((s, idx) => {
+                                const statusStyle = s.status === 'late'
+                                  ? 'bg-rose-100 text-rose-800'
+                                  : s.status === 'early'
+                                    ? 'bg-amber-100 text-amber-800'
+                                    : s.status === 'on_time'
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : 'bg-gray-100 text-gray-600';
+                                const statusLabel = s.status === 'late'
+                                  ? `Late ${Math.round(s.lateSeconds / 60)}m`
+                                  : s.status === 'early'
+                                    ? `Early ${Math.round(s.earlySeconds / 60)}m`
+                                    : s.status === 'on_time'
+                                      ? 'On time'
+                                      : '—';
+                                return (
+                                  <li key={s.deliveryId} className="flex items-center justify-between gap-2 text-xs bg-gray-50 rounded px-2 py-1.5">
+                                    <span className="flex items-center gap-2 min-w-0">
+                                      <span className="text-gray-400 flex-shrink-0">{idx + 1}.</span>
+                                      <span className={`truncate ${s.isNew ? 'font-semibold text-blue-700' : 'text-gray-800'}`}>
+                                        {s.customerName}{s.isNew ? ' (new)' : ''}
+                                      </span>
+                                    </span>
+                                    <span className="flex items-center gap-2 flex-shrink-0">
+                                      <span className="text-gray-500">{formatClockFromSecondsSinceMidnight(s.etaSeconds)}</span>
+                                      <span className={`px-2 py-0.5 rounded-full font-semibold ${statusStyle}`}>{statusLabel}</span>
+                                    </span>
+                                  </li>
+                                );
+                              })}
+                            </ol>
+                            {routePreview.totals ? (
+                              <p className="text-xs text-gray-600 mt-2">
+                                Back at the kitchen ~<strong>{formatClockFromSecondsSinceMidnight(routePreview.totals.backAtKitchenSeconds)}</strong>
+                                {' · '}{routePreview.totals.onTime} on time, {routePreview.totals.early} early, {routePreview.totals.late} late
+                              </p>
+                            ) : null}
+                            {routePreview.droppedCount > 0 ? (
+                              <p className="text-xs text-amber-700 mt-1">{routePreview.droppedCount} stop(s) skipped — no location on file.</p>
+                            ) : null}
+                          </>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
                 ))}
               </div>
+              {routePreviewError ? (
+                <p className="text-xs text-red-700 mt-3">{routePreviewError}</p>
+              ) : null}
             </div>
           </div>
         </div>
@@ -1359,6 +1508,28 @@ const DispatcherDesktop = () => {
                       <p className="font-semibold text-gray-900">{formatTime(selectedDeliveryDetail.scheduledTime)} on {formatDate(selectedDeliveryDetail.scheduledTime)}</p>
                     </div>
                   </div>
+                  {selectedDeliveryDetail.combinedSunday && (
+                    <div className="flex items-start gap-2 bg-indigo-50 border border-indigo-200 rounded-lg p-2.5">
+                      <Package className="w-4 h-4 text-indigo-500 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-xs text-indigo-700 font-semibold">Weekend combined delivery</p>
+                        <p className="text-sm text-indigo-900">
+                          Sunday ({formatDate(selectedDeliveryDetail.combinedSunday.scheduledTime)}) is included in this delivery — no separate Sunday delivery needed.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {selectedDeliveryDetail.combinedIntoSaturday && (
+                    <div className="flex items-start gap-2 bg-indigo-50 border border-indigo-200 rounded-lg p-2.5">
+                      <Package className="w-4 h-4 text-indigo-500 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-xs text-indigo-700 font-semibold">Combined into Saturday's delivery</p>
+                        <p className="text-sm text-indigo-900">
+                          This was already delivered as part of Saturday ({formatDate(selectedDeliveryDetail.combinedIntoSaturday.scheduledTime)}) — it won't appear in Sunday's lists separately.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 

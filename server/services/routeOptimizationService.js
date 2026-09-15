@@ -211,9 +211,15 @@ async function resolveCoordinatesForAll(deliveries) {
  *   dispatching should never pass this — it exists so a "what if bikes could
  *   carry more/fewer per trip" run can be previewed without touching any
  *   driver's actual profile.stopCapacity.
+ * @param {number|null} [options.maxEarlyDepartureSeconds] - Simulation-only:
+ *   when the departure is left floating (no fixedDepartureSeconds), caps how
+ *   much earlier than KITCHEN_DEPARTURE_DEFAULT_SECONDS the solver may pull
+ *   the start, replacing the real KITCHEN_EARLIEST_DEPARTURE_TIME floor for
+ *   this plan only (e.g. 3*3600 means "never more than 3 hours early").
+ *   Ignored when fixedDepartureSeconds is also set.
  */
 export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
-  const { fixedDepartureSeconds = null, hubVans = [], bikeTripCapacity = null } = options;
+  const { fixedDepartureSeconds = null, hubVans = [], bikeTripCapacity = null, maxEarlyDepartureSeconds = null } = options;
   if (!Number.isFinite(DEPOT.lat) || !Number.isFinite(DEPOT.lng)) {
     throw new Error('DELIVERY_DEPOT_LAT/DELIVERY_DEPOT_LNG are not configured');
   }
@@ -225,6 +231,9 @@ export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
   }
   if (fixedDepartureSeconds != null && (!Number.isFinite(fixedDepartureSeconds) || fixedDepartureSeconds < 0 || fixedDepartureSeconds >= 24 * 3600)) {
     throw new Error('fixedDepartureSeconds must be seconds from midnight (0-86399)');
+  }
+  if (maxEarlyDepartureSeconds != null && (!Number.isFinite(maxEarlyDepartureSeconds) || maxEarlyDepartureSeconds < 0)) {
+    throw new Error('maxEarlyDepartureSeconds must be a non-negative number of seconds');
   }
   if (bikeTripCapacity != null && (!Number.isFinite(bikeTripCapacity) || bikeTripCapacity < 1 || bikeTripCapacity > 200)) {
     throw new Error('bikeTripCapacity must be a positive number of stops (1-200)');
@@ -338,7 +347,19 @@ export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
   // all — a plain shift-relative solve has no notion of "the clock time this
   // van must be free by." Forcing it on here doesn't change scheduleAware
   // (that stays tied to real customer deadlines only, below).
-  const sendTimeWindow = hasAnyDeadline || fixedDepartureSeconds != null || hasHubVans;
+  const sendTimeWindow = hasAnyDeadline || fixedDepartureSeconds != null || maxEarlyDepartureSeconds != null || hasHubVans;
+  // Simulation-only (owner, 2026-09-14): replace the real "never more than
+  // ~1h early" floor with a dispatcher-chosen cap on how early the floating
+  // departure may go, instead of pinning an exact time. Ignored whenever a
+  // fixed departure is set (that already collapses the window to one instant).
+  // Clamped at midnight (0) — the wall-clock model here doesn't represent a
+  // departure on the PREVIOUS day, same limitation the real
+  // KITCHEN_EARLIEST_DEPARTURE_TIME already has (it's always a same-day
+  // "HH:MM" too). A max-early value big enough to cross midnight is capped
+  // there rather than silently doing something else.
+  const earliestDepartureSeconds = maxEarlyDepartureSeconds != null
+    ? Math.max(0, KITCHEN_DEPARTURE_DEFAULT_SECONDS - maxEarlyDepartureSeconds)
+    : KITCHEN_DEPARTURE_EARLIEST_SECONDS;
 
   const solveWith = (capacities, maxDurations) => runSolver({
     depot_index: 0,
@@ -358,8 +379,8 @@ export async function optimizeRoutes(deliveryIds, driverIds, options = {}) {
       start_window_seconds: fixedDepartureSeconds != null
         ? [fixedDepartureSeconds, fixedDepartureSeconds]
         : [
-          Math.min(KITCHEN_DEPARTURE_EARLIEST_SECONDS, KITCHEN_DEPARTURE_DEFAULT_SECONDS),
-          Math.max(KITCHEN_DEPARTURE_EARLIEST_SECONDS, KITCHEN_DEPARTURE_DEFAULT_SECONDS)
+          Math.min(earliestDepartureSeconds, KITCHEN_DEPARTURE_DEFAULT_SECONDS),
+          Math.max(earliestDepartureSeconds, KITCHEN_DEPARTURE_DEFAULT_SECONDS)
         ],
       // Hard cutoff (owner, 2026-09-06): a hub van stops taking its own
       // deliveries once it must be free for hub duty — capped on the

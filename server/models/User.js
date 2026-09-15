@@ -118,9 +118,21 @@ const userSchema = new mongoose.Schema({
   }],
   kpi: {
     score: { type: Number, default: 0 },
+    // avgLateTime / accuracyRate: pre-existing field names the UI reads
+    // (Drivers.js, DriverDetail.js) — now hold the current month's Average
+    // Delay (late deliveries only) and On-Time Delivery Rate, computed by
+    // services/driverKpiService.js.
     avgLateTime: { type: Number, default: 0 },
     accuracyRate: { type: Number, default: 0 },
-    complaintsCount: { type: Number, default: 0 }
+    complaintsCount: { type: Number, default: 0 },
+    // Month-to-date driver scorecard (see services/driverKpiService.js)
+    updateRate: { type: Number, default: 0 },
+    totalDeliveries: { type: Number, default: 0 },
+    onTimeDeliveries: { type: Number, default: 0 },
+    lateDeliveries: { type: Number, default: 0 },
+    updatedDeliveries: { type: Number, default: 0 },
+    period: { type: String, default: '' }, // 'YYYY-MM' the numbers above reflect
+    lastCalculatedAt: { type: Date, default: null }
   },
   dashboardLayout: {
     type: mongoose.Schema.Types.Mixed,

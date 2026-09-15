@@ -1,9 +1,12 @@
 import React from 'react';
 import { useParams } from 'react-router-dom';
-import MenuSelection from '../components/MenuSelection';
 import MenuSelectionLink from '../components/menuSelectionLink/MenuSelectionLink';
-import { isTestMenuToken } from '../components/menuSelectionLink/config';
 
+// The redesigned flow is now live for every weekly menu's customer link.
+// (It used to be gated to one test menu via config.js's token allowlist —
+// that allowlist/isTestMenuToken is no longer consulted here. The old
+// component, ../components/MenuSelection, is left in place, unreferenced,
+// in case of a rollback.)
 const MenuSelectPage = () => {
   const { token } = useParams();
 
@@ -20,13 +23,7 @@ const MenuSelectPage = () => {
     );
   }
 
-  // Only the configured test menu(s) get the redesigned flow; every other
-  // menu-selection link keeps the current UI.
-  if (isTestMenuToken(token)) {
-    return <MenuSelectionLink token={token} />;
-  }
-
-  return <MenuSelection token={token} />;
+  return <MenuSelectionLink token={token} />;
 };
 
 export default MenuSelectPage;

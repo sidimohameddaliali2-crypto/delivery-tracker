@@ -11,7 +11,7 @@ const toNum = (val) => {
 };
 
 // Great-circle distance in km — same formula as the server's geocoding.js.
-function haversineKm(lat1, lng1, lat2, lng2) {
+export function haversineKm(lat1, lng1, lat2, lng2) {
   const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLng = (lng2 - lng1) * Math.PI / 180;
@@ -19,7 +19,7 @@ function haversineKm(lat1, lng1, lat2, lng2) {
     + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
-const MAX_PLAUSIBLE_DISTANCE_KM = 300; // matches the server's plausibility check
+export const MAX_PLAUSIBLE_DISTANCE_KM = 300; // matches the server's plausibility check
 
 // Some stored addresses were geocoded (usually by the old OSM/Nominatim
 // fallback, before it was disabled) and mismatched to another country

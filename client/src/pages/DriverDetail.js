@@ -323,7 +323,7 @@ const DriverDetail = () => {
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-white border border-gray-200 rounded-lg p-4 flex flex-col justify-between">
               <div className="flex justify-between items-start mb-2">
-                <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Accuracy Rate</span>
+                <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">OTD Rate (This Month)</span>
                 {weeklyTrend?.accuracyDelta != null && (
                   <span className={`material-symbols-outlined text-[18px] ${weeklyTrend.accuracyDelta >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
                     {weeklyTrend.accuracyDelta >= 0 ? 'trending_up' : 'trending_down'}
@@ -337,7 +337,7 @@ const DriverDetail = () => {
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4 flex flex-col justify-between">
               <div className="flex justify-between items-start mb-2">
-                <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">KPI Score</span>
+                <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">KPI Score (This Month)</span>
                 <span className="material-symbols-outlined text-blue-600 text-[18px]">military_tech</span>
               </div>
               <div className="text-3xl font-bold text-gray-900">{currentDriver.kpi?.score || 0}<span className="text-base text-gray-400">/100</span></div>
@@ -347,7 +347,7 @@ const DriverDetail = () => {
             </div>
             <div className="bg-white border border-gray-200 rounded-lg p-4 flex flex-col justify-between">
               <div className="flex justify-between items-start mb-2">
-                <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Avg. Late</span>
+                <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Avg. Delay (This Month)</span>
                 <span className="material-symbols-outlined text-amber-500 text-[18px]">schedule</span>
               </div>
               <div className="text-3xl font-bold text-gray-900">{currentDriver.kpi?.avgLateTime || 0}<span className="text-base text-gray-400">m</span></div>

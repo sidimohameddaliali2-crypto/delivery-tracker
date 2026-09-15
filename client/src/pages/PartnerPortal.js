@@ -580,24 +580,30 @@ const PartnerPortal = () => {
           {members.map((m) => {
             const chips = groupExclusions(m.dietaryExclusions || '');
             return (
-              <div key={m._id} className="bg-[#051747] rounded-[18px] px-4 py-3.5 border-[1.5px] border-[#12275e]">
-                <div className="flex items-center gap-2.5">
-                  <div className="text-[14px] font-bold truncate">{m.name}</div>
-                  {!m.isActive && (
-                    <span className="rounded-full px-2 py-0.5 text-[10px] font-bold" style={{ background: 'rgba(255,59,0,.16)', color: '#ff8a66' }}>Inactive</span>
-                  )}
-                  <span className="ml-auto text-[11.5px] text-[#a8ccf5]">
-                    {m.createdAt ? new Date(m.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''}
-                  </span>
+              <div key={m._id} className="flex items-start gap-3 bg-[#051747] rounded-[18px] px-4 py-3.5 border-[1.5px] border-[#12275e]">
+                <div className="w-11 h-11 rounded-[14px] flex items-center justify-center flex-none text-[14px]"
+                  style={{ background: m.isActive ? '#bcf679' : '#12275e', color: m.isActive ? '#051747' : '#a8ccf5', ...AB }}>
+                  {initials(m.name)}
                 </div>
-                <div className="text-[12px] text-[#a8ccf5] mt-0.5 truncate">{m.email}</div>
-                {chips.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-2">
-                    {chips.map((c) => (
-                      <span key={c} className="bg-[rgba(188,246,121,.15)] text-[#bcf679] px-2 py-0.5 rounded-full text-[10px] font-bold">{c}</span>
-                    ))}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2.5">
+                    <div className="text-[14px] font-bold truncate">{m.name}</div>
+                    {!m.isActive && (
+                      <span className="rounded-full px-2 py-0.5 text-[10px] font-bold flex-none" style={{ background: 'rgba(255,59,0,.16)', color: '#ff8a66' }}>Inactive</span>
+                    )}
+                    <span className="ml-auto text-[11.5px] text-[#a8ccf5] flex-none">
+                      {m.createdAt ? new Date(m.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''}
+                    </span>
                   </div>
-                )}
+                  <div className="text-[12px] text-[#a8ccf5] mt-0.5 truncate">{m.email}</div>
+                  {chips.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {chips.map((c) => (
+                        <span key={c} className="bg-[rgba(188,246,121,.15)] text-[#bcf679] px-2 py-0.5 rounded-full text-[10px] font-bold">{c}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             );
           })}
@@ -816,8 +822,8 @@ const PartnerPortal = () => {
 
   // ════════════════════ MOBILE ════════════════════
   return (
-    <div className="min-h-screen bg-[#04102b] text-[#ede5de]" style={SANS}>
-      <div className="mx-auto w-full max-w-[430px] min-h-screen flex flex-col bg-[#050f2b] sm:border-x sm:border-[#12275e]">
+    <div className="h-screen overflow-hidden bg-[#04102b] text-[#ede5de]" style={SANS}>
+      <div className="mx-auto w-full max-w-[430px] h-screen flex flex-col bg-[#050f2b] sm:border-x sm:border-[#12275e]">
 
         {/* header */}
         <header className="flex-none bg-[#051747] px-[18px] pt-3 pb-3.5 border-b border-[#12275e] flex items-center gap-3">
@@ -836,7 +842,7 @@ const PartnerPortal = () => {
 
         {/* ORDER */}
         {tab === 'order' && (
-          <div className="flex-1 min-h-0 overflow-y-auto px-[18px] pt-4 pb-[130px]">
+          <div className="flex-1 min-h-0 overflow-y-auto px-[18px] pt-4 pb-[210px]">
             {renderCalendar({ cellH: 46, radius: 14 })}
             <div className="mt-3.5">{renderDeliverOn()}</div>
             {renderExistingBanner()}
@@ -894,13 +900,13 @@ const PartnerPortal = () => {
           </div>
         )}
 
-        {/* bottom tabs */}
-        <nav className="flex-none flex bg-[#051747] border-t border-[#12275e] px-3.5 pt-2.5 pb-5">
-          {['order', 'orders', 'profile'].map((id) => {
+        {/* bottom tabs — fixed to the viewport, never scrolls with content */}
+        <nav className="fixed left-0 right-0 bottom-0 z-30 mx-auto max-w-[430px] flex bg-[#051747] border-t border-[#12275e] px-3.5 pt-2.5 pb-5 sm:border-x sm:border-b-0">
+          {TABS.map((id) => {
             const on = tab === id;
             return (
               <button key={id} onClick={() => setTab(id)}
-                className="flex-1 flex flex-col items-center gap-1.5 py-1.5 text-[11px] font-bold"
+                className="flex-1 flex flex-col items-center gap-1 py-1.5 text-[10.5px] font-bold"
                 style={{ color: on ? '#bcf679' : '#a8ccf5' }}>
                 <span className="w-9 h-7 rounded-full flex items-center justify-center"
                   style={{ background: on ? 'rgba(188,246,121,.14)' : 'transparent' }}>

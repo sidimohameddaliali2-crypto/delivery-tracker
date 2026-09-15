@@ -30,6 +30,7 @@ import { Server } from 'socket.io';
 import { initializeSpaces } from './config/spaces.js';
 import { startFlaggedNotifier } from './jobs/flaggedCustomerNotifier.js';
 import { startMoveUncollectedCollectionsJob } from './jobs/moveUncollectedCollections.js';
+import { startRecalculateDriverKpisJob } from './jobs/recalculateDriverKpis.js';
 
 // Initialize Spaces after dotenv loads
 initializeSpaces();
@@ -179,7 +180,8 @@ import yellowblockRoutes from './routes/yellowblock.js';
 import externalDeliveryApiRoutes from './routes/externalDeliveryApi.js';
 
 // Import cache initialization
-import { initRedis } from './config/cache.js';
+import { initRedis, getRedisClient } from './config/cache.js';
+import { createAdapter } from '@socket.io/redis-adapter';
 import { setupMongooseSlowQueryMonitoring } from './middleware/slowQueryLogger.js';
 // Routes middleware
 app.use('/api/auth', authRoutes);
@@ -331,11 +333,37 @@ app.use('/api/*', (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-// Initialize Redis for caching
-initRedis().catch((error) => {
+// Initialize Redis for caching. Awaited (unlike the old fire-and-forget
+// call) so the Socket.io Redis adapter below can attach before the server
+// starts accepting connections — initRedis() has its own 5s connectTimeout
+// and try/catch, so this resolves within a bounded time either way, it
+// just delays startup slightly rather than risking a startup crash.
+await initRedis().catch((error) => {
   console.warn('⚠️  Redis initialization failed:', error.message);
   console.log('💡 Continuing without cache. Install Redis for production optimization.');
 });
+
+// Socket.io's default adapter only broadcasts within a single process. This
+// server deploys via PM2 in cluster mode (see ecosystem.config.cjs), so
+// without this, an io.emit() from a request handled by one instance never
+// reaches a client connected to the other — e.g. delivery:created/updated
+// would silently miss some dispatchers depending on which instance they
+// landed on. Reuses the same Redis connection/URL config.js already
+// established for caching — not a new Redis instance.
+const redisPubClient = getRedisClient();
+if (redisPubClient) {
+  try {
+    const redisSubClient = redisPubClient.duplicate();
+    await redisSubClient.connect();
+    io.adapter(createAdapter(redisPubClient, redisSubClient));
+    console.log('✅ Socket.io Redis adapter attached');
+  } catch (error) {
+    console.warn('⚠️  Failed to attach Socket.io Redis adapter:', error.message);
+    console.warn('   Falling back to the default in-memory adapter — broadcasts will not reach every PM2 instance.');
+  }
+} else {
+  console.warn('⚠️  Socket.io running without a Redis adapter (Redis unavailable) — cross-instance broadcasts will not reach every dispatcher in PM2 cluster mode.');
+}
 
 server.listen(PORT, () => {
   console.log(`
@@ -364,6 +392,7 @@ server.listen(PORT, () => {
 // Start background jobs
 startFlaggedNotifier();
 startMoveUncollectedCollectionsJob();
+startRecalculateDriverKpisJob();
 
 // Start background notifier if enabled (runs immediately and then at configured interval)
 if (process.env.ENABLE_FLAGGED_ALERTS === '1') {

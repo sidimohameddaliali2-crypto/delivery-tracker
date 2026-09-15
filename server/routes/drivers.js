@@ -38,18 +38,15 @@ router.get('/', protect, async (req, res) => {
         }
       ]),
       // $in on the two concrete types (not $ne: 'Task') so this can use the
-      // driver+type index below — $ne isn't sargable.
+      // driver+type index below — $ne isn't sargable. Only complaintsCount is
+      // pulled from this any more (score/avgLateTime/accuracyRate now come
+      // from the stored, month-to-date driver.kpi below) — it's an all-time
+      // reputation count, not part of the monthly scorecard.
       Delivery.aggregate([
         { $match: { driver: { $in: driverIds }, type: { $in: ['Delivery', 'Collection'] } } },
         {
           $group: {
             _id: '$driver',
-            totalCount: { $sum: 1 },
-            lateCount: { $sum: { $cond: [{ $gt: ['$lateMinutes', 0] }, 1, 0] } },
-            totalLateMinutes: { $sum: { $ifNull: ['$lateMinutes', 0] } },
-            successfulCount: {
-              $sum: { $cond: [{ $and: [{ $eq: ['$status', 'delivered'] }, { $ne: ['$complaint.hasComplaint', true] }] }, 1, 0] }
-            },
             complaintsCount: { $sum: { $cond: [{ $eq: ['$complaint.hasComplaint', true] }, 1, 0] } }
           }
         }
@@ -62,11 +59,7 @@ router.get('/', protect, async (req, res) => {
     const driversWithStats = drivers.map((driver) => {
       const driverKey = driver._id.toString();
       const today = todayByDriver.get(driverKey) || { deliveriesCount: 0, tasksCount: 0, performedCount: 0 };
-      const allTime = allTimeByDriver.get(driverKey) || { totalCount: 0, lateCount: 0, totalLateMinutes: 0, successfulCount: 0, complaintsCount: 0 };
-
-      const avgLateTime = allTime.totalCount > 0 ? Math.round(allTime.totalLateMinutes / allTime.totalCount) : 0;
-      const kpiScore = calculateKpiScoreFromCounts(allTime.totalCount, allTime.lateCount, allTime.totalLateMinutes);
-      const accuracyRate = allTime.totalCount > 0 ? Math.round((allTime.successfulCount / allTime.totalCount) * 100) : 100;
+      const allTime = allTimeByDriver.get(driverKey) || { complaintsCount: 0 };
 
       return {
         ...driver,
@@ -74,10 +67,12 @@ router.get('/', protect, async (req, res) => {
         deliveriesCount: today.deliveriesCount,
         tasksCount: today.tasksCount,
         performedCount: today.performedCount,
+        // score/avgLateTime/accuracyRate/updateRate are the month-to-date
+        // scorecard maintained by services/driverKpiService.js — read as
+        // stored instead of recomputing a separate all-time figure here, so
+        // the driver list card matches the driver detail page exactly.
         kpi: {
-          score: kpiScore,
-          avgLateTime,
-          accuracyRate,
+          ...(driver.kpi || {}),
           complaintsCount: allTime.complaintsCount
         }
       };
@@ -216,9 +211,6 @@ router.get('/:id', protect, async (req, res) => {
       .sort({ scheduledTime: -1 })
       .limit(30);
 
-    const allDeliveries = await Delivery.find({ driver: driver._id });
-    const lateDeliveries = allDeliveries.filter(d => d.lateMinutes > 0);
-
     const driverWithStats = {
       ...driver.toObject(),
       todayDeliveries: todayDeliveries.map(d => ({
@@ -236,12 +228,13 @@ router.get('/:id', protect, async (req, res) => {
         lateMinutes: d.lateMinutes || 0,
         proof: d.proof?.images || []
       })),
+      // score/avgLateTime/accuracyRate/updateRate are the month-to-date
+      // scorecard maintained by services/driverKpiService.js — read as
+      // stored instead of recomputing a separate all-time figure here, so
+      // this matches the driver list card exactly. complaintsCount stays an
+      // all-time reputation count, computed fresh.
       kpi: {
-        score: calculateKpiScore(driver, allDeliveries, lateDeliveries),
-        avgLateTime: allDeliveries.length > 0 
-          ? Math.round(allDeliveries.reduce((sum, d) => sum + d.lateMinutes, 0) / allDeliveries.length)
-          : 0,
-        accuracyRate: calculateAccuracyRate(allDeliveries),
+        ...(driver.kpi?.toObject ? driver.kpi.toObject() : driver.kpi || {}),
         complaintsCount: await getComplaintsCount(driver._id)
       }
     };
@@ -589,41 +582,10 @@ router.post('/returns',  async (req, res) => {
 });
 // Helper functions
 
-// Same formula as calculateKpiScore below, but for callers that already
-// have driver-level counts (e.g. from a $group aggregation) instead of the
-// raw per-delivery document arrays — avoids re-deriving totalCount/
-// lateCount/avgLateTime from arrays just to throw the arrays away again.
-function calculateKpiScoreFromCounts(totalCount, lateCount, totalLateMinutes) {
-  if (totalCount === 0) return 100;
-  const avgLateTime = totalLateMinutes / totalCount;
-  let score = 100;
-  score -= lateCount * 2; // -2 points per late delivery
-  score -= Math.max(0, avgLateTime - 5) * 0.5; // -0.5 points per minute over 5min average late
-  return Math.max(0, Math.round(score));
-}
-
-function calculateKpiScore(driver, allDeliveries, lateDeliveries) {
-  if (allDeliveries.length === 0) return 100;
-
-  const onTimeRate = (allDeliveries.length - lateDeliveries.length) / allDeliveries.length;
-  const avgLateTime = allDeliveries.reduce((sum, d) => sum + d.lateMinutes, 0) / allDeliveries.length;
-  
-  let score = 100;
-  score -= lateDeliveries.length * 2; // -2 points per late delivery
-  score -= Math.max(0, avgLateTime - 5) * 0.5; // -0.5 points per minute over 5min average late
-  
-  return Math.max(0, Math.round(score));
-}
-
-function calculateAccuracyRate(allDeliveries) {
-  if (allDeliveries.length === 0) return 100;
-  
-  const successfulDeliveries = allDeliveries.filter(d => 
-    d.status === 'delivered' && !d.complaint?.hasComplaint
-  );
-  
-  return Math.round((successfulDeliveries.length / allDeliveries.length) * 100);
-}
+// score/avgLateTime/accuracyRate/updateRate now come from the month-to-date
+// scorecard in services/driverKpiService.js (stored on driver.kpi) — see
+// that file for the formula. Only complaintsCount (an all-time reputation
+// count, not part of the monthly scorecard) is still computed here.
 
 async function getComplaintsCount(driverId) {
   return await Delivery.countDocuments({

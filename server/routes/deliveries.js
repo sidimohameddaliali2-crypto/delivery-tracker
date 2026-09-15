@@ -11,10 +11,11 @@ import { protect, authorize, admin } from '../middleware/auth.js'; // Fixed impo
 import { upload, handleUploadError } from '../middleware/upload.js';
 import { getUploadToSpaces } from '../config/spaces.js';
 import { detectAreaFromAddress } from '../config/areas.js';
-import { resolveDeliveryCoordinatesCached, isPlausibleCoordinate } from '../services/geocoding.js';
+import { resolveDeliveryCoordinatesCached, isPlausibleCoordinate, geocodeAddress } from '../services/geocoding.js';
 import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js';
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { syncDeliveryToSheet, syncDeliveriesToSheet } from '../services/googleSheetSync.js';
+import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import {
   optimizeRoutes,
   applyRoutePlan,
@@ -451,6 +452,31 @@ router.post('/resolve-coords', authorize(['admin', 'super_admin', 'dispatcher', 
   }
 });
 
+// @desc    One-off Google geocode of a single address, for the "Google
+//          Geocoding" button — mirrors the client's own direct 2GIS geocoder
+//          call (same shape: given an address, return a point or null), but
+//          Google's key is server-only so this has to be a real round trip.
+//          Read-only itself — the CLIENT persists a hit via the existing
+//          manual-coords endpoint, same as it already does for a 2GIS hit,
+//          so both providers save through one code path.
+// @route   POST /api/deliveries/geocode-google   { address }
+router.post('/geocode-google', authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  const { address } = req.body || {};
+  if (!address || typeof address !== 'string' || !address.trim()) {
+    return res.status(400).json({ success: false, message: 'address is required' });
+  }
+  try {
+    const coords = await geocodeAddress(address);
+    if (!coords || !isPlausibleCoordinate(coords.lat, coords.lng)) {
+      return res.json({ success: true, data: null });
+    }
+    res.json({ success: true, data: { lat: coords.lat, lng: coords.lng } });
+  } catch (error) {
+    console.error('Google geocode error:', error.message);
+    res.status(500).json({ success: false, message: 'Google geocoding failed' });
+  }
+});
+
 // @desc    Estimate a real (road-time) arrival at each stop of an already-ordered
 //          route, and whether that lands early / on time / late against each
 //          stop's delivery window. Read-only — used by map views, not the optimizer.
@@ -824,7 +850,8 @@ router.get('/', async (req, res) => {
       .sort({ scheduledTime: 1 })
       .lean();
 
-    const enhancedDeliveries = deliveries.map(delivery => enrichDeliveryTiming(delivery));
+    const timedDeliveries = deliveries.map(delivery => enrichDeliveryTiming(delivery));
+    const enhancedDeliveries = await applyWeekendCombining(timedDeliveries);
 
     const total = await Delivery.countDocuments(query);
 
@@ -1082,6 +1109,154 @@ function enrichDeliveryTiming(delivery) {
   };
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function isBusinessSaturday(scheduledTime) {
+  const local = new Date(new Date(scheduledTime).getTime() + LOCAL_TZ_OFFSET_MS);
+  return local.getUTCDay() === 6;
+}
+
+function isBusinessSunday(scheduledTime) {
+  const local = new Date(new Date(scheduledTime).getTime() + LOCAL_TZ_OFFSET_MS);
+  return local.getUTCDay() === 0;
+}
+
+// Weekend combining (owner, 2026-09-14, refined same day: "no delivery
+// should be seen on Sunday, all should be seen on Saturday, and this should
+// go through the API"): when a customer has a delivery on both Saturday and
+// the immediately-following Sunday, the two are combined into one physical
+// drop — the Saturday delivery is annotated with `combinedSunday`, and the
+// Sunday delivery is REMOVED from list results entirely (list endpoints
+// only — a direct fetch by id still returns the real document, annotated
+// with `combinedIntoSaturday` instead, so it's never truly invisible, just
+// absent from the day-to-day lists where a driver/dispatcher would
+// otherwise think it still needs a separate trip).
+async function applyWeekendCombining(deliveries) {
+  const saturdayIds = new Set();
+  const saturdayDeliveries = [];
+  const sundayIds = new Set();
+  const sundayDeliveries = [];
+  for (const d of deliveries) {
+    if (!d.scheduledTime || d.type === 'Task') continue;
+    if (isBusinessSaturday(d.scheduledTime)) {
+      saturdayIds.add(String(d._id));
+      saturdayDeliveries.push(d);
+    } else if (isBusinessSunday(d.scheduledTime)) {
+      sundayIds.add(String(d._id));
+      sundayDeliveries.push(d);
+    }
+  }
+  if (saturdayDeliveries.length === 0 && sundayDeliveries.length === 0) return deliveries;
+
+  // --- Saturday -> does the same customer have a Sunday delivery? ---
+  // Grouped by the Sunday window immediately following each Saturday
+  // delivery, so one query covers every customer sharing that window.
+  const sundayWindows = new Map();
+  for (const delivery of saturdayDeliveries) {
+    const { startOfDay } = getBusinessDayBounds(delivery.scheduledTime);
+    const sundayStart = new Date(startOfDay.getTime() + DAY_MS);
+    const key = sundayStart.getTime();
+    if (!sundayWindows.has(key)) sundayWindows.set(key, { sundayStart, customerIds: new Set() });
+    sundayWindows.get(key).customerIds.add(delivery.customerId);
+  }
+  // customerId + Sunday-window key -> that Sunday's delivery, so a customer
+  // appearing under two different Saturdays (a wide date range) can't
+  // cross-match to the wrong week.
+  const sundayByKey = new Map();
+  for (const { sundayStart, customerIds } of sundayWindows.values()) {
+    const sundayEndExclusive = new Date(sundayStart.getTime() + DAY_MS);
+    const found = await Delivery.find({
+      customerId: { $in: [...customerIds] },
+      type: 'Delivery',
+      scheduledTime: { $gte: sundayStart, $lt: sundayEndExclusive }
+    }).select('customerId scheduledTime').lean();
+    for (const sd of found) sundayByKey.set(`${sd.customerId}|${sundayStart.getTime()}`, sd);
+  }
+
+  // --- Sunday -> does the same customer have a Saturday delivery? ---
+  // A separate reverse lookup, since a Sunday-only query (e.g. the
+  // dispatcher table filtered to just that day) wouldn't have the Saturday
+  // sibling in the current result set to cross-reference against.
+  const saturdayWindows = new Map();
+  for (const delivery of sundayDeliveries) {
+    const { startOfDay } = getBusinessDayBounds(delivery.scheduledTime);
+    const saturdayStart = new Date(startOfDay.getTime() - DAY_MS);
+    const key = saturdayStart.getTime();
+    if (!saturdayWindows.has(key)) saturdayWindows.set(key, { saturdayStart, customerIds: new Set() });
+    saturdayWindows.get(key).customerIds.add(delivery.customerId);
+  }
+  const saturdaySiblingByKey = new Map();
+  for (const { saturdayStart, customerIds } of saturdayWindows.values()) {
+    const saturdayEndExclusive = new Date(saturdayStart.getTime() + DAY_MS);
+    const found = await Delivery.find({
+      customerId: { $in: [...customerIds] },
+      type: 'Delivery',
+      scheduledTime: { $gte: saturdayStart, $lt: saturdayEndExclusive }
+    }).select('customerId scheduledTime').lean();
+    for (const sat of found) saturdaySiblingByKey.set(`${sat.customerId}|${saturdayStart.getTime()}`, sat);
+  }
+
+  const excludedSundayIds = new Set();
+  for (const delivery of sundayDeliveries) {
+    const { startOfDay } = getBusinessDayBounds(delivery.scheduledTime);
+    const saturdayStart = new Date(startOfDay.getTime() - DAY_MS);
+    if (saturdaySiblingByKey.has(`${delivery.customerId}|${saturdayStart.getTime()}`)) {
+      excludedSundayIds.add(String(delivery._id));
+    }
+  }
+
+  return deliveries
+    .filter((d) => !excludedSundayIds.has(String(d._id)))
+    .map((delivery) => {
+      if (!saturdayIds.has(String(delivery._id))) return delivery;
+      const { startOfDay } = getBusinessDayBounds(delivery.scheduledTime);
+      const sundayStart = new Date(startOfDay.getTime() + DAY_MS);
+      const match = sundayByKey.get(`${delivery.customerId}|${sundayStart.getTime()}`);
+      if (!match) return delivery;
+      return {
+        ...delivery,
+        combinedSunday: {
+          deliveryId: String(match._id),
+          scheduledTime: match.scheduledTime
+        }
+      };
+    });
+}
+
+// Single-record version for GET /:id — never removes the record (a direct
+// fetch by id must always return something), just annotates whichever side
+// applies: `combinedSunday` on a Saturday delivery, or `combinedIntoSaturday`
+// on a Sunday delivery that a list view would have hidden.
+async function annotateWeekendCombo(delivery) {
+  if (!delivery?.scheduledTime || delivery.type === 'Task') return delivery;
+  if (isBusinessSaturday(delivery.scheduledTime)) {
+    const { startOfDay } = getBusinessDayBounds(delivery.scheduledTime);
+    const sundayStart = new Date(startOfDay.getTime() + DAY_MS);
+    const sundayEndExclusive = new Date(sundayStart.getTime() + DAY_MS);
+    const match = await Delivery.findOne({
+      customerId: delivery.customerId,
+      type: 'Delivery',
+      scheduledTime: { $gte: sundayStart, $lt: sundayEndExclusive }
+    }).select('scheduledTime').lean();
+    if (match) {
+      return { ...delivery, combinedSunday: { deliveryId: String(match._id), scheduledTime: match.scheduledTime } };
+    }
+  } else if (isBusinessSunday(delivery.scheduledTime)) {
+    const { startOfDay } = getBusinessDayBounds(delivery.scheduledTime);
+    const saturdayStart = new Date(startOfDay.getTime() - DAY_MS);
+    const saturdayEndExclusive = new Date(saturdayStart.getTime() + DAY_MS);
+    const match = await Delivery.findOne({
+      customerId: delivery.customerId,
+      type: 'Delivery',
+      scheduledTime: { $gte: saturdayStart, $lt: saturdayEndExclusive }
+    }).select('scheduledTime').lean();
+    if (match) {
+      return { ...delivery, combinedIntoSaturday: { deliveryId: String(match._id), scheduledTime: match.scheduledTime } };
+    }
+  }
+  return delivery;
+}
+
 // Monthly delivery count grouped by customerId
 // GET /api/deliveries/monthly-count?dateFrom=2026-05-01&dateTo=2026-05-31
 router.get('/monthly-count', async (req, res) => {
@@ -1290,7 +1465,8 @@ router.get('/:id', async (req, res) => {
     }
 
     const deliveryObject = delivery.toObject ? delivery.toObject({ virtuals: true }) : delivery;
-    const enrichedDelivery = enrichDeliveryTiming(deliveryObject);
+    const timedDelivery = enrichDeliveryTiming(deliveryObject);
+    const enrichedDelivery = await annotateWeekendCombo(timedDelivery);
 
     // Fetch bags that are either assigned to this delivery or to this customer
     const bags = await Bag.find({
@@ -1645,7 +1821,12 @@ router.post('/optimize-routes', [
   // Simulation-only — previews "what if bikes carried more/fewer per trip"
   // without touching any driver's real profile.stopCapacity.
   body('bikeTripCapacity').optional({ nullable: true }).isInt({ min: 1, max: 200 })
-    .withMessage('bikeTripCapacity must be 1-200')
+    .withMessage('bikeTripCapacity must be 1-200'),
+  // Simulation-only — caps how early a FLOATING departure may go, replacing
+  // the real earliest-departure floor for this plan; ignored when
+  // fixedDepartureSeconds is also set.
+  body('maxEarlyDepartureSeconds').optional({ nullable: true }).isInt({ min: 0 })
+    .withMessage('maxEarlyDepartureSeconds must be a non-negative number of seconds')
 ], authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1653,11 +1834,12 @@ router.post('/optimize-routes', [
       return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
     }
 
-    const { deliveryIds, driverIds, fixedDepartureSeconds, hubVans, bikeTripCapacity } = req.body;
+    const { deliveryIds, driverIds, fixedDepartureSeconds, hubVans, bikeTripCapacity, maxEarlyDepartureSeconds } = req.body;
     const plan = await optimizeRoutes(deliveryIds, driverIds, {
       fixedDepartureSeconds: fixedDepartureSeconds ?? null,
       hubVans: hubVans || [],
-      bikeTripCapacity: bikeTripCapacity ?? null
+      bikeTripCapacity: bikeTripCapacity ?? null,
+      maxEarlyDepartureSeconds: maxEarlyDepartureSeconds ?? null
     });
     res.json({ success: true, data: plan });
   } catch (error) {
@@ -2304,16 +2486,13 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
       }
     }
 
-    // Update driver status and KPI
+    // Update driver status; KPI counts are recomputed from scratch below
+    // (month-to-date, not incremented) since they reset every calendar month.
     await User.findByIdAndUpdate(req.user._id, {
-      'profile.status': 'available',
-      $inc: {
-        'kpi.totalDeliveries': 1,
-        'kpi.onTimeDeliveries': delivery.lateMinutes === 0 ? 1 : 0
-      }
+      'profile.status': 'available'
     });
 
-    // Recalculate KPI scores
+    // Recalculate this month's KPI scorecard
     await recalculateDriverKPI(req.user._id);
 
     // Emit real-time updates
@@ -2472,9 +2651,10 @@ router.post('/return-bag', async (req, res) => {
 // @access  Private/Driver
 router.get('/driver/today', protect, async (req, res) => {
   try {
-    const deliveries = await Delivery.getDriverTodaysDeliveries(req.user._id)
+    const rawDeliveries = await Delivery.getDriverTodaysDeliveries(req.user._id)
       .populate('driver', 'profile.firstName profile.lastName profile.colorCode email')
       .lean();
+    const deliveries = await applyWeekendCombining(rawDeliveries);
 
     // Van↔bike handoffs this driver is part of, for the same day window the
     // deliveries above use (today, plus tomorrow once the early-next-day
@@ -2606,36 +2786,6 @@ router.patch('/:id/bag-assignment', async (req, res) => {
   }
 });
 
-// Helper function to recalculate driver KPI
-async function recalculateDriverKPI(driverId) {
-  try {
-    const driver = await User.findById(driverId);
-    const deliveries = await Delivery.find({ 
-      driver: driverId, 
-      status: 'delivered' 
-    });
-
-    const totalDeliveries = deliveries.length;
-    const onTimeDeliveries = deliveries.filter(d => d.lateMinutes === 0).length;
-    const totalLateTime = deliveries.reduce((sum, d) => sum + d.lateMinutes, 0);
-    const accuracyRate = totalDeliveries > 0 ? (onTimeDeliveries / totalDeliveries) * 100 : 0;
-    const avgLateTime = totalDeliveries > 0 ? totalLateTime / totalDeliveries : 0;
-
-    // Simple KPI score calculation (you can customize this)
-    const kpiScore = Math.max(0, 100 - (avgLateTime * 2) - ((1 - (accuracyRate / 100)) * 50));
-
-    await User.findByIdAndUpdate(driverId, {
-      'kpi.score': Math.round(kpiScore),
-      'kpi.accuracyRate': Math.round(accuracyRate),
-      'kpi.avgLateTime': Math.round(avgLateTime * 10) / 10,
-      'kpi.totalDeliveries': totalDeliveries,
-      'kpi.onTimeDeliveries': onTimeDeliveries
-    });
-  } catch (error) {
-    console.error('Recalculate KPI error:', error);
-  }
-}
-
 // Update delivery status (for driver)
 // Update delivery status (for driver)
 // Update delivery status (for driver)
@@ -2746,9 +2896,17 @@ router.patch('/:id/status', async (req, res) => {
     });
 
     await delivery.save();
-    
+
     // Populate driver information before returning
     await delivery.populate('driver');
+
+    // Recalculate this month's KPI scorecard whenever this endpoint reaches
+    // a terminal outcome (the mobile driver app's status-update path).
+    if (['delivered', 'completed', 'failed'].includes(status) && deliveryDriverId) {
+      recalculateDriverKPI(deliveryDriverId).catch((err) => {
+        console.warn('KPI recalculate failed (caught):', err?.message || err);
+      });
+    }
 
     // Push the status change (and, when delivered, timing + proof) onto the
     // delivery's Google Sheet row

@@ -4280,6 +4280,14 @@ const DriverMobile = () => {
                 </div>
               </div>
 
+              {currentDelivery.combinedSunday && (
+                <div className="bg-indigo-50 border-2 border-indigo-300 rounded-lg p-3">
+                  <p className="text-sm text-indigo-900 font-bold">
+                    📦 Sunday's delivery is included — bring 2 days' worth for this customer.
+                  </p>
+                </div>
+              )}
+
               {currentDelivery.notes && (
                 <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
                   <p className="text-sm text-yellow-800">
@@ -5083,6 +5091,12 @@ const DriverMobile = () => {
                         {delivery.address}
                       </p>
 
+                      {delivery.combinedSunday && (
+                        <div className="bg-indigo-50 border border-indigo-300 rounded-lg p-2 mb-3">
+                          <p className="text-xs text-indigo-900 font-semibold">📦 Sunday's delivery included — bring 2 days' worth.</p>
+                        </div>
+                      )}
+
                       {delivery.notes && (
                         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-2 mb-3">
                           <p className="text-xs text-yellow-800">{delivery.notes}</p>
@@ -5190,6 +5204,12 @@ const DriverMobile = () => {
                           <MapPin className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0 text-yellow-700" />
                           {delivery.address}
                         </p>
+                      )}
+
+                      {delivery.combinedSunday && (
+                        <div className="bg-indigo-50 border border-indigo-300 rounded-lg p-2 mb-3">
+                          <p className="text-xs text-indigo-900 font-semibold">📦 Sunday's delivery included — bring 2 days' worth.</p>
+                        </div>
                       )}
 
                       {delivery.notes && (

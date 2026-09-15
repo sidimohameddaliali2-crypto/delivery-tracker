@@ -97,19 +97,28 @@ const Drivers = () => {
 
   const [search, setSearch] = useState('');
 
+  // "Active" here means the badge shown on the card: enabled AND currently
+  // available (not busy/offline) — not just "not disabled".
+  const isActiveDriver = (d) => d?.isActive !== false && d?.profile?.status === 'available';
+
   const activeDriverCount = useMemo(
-    () => driversArray.filter((d) => d?.isActive !== false).length,
+    () => driversArray.filter(isActiveDriver).length,
     [driversArray]
   );
 
   const filteredDrivers = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return driversArray;
-    return driversArray.filter((d) => {
-      const name = `${d?.profile?.firstName || ''} ${d?.profile?.lastName || ''}`.toLowerCase();
-      const phone = (d?.profile?.phone || '').toLowerCase();
-      return name.includes(q) || phone.includes(q);
-    });
+    const base = !q
+      ? driversArray
+      : driversArray.filter((d) => {
+          const name = `${d?.profile?.firstName || ''} ${d?.profile?.lastName || ''}`.toLowerCase();
+          const phone = (d?.profile?.phone || '').toLowerCase();
+          return name.includes(q) || phone.includes(q);
+        });
+
+    // Active drivers first, everyone else (busy/offline/disabled) after.
+    // Array.prototype.sort is stable, so each group keeps its original order.
+    return [...base].sort((a, b) => Number(isActiveDriver(b)) - Number(isActiveDriver(a)));
   }, [driversArray, search]);
 
   const handleToggleStatus = useCallback((driverId, currentStatus) => {

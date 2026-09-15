@@ -12,7 +12,9 @@ const Complaints = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [complaintTypeFilter, setComplaintTypeFilter] = useState('all');
   const [resolvedFilter, setResolvedFilter] = useState('all');
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
+  // Empty = "All Dates" (every complaint, not just today's) — the default,
+  // since that's the view people actually land on this page looking for.
+  const [selectedDate, setSelectedDate] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [sortBy, setSortBy] = useState('reportedAt');
@@ -546,9 +548,24 @@ const Complaints = () => {
                   setSelectedDate(e.target.value);
                   setCurrentPage(1);
                 }}
+                title={selectedDate ? `Showing ${selectedDate}` : 'Showing all dates'}
                 className="pl-8 pr-3 py-1.5 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
             </div>
+
+            {selectedDate ? (
+              <button
+                onClick={() => { setSelectedDate(''); setCurrentPage(1); }}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-100 rounded-lg border border-gray-200 text-xs font-medium text-gray-600 hover:bg-gray-200 transition-colors"
+              >
+                <span className="material-symbols-outlined text-[14px]">close</span>
+                All Dates
+              </button>
+            ) : (
+              <span className="flex items-center gap-1.5 px-2.5 py-1.5 bg-blue-50 rounded-lg border border-blue-200 text-xs font-medium text-blue-700">
+                Showing all dates
+              </span>
+            )}
 
             <div className="relative">
               <span className="material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 text-[18px] pointer-events-none">category</span>

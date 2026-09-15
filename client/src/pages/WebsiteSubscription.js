@@ -755,6 +755,17 @@ function CustomerProfilePanel({ subscriptionId }) {
                           {[addr.building, addr.unit ? `Unit ${addr.unit}` : null, addr.floor, addr.area, addr.emirate].filter(Boolean).join(', ') || '—'}
                         </p>
                         {addr.area && <p className="text-xs text-gray-500 mt-1">Zone · {addr.area}</p>}
+                        {typeof addr.coordinates?.lat === 'number' && typeof addr.coordinates?.lng === 'number' && (
+                          <a
+                            href={`https://www.google.com/maps?q=${addr.coordinates.lat},${addr.coordinates.lng}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 hover:underline mt-1 w-fit"
+                          >
+                            <span className="material-symbols-outlined text-[14px]">location_on</span>
+                            {addr.coordinates.lat.toFixed(6)}, {addr.coordinates.lng.toFixed(6)}
+                          </a>
+                        )}
                         {profile.delivery_window && (
                           <p className="flex items-center gap-1 text-xs text-gray-500 mt-1">
                             <span className="material-symbols-outlined text-[14px]">schedule</span>

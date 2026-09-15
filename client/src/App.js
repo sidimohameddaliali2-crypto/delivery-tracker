@@ -550,8 +550,7 @@ function App() {
             } />
 
             {/* Standalone design preview (demo data only). The real redesigned
-                flow is served from /menu-select/:token itself, and only for the
-                configured test menu — see components/menuSelectionLink/config.js. */}
+                flow is served from /menu-select/:token itself, for every menu. */}
             <Route path="/menu-select-v2" element={
               <MenuSelectionLinkPage />
             } />

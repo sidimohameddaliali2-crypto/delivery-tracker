@@ -195,11 +195,31 @@ const MenuSelectionLink = ({ token }) => {
   const [day, setDay] = useState(0);
   const [qty, setQty] = useState({});
   const [skipped, setSkipped] = useState({});
+  // Snapshot of `skipped` taken at the moment of a successful submit. Once a
+  // day has been submitted as skipped, "Change my selections" can no longer
+  // un-skip (or re-skip) it — a skip actually pauses that delivery on the
+  // backend once submitted, so undoing it here would silently desync from
+  // that. Days that had real meal selections stay fully editable.
+  const [lockedSkipDays, setLockedSkipDays] = useState({});
   const [acknowledged, setAcknowledged] = useState({});
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const toastTimer = useRef(null);
+  const phoneRef = useRef(null); // the scrollable container (see msl-phone below)
+
+  // "Save and go to next day" (and picking a day tab directly) should always
+  // land at the top of that day's meals, not wherever the page happened to be
+  // scrolled to from the day before. In `preview` mode the phone frame itself
+  // scrolls (overflowY: auto on msl-phone); otherwise the real page/window
+  // does.
+  useEffect(() => {
+    if (preview) {
+      phoneRef.current?.scrollTo?.({ top: 0 });
+    } else if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0 });
+    }
+  }, [day, preview]);
 
   /* -- load the real menu by share token -- */
   useEffect(() => {
@@ -383,12 +403,12 @@ const MenuSelectionLink = ({ token }) => {
         title: `Contains ${items.join(' and ')}`,
         body:
           "This meal can't be selected because it contains an allergen on your profile. If you believe your allergen list is out of date, message the kitchen team and they'll update it for you.",
-        items: items.map((x) => ({ label: x, bg: 'var(--color-accent-200)', fg: 'var(--color-accent-800)' })),
+        items: items.map((x) => ({ label: x, bg: '#FEE2E2', fg: '#991B1B' })),
         actions: [
           { label: 'Close', kind: 'secondary', onClick: () => setModal(null) },
           {
             label: 'Message customer service',
-            kind: 'primary',
+            kind: 'danger',
             onClick: () => {
               setModal(null);
               flash('Request sent to customer service');
@@ -437,6 +457,7 @@ const MenuSelectionLink = ({ token }) => {
   /* -- submit -- */
   const doSubmit = useCallback(async () => {
     if (preview) {
+      setLockedSkipDays(skipped);
       setStep('done');
       return;
     }
@@ -461,6 +482,7 @@ const MenuSelectionLink = ({ token }) => {
         skippedDates,
       });
       if (res.data?.success) {
+        setLockedSkipDays(skipped);
         setStep('done');
       } else {
         flash(res.data?.message || 'Could not save your selections.');
@@ -473,12 +495,25 @@ const MenuSelectionLink = ({ token }) => {
   }, [account, dayKeys, flash, model, preview, qty, rawMenu, skipped]);
 
   const onSubmitButton = useCallback(() => {
+    // A day is either skipped entirely, or filled to exactly the customer's
+    // meals-per-day count — no partial days (e.g. 1 of 3) get through to the
+    // next day or the final submit.
+    const isSkipped = !!skipped[day];
+    const chosen = dayCount(day);
+    if (!isSkipped && chosen < target) {
+      flash(
+        chosen === 0
+          ? `Please select ${target} meal${target === 1 ? '' : 's'} for this day, or skip it.`
+          : `You've picked ${chosen} of ${target} meal${target === 1 ? '' : 's'} — select all ${target}, or skip this day instead.`
+      );
+      return;
+    }
     if (day < lastDay) {
       setDay((d) => d + 1);
       return;
     }
     doSubmit();
-  }, [day, doSubmit, lastDay]);
+  }, [day, dayCount, doSubmit, flash, lastDay, skipped, target]);
 
   const resetAll = useCallback(() => {
     setStep('signin');
@@ -487,6 +522,7 @@ const MenuSelectionLink = ({ token }) => {
     setEmailError('');
     setQty({});
     setSkipped({});
+    setLockedSkipDays({});
     setAcknowledged({});
     setModal(null);
     setDay(0);
@@ -495,6 +531,9 @@ const MenuSelectionLink = ({ token }) => {
   /* ------------------------------------------------------- derived render */
 
   const skippedToday = !!skipped[day];
+  // Locked once this day was submitted as skipped (see doSubmit) — "Change
+  // my selections" can revisit it, but the skip itself can't be undone.
+  const skipLockedToday = !!lockedSkipDays[day];
   const dayHeading = dayKeys[day] ? fmtDayLong(dayKeys[day]) : `Day ${day + 1}`;
   const selectedToday = dayCount(day);
   const dayFull = !skippedToday && selectedToday >= target;
@@ -516,10 +555,10 @@ const MenuSelectionLink = ({ token }) => {
             .map((x) => ({
               label: x,
               bg: account.allergensLc.includes(String(x).toLowerCase())
-                ? 'var(--color-accent-300)'
+                ? '#FEE2E2'
                 : 'var(--color-neutral-200)',
               fg: account.allergensLc.includes(String(x).toLowerCase())
-                ? 'var(--color-accent-900)'
+                ? '#991B1B'
                 : 'var(--color-neutral-700)',
             }))
             .concat(
@@ -536,10 +575,13 @@ const MenuSelectionLink = ({ token }) => {
             carbText: m.carbText,
             vegText: m.vegText,
             typeLabel: c.label,
-            bagBg: blocked ? 'var(--color-neutral-200)' : bag.bg,
-            bagFg: blocked ? 'var(--color-neutral-700)' : bag.fg,
-            cardBorder: q ? 'var(--color-accent)' : 'var(--color-neutral-300)',
-            cardOpacity: blocked ? 0.72 : 1,
+            bagBg: blocked ? '#FEE2E2' : bag.bg,
+            bagFg: blocked ? '#991B1B' : bag.fg,
+            cardBorder: blocked ? '#DC2626' : q ? 'var(--color-accent)' : 'var(--color-neutral-300)',
+            // Blocked cards stay at full opacity — the red styling itself is
+            // the "don't pick this" signal, so nothing about it (including
+            // the Ask customer service button) should be faded/harder to see.
+            cardOpacity: 1,
             statusLabel: blocked
               ? 'Blocked · allergen'
               : warned
@@ -548,12 +590,12 @@ const MenuSelectionLink = ({ token }) => {
               ? `${q} selected`
               : '',
             statusBg: blocked
-              ? 'var(--color-accent-200)'
+              ? '#DC2626'
               : warned
               ? 'var(--color-neutral-200)'
               : 'var(--color-accent-700)',
             statusFg: blocked
-              ? 'var(--color-accent-900)'
+              ? '#ffffff'
               : warned
               ? 'var(--color-neutral-800)'
               : '#ffffff',
@@ -583,18 +625,39 @@ const MenuSelectionLink = ({ token }) => {
         const on = i === day;
         const isSkip = !!skipped[i];
         const n = dayCount(i);
+        const isComplete = !isSkip && target > 0 && n >= target;
+
+        // Status color always shows — skipped days are amber, fully-picked
+        // days (exactly their meal count) are green — regardless of whether
+        // it's the day currently being viewed. The currently-viewed day gets
+        // a ring on top of that (see `current` below) instead of losing its
+        // status color to a solid highlight fill.
+        let bg = 'transparent';
+        let fg = 'var(--color-text)';
+        let border = 'var(--color-neutral-300)';
+        if (isSkip) {
+          bg = '#FEF3C7';
+          fg = '#92400E';
+          border = '#F2C14E';
+        } else if (isComplete) {
+          bg = 'var(--color-accent-2-200)';
+          fg = 'var(--color-accent-2-900)';
+          border = 'var(--color-accent-2-700)';
+        }
+
         return {
           key: k,
           dow: DAYS[d.getDay()] || '',
           num: d.getDate() || i + 1,
           badge: isSkip ? 'skip' : n ? `${n} sel` : '–',
-          bg: on ? 'var(--color-accent-700)' : 'transparent',
-          fg: on ? '#ffffff' : 'var(--color-text)',
-          border: on ? 'var(--color-accent-700)' : 'var(--color-neutral-300)',
+          bg,
+          fg,
+          border,
+          current: on,
           onClick: () => setDay(i),
         };
       }),
-    [day, dayCount, dayKeys, skipped]
+    [day, dayCount, dayKeys, skipped, target]
   );
 
   const summary = useMemo(
@@ -634,8 +697,13 @@ const MenuSelectionLink = ({ token }) => {
       }
     : null;
 
-  const menuName = model?.menuName || DEMO_MENU_NAME;
-  const menuRange = model?.menuRange || DEMO_MENU_RANGE;
+  // Before sign-in `model` is still null on a real link (it's only built from
+  // the customer's profile after they submit their email) — but the menu
+  // itself (`rawMenu`) is already loaded via the share token, so the sign-in
+  // screen can and should show its real title instead of the demo
+  // placeholder. The demo value is the true fallback only in `preview` mode,
+  // where there's no real menu at all.
+  const menuName = model?.menuName || rawMenu?.title || (preview ? DEMO_MENU_NAME : 'This week’s menu');
 
   /* --------------------------------------------------------------- markup */
 
@@ -672,8 +740,7 @@ const MenuSelectionLink = ({ token }) => {
   const renderSignIn = () => (
     <div style={{ minHeight: preview ? 844 : '100vh', display: 'flex', flexDirection: 'column', padding: '54px 26px 32px' }}>
       <MatterLogo height={28} style={{ alignSelf: 'flex-start', marginBottom: 40 }} />
-      <h2 style={{ margin: '0 0 10px' }}>{menuName}</h2>
-      <p className="text-muted" style={{ margin: '0 0 30px', fontSize: 15 }}>{menuRange}</p>
+      <h2 style={{ margin: '0 0 30px' }}>{menuName}</h2>
       <p style={{ margin: '0 0 24px', fontSize: 15, lineHeight: 1.6 }}>
         Enter the email your subscription is registered to. We&apos;ll load your plan and this week&apos;s meals.
       </p>
@@ -781,7 +848,19 @@ const MenuSelectionLink = ({ token }) => {
               key={d.key}
               className="btn"
               onClick={d.onClick}
-              style={{ flex: 'none', minWidth: 52, padding: '9px 6px', fontSize: 12, lineHeight: 1.2, flexDirection: 'column', gap: 2, background: d.bg, color: d.fg, borderColor: d.border }}
+              style={{
+                flex: 'none',
+                minWidth: 52,
+                padding: '9px 6px',
+                fontSize: 12,
+                lineHeight: 1.2,
+                flexDirection: 'column',
+                gap: 2,
+                background: d.bg,
+                color: d.fg,
+                borderColor: d.border,
+                boxShadow: d.current ? 'inset 0 0 0 2px var(--color-accent-700)' : 'none',
+              }}
             >
               <span style={{ fontSize: 10, letterSpacing: '0.07em', textTransform: 'uppercase', opacity: 0.85 }}>{d.dow}</span>
               <span style={{ fontSize: 14, fontWeight: 600 }}>{d.num}</span>
@@ -800,12 +879,18 @@ const MenuSelectionLink = ({ token }) => {
                 {skippedToday ? 'You skipped this day' : 'Not eating on this day?'}
               </div>
               <div className="text-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-                {skippedToday ? 'No delivery scheduled.' : 'Skip before browsing the menu.'}
+                {skipLockedToday
+                  ? 'Already submitted — contact customer service to change this.'
+                  : skippedToday
+                    ? 'No delivery scheduled.'
+                    : 'Skip before browsing the menu.'}
               </div>
             </div>
             <button
               className="btn btn-secondary"
               onClick={() => setSkipped((s) => ({ ...s, [day]: !s[day] }))}
+              disabled={skipLockedToday}
+              title={skipLockedToday ? 'This skip was already submitted and can no longer be changed here.' : undefined}
               style={{ fontSize: 13, whiteSpace: 'nowrap' }}
             >
               {skippedToday ? 'Undo skip' : 'Skip this day'}
@@ -871,7 +956,11 @@ const MenuSelectionLink = ({ token }) => {
                         </div>
 
                         {mc.blocked ? (
-                          <button className="btn btn-secondary btn-block" onClick={mc.onCard} style={{ fontSize: 13, justifyContent: 'flex-start' }}>
+                          <button
+                            className="btn btn-block"
+                            onClick={mc.onCard}
+                            style={{ fontSize: 14, fontWeight: 600, background: '#ffffff', color: '#051747', borderColor: '#DC2626' }}
+                          >
                             Ask customer service
                           </button>
                         ) : (
@@ -917,7 +1006,7 @@ const MenuSelectionLink = ({ token }) => {
       </div>
       <h2 style={{ margin: '0 0 10px' }}>Selections received</h2>
       <p className="text-muted" style={{ margin: '0 0 24px', fontSize: 15, lineHeight: 1.6 }}>
-        Thanks {customer?.firstName} — your week is locked in. We&apos;ve emailed a copy to {customer?.email}.
+        Thanks {customer?.firstName} — your week is locked in.
       </p>
       <div className="card" style={{ padding: 18, gap: 0 }}>
         {summary.map((s, i) => (
@@ -961,9 +1050,10 @@ const MenuSelectionLink = ({ token }) => {
                 onClick={a.onClick}
                 style={{
                   fontSize: 13.5,
-                  background: a.kind === 'primary' ? '#051747' : 'transparent',
-                  color: a.kind === 'primary' ? '#fff' : 'var(--color-text)',
-                  borderColor: a.kind === 'primary' ? '#051747' : 'var(--color-neutral-400)',
+                  fontWeight: a.kind === 'danger' ? 600 : 400,
+                  background: a.kind === 'danger' ? '#DC2626' : a.kind === 'primary' ? '#051747' : 'transparent',
+                  color: a.kind === 'danger' || a.kind === 'primary' ? '#fff' : 'var(--color-text)',
+                  borderColor: a.kind === 'danger' ? '#DC2626' : a.kind === 'primary' ? '#051747' : 'var(--color-neutral-400)',
                 }}
               >
                 {a.label}
@@ -1020,7 +1110,7 @@ const MenuSelectionLink = ({ token }) => {
         ) : null}
 
         <div style={FRAME}>
-          <div className="msl-phone" style={{ height: preview ? '100%' : 'auto', overflowY: preview ? 'auto' : 'visible' }}>
+          <div ref={phoneRef} className="msl-phone" style={{ height: preview ? '100%' : 'auto', overflowY: preview ? 'auto' : 'visible' }}>
             {renderBody()}
           </div>
           {renderModal()}

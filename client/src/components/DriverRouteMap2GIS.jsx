@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { load } from '@2gis/mapgl';
-import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft, ChevronDown } from 'lucide-react';
+import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft, ChevronDown, Search as SearchIcon, UserPlus } from 'lucide-react';
 import api from '../utils/api';
-import { getDeliveryLatLng } from '../utils/deliveryCoords';
+import { getDeliveryLatLng, haversineKm, MAX_PLAUSIBLE_DISTANCE_KM } from '../utils/deliveryCoords';
 import { formatBusinessTime, formatClockFromSecondsSinceMidnight, toBusinessComponents } from '../utils/businessTime';
 
 // Driver Routes map, rendered with 2GIS MapGL. Shows the day's deliveries grouped
@@ -24,6 +24,7 @@ function loadMapglOnce() {
 }
 const API_KEY = process.env.REACT_APP_2GIS_API_KEY || '';
 const ROUTING_URL = 'https://routing.api.2gis.com/routing/7.0.0/global';
+const GEOCODE_2GIS_URL = 'https://catalog.api.2gis.com/3.0/items/geocode';
 const MAX_ROUTING_POINTS = 10; // points per routing request; longer routes are chunked
 const DUBAI_CENTER = [55.2708, 25.2048]; // MapGL uses [lng, lat]
 const MAP_ID = 'driver-route-map-2gis';
@@ -160,6 +161,28 @@ function parseWkt(selection) {
     .filter(([lng, lat]) => Number.isFinite(lng) && Number.isFinite(lat));
 }
 
+// Owner (2026-09-13): "add a button ... 2gis geocoding that will call 2gis
+// for geocoding" — a manual fallback for deliveries the server's Google-based
+// resolver couldn't place, using the same public 2GIS key already exposed to
+// the browser for the map itself (2GIS's Catalog geocoder is a plain GET, no
+// server round-trip needed, same pattern as fetchRoadRoute above).
+// `location` biases results toward the depot so a short/ambiguous address
+// (2GIS's Gulf coverage is often better than Google's here, which is why the
+// map itself is on 2GIS) doesn't land in a different city.
+const addressOf = (d) => d.address
+  || [d.addressDetails?.building, d.addressDetails?.street, d.addressDetails?.area, d.addressDetails?.city].filter(Boolean).join(', ');
+
+async function geocode2gisAddress(address, depot) {
+  const params = new URLSearchParams({ q: address, fields: 'items.point', key: API_KEY });
+  if (depot) params.set('location', `${depot.lng},${depot.lat}`);
+  const resp = await fetch(`${GEOCODE_2GIS_URL}?${params.toString()}`);
+  if (!resp.ok) throw new Error(`2GIS geocoder HTTP ${resp.status}`);
+  const data = await resp.json();
+  const point = data?.result?.items?.[0]?.point;
+  if (!point || !Number.isFinite(point.lat) || !Number.isFinite(point.lon)) return null;
+  return { lat: point.lat, lng: point.lon };
+}
+
 async function fetchRoadRoute(points) {
   const chunks = [];
   for (let i = 0; i < points.length - 1; i += MAX_ROUTING_POINTS - 1) {
@@ -273,7 +296,7 @@ function destroyMapSuppressingSdkNoise(map) {
   safeDestroy(map);
 }
 
-function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date, onOptimizeRoutes, asPage = false, onDateChange }) {
+function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date, onOptimizeRoutes, asPage = false, onDateChange, onAssigned }) {
   const [selected, setSelected] = useState(ALL);
   const [depot, setDepot] = useState(null); // null = not loaded, false = not configured
   const [mapReady, setMapReady] = useState(false);
@@ -290,11 +313,41 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const [editMode, setEditMode] = useState(false);
   const [savingId, setSavingId] = useState(null);
   const [saveMsg, setSaveMsg] = useState(null); // { text, error }
+  // A delivery with NO stored location has no marker to drag — instead, the
+  // dispatcher clicks "Place on map" then clicks anywhere on the map itself
+  // (owner, 2026-09-12: "the missed location should be showing in the list
+  // and allow to add them manually").
+  const [placingLocationId, setPlacingLocationId] = useState(null);
+
+  // "2GIS Geocoding" / "Google Geocoding" buttons, and per-selection
+  // geocoding (owner, 2026-09-13: "if I select one delivery I can geocode
+  // only this one, also add a button for google geocoding") — one shared
+  // runner for both providers and both scopes (everything vs. just the
+  // checked stops), so only one geocode operation is ever in flight at once.
+  const [geoRunning, setGeoRunning] = useState(null); // null | '2GIS' | 'Google'
+  const [geoProgress, setGeoProgress] = useState({ done: 0, total: 0 });
+  const [geoMsg, setGeoMsg] = useState(null); // { text, error }
 
   // Filter by scheduled-time hour (owner, 2026-09-09) — the same hour buckets
   // (and colors) the pins/legend use. Empty = show every hour, same "no
   // filter" convention as DispatcherDesktop's own Timing filter.
   const [timingFilters, setTimingFilters] = useState([]);
+
+  // Search by customer + filter by area (owner, 2026-09-11). areaFilters is
+  // INCLUSION (only show these zones), empty = show every zone — matching
+  // DispatcherDesktop's own Area filter convention.
+  const [customerSearch, setCustomerSearch] = useState('');
+  const [areaFilters, setAreaFilters] = useState([]);
+  const [areaDropdownOpen, setAreaDropdownOpen] = useState(false);
+  const [areaSearchTerm, setAreaSearchTerm] = useState('');
+  const areaDropdownRef = useRef(null);
+
+  // Assign straight from Driver Routes (owner, 2026-09-11) — a real write,
+  // so it's deliberately unavailable while viewing a simulated plan.
+  const [selectedStopIds, setSelectedStopIds] = useState([]);
+  const [assignDriverId, setAssignDriverId] = useState('');
+  const [assigning, setAssigning] = useState(false);
+  const [assignMsg, setAssignMsg] = useState(null); // { text, error }
 
   // "What if" simulation (owner, 2026-09-09): set rules — kitchen departure
   // time, a van as hub with a ready-by time, bike trip capacity — and preview
@@ -309,6 +362,17 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   // Seconds-from-midnight the last run actually departed at (null = the
   // normal rule) — so the per-driver ETA panel honours the what-if departure.
   const [simRunDeparture, setSimRunDeparture] = useState(null);
+  // Cap on how much EARLIER than the usual departure the solver may float to
+  // (owner, 2026-09-14: "specify how many [hours] early it['s] allowed, like
+  // it's not allowed to be 3 hours earlier") — an alternative to setting an
+  // exact departure: leave the time floating, but bound how early it can go.
+  // Ignored (server-side) whenever a fixed departure is also set.
+  const [simMaxEarlyHours, setSimMaxEarlyHours] = useState('');
+  // { lastDriver, lastSeconds, firstSeconds, count } once computed after a
+  // run — the simulation's own answer to "when do they get back to the
+  // kitchen" (owner, 2026-09-14), not just something you find by clicking
+  // into each driver individually.
+  const [simKitchenSummary, setSimKitchenSummary] = useState(null);
   const [simBikeCapacity, setSimBikeCapacity] = useState('');
   const [simHubVanIds, setSimHubVanIds] = useState([]);
   const [simHubReady, setSimHubReady] = useState({}); // driverId -> 'HH:MM'
@@ -353,13 +417,28 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   }, [simMode, simPlan]);
   const simulating = simMode && simPlan != null;
 
-  // Every distinct area/zone across today's deliveries, for the Simulation's
-  // "exclude areas" picker.
+  // Every distinct area/zone across today's deliveries — shared by the
+  // Simulation's "exclude areas" picker and the general Area filter below.
   const areaOptionsForSim = useMemo(() => {
     const zones = new Set();
     deliveries.forEach((d) => { if (d.zone && d.zone.trim()) zones.add(d.zone.trim()); });
     return [...zones].sort((a, b) => a.localeCompare(b));
   }, [deliveries]);
+
+  const filteredAreaOptions = useMemo(() => {
+    if (!areaSearchTerm.trim()) return areaOptionsForSim;
+    const q = areaSearchTerm.toLowerCase().trim();
+    return areaOptionsForSim.filter((zone) => zone.toLowerCase().includes(q));
+  }, [areaOptionsForSim, areaSearchTerm]);
+
+  useEffect(() => {
+    if (!areaDropdownOpen) return undefined;
+    const onClickAway = (e) => {
+      if (areaDropdownRef.current && !areaDropdownRef.current.contains(e.target)) setAreaDropdownOpen(false);
+    };
+    document.addEventListener('mousedown', onClickAway);
+    return () => document.removeEventListener('mousedown', onClickAway);
+  }, [areaDropdownOpen]);
 
   // Roughly where each driver is/works today (their first resolvable real
   // stop) — used only to place the hub-van pin on the map, independent of
@@ -374,6 +453,21 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     }
     return m;
   }, [deliveries, manualOverrides, depot, resolved]);
+
+  // Every delivery still missing a location TODAY, independent of the
+  // Timing/Area/search filters above — shown in the "2GIS Geocoding" button's
+  // tooltip so the dispatcher knows how many are genuinely unplaced.
+  const missingDeliveries = useMemo(() => (
+    deliveries.filter((d) => d?._id && !(manualOverrides[d._id] || getDeliveryLatLng(d, depot || null) || resolved[d._id]))
+  ), [deliveries, manualOverrides, depot, resolved]);
+
+  // Owner (2026-09-13): "do it again for all the delivery even the one that
+  // where geocoding before from another api" — the button re-geocodes EVERY
+  // delivery with an address, not just the ones with no location at all, so
+  // a 2GIS result can replace a prior Google/link-extracted one too.
+  const allGeocodableDeliveries = useMemo(() => (
+    deliveries.filter((d) => d?._id && addressOf(d))
+  ), [deliveries]);
 
   // Group the day's deliveries by driver, splitting out those with no usable location.
   const groups = useMemo(() => {
@@ -390,11 +484,16 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     });
     const unassigned = { id: UNASSIGNED, name: 'Unassigned', vehicleType: '', color: UNASSIGNED_COLOR, stops: [], missing: [] };
 
-    // Filter by timing hour (owner, 2026-09-09) — applied before grouping so
-    // marker counts, the driver dropdown, and the side list all agree.
-    const timingFiltered = timingFilters.length === 0
-      ? deliveries
-      : deliveries.filter((d) => timingFilters.includes(hourOf(scheduledSecondsOf(d.scheduledTime))));
+    // Filter by timing hour, customer search, and area (owner, 2026-09-09 /
+    // 2026-09-11) — all applied before grouping so marker counts, the driver
+    // dropdown, and the side list all agree.
+    const search = customerSearch.trim().toLowerCase();
+    const timingFiltered = deliveries.filter((d) => {
+      if (timingFilters.length > 0 && !timingFilters.includes(hourOf(scheduledSecondsOf(d.scheduledTime)))) return false;
+      if (areaFilters.length > 0 && !areaFilters.includes((d.zone || '').trim())) return false;
+      if (search && !(d.customerName || '').toLowerCase().includes(search)) return false;
+      return true;
+    });
 
     timingFiltered.forEach((d) => {
       // Simulating overrides who a delivery is "assigned to" and its stop
@@ -444,7 +543,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       .sort((a, b) => a.name.localeCompare(b.name));
     unassigned.stops.sort(stopSort);
     return { assigned, unassigned };
-  }, [deliveries, drivers, resolved, depot, manualOverrides, timingFilters, simulating, simMetaByDeliveryId]);
+  }, [deliveries, drivers, resolved, depot, manualOverrides, timingFilters, areaFilters, customerSearch, simulating, simMetaByDeliveryId]);
 
   const visibleGroups = useMemo(() => {
     if (selected === ALL) return groups.assigned;
@@ -455,6 +554,24 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
 
   const singleGroup = selected !== ALL && selected !== UNASSIGNED ? visibleGroups[0] || null : null;
   const listGroup = selected === ALL ? null : visibleGroups[0] || null;
+
+  // Every checkbox-selectable id in the current list — on-map stops AND the
+  // no-location ones below them — for "Select all" (owner, 2026-09-14).
+  const allSelectableIds = useMemo(() => (
+    listGroup ? [...listGroup.stops.map((s) => s._id), ...listGroup.missing.map((d) => d._id)] : []
+  ), [listGroup]);
+  const allSelected = allSelectableIds.length > 0 && allSelectableIds.every((id) => selectedStopIds.includes(id));
+  const someSelected = selectedStopIds.length > 0 && !allSelected;
+
+  // The clicked-on delivery, for the on-map detail card (owner, 2026-09-13:
+  // "when I click on a delivery I should be able to see the details ...
+  // timing, zone and full address should be visible") — works in every view,
+  // including "All", where clicking a pin previously gave no feedback at all
+  // since that view's side list only shows per-driver summary rows.
+  const activeStop = useMemo(() => (
+    visibleGroups.flatMap((g) => g.stops).find((s) => s._id === activeId) || null
+  ), [visibleGroups, activeId]);
+  const activeStopEta = activeStop && eta.status === 'ok' ? eta.byId[activeStop._id] : null;
 
   // Save a corrected pin — optimistic (the marker has already moved under the
   // driver's finger by the time this fires), reverted on failure. Reuses the
@@ -487,6 +604,153 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     const t = setTimeout(() => setSaveMsg(null), 4000);
     return () => clearTimeout(t);
   }, [saveMsg]);
+
+  // One address -> {lat,lng} per provider. 2GIS is called directly from the
+  // browser (same public key the map itself uses); Google's key is
+  // server-only, so that one is a real round trip to the new
+  // /geocode-google endpoint. Both return null for "not found" the same way.
+  const geocodeProviders = {
+    '2GIS': (address) => geocode2gisAddress(address, depot || null),
+    Google: (address) => api.post('/deliveries/geocode-google', { address }).then((r) => r.data?.data || null)
+  };
+
+  // Shared runner for "2GIS Geocoding" / "Google Geocoding" (owner,
+  // 2026-09-13: "do it again for all the delivery even the one that where
+  // geocoding before from another api", "also add a button for google
+  // geocoding") and for geocoding just the checked stops ("if I select one
+  // delivery I can geocode only this one"). One address at a time, gently
+  // paced — this is a manual, occasional action, not something to hammer a
+  // geocoder with. A hit still gets the same "must be near the kitchen"
+  // plausibility check the server applies, whichever provider found it.
+  const runGeocode = async (providerLabel, targetDeliveries) => {
+    if (geoRunning || targetDeliveries.length === 0) return;
+    setGeoRunning(providerLabel);
+    setGeoMsg(null);
+    setGeoProgress({ done: 0, total: targetDeliveries.length });
+    let placed = 0;
+    let tooFar = 0;
+    let notFound = 0;
+    let saveFailed = 0;
+    let lastSaveError = null;
+    for (const d of targetDeliveries) {
+      const address = addressOf(d);
+      let point = null;
+      try {
+        point = address ? await geocodeProviders[providerLabel](address) : null;
+      } catch (err) {
+        point = null;
+      }
+      if (!point) {
+        notFound += 1;
+      } else if (depot && haversineKm(point.lat, point.lng, depot.lat, depot.lng) > MAX_PLAUSIBLE_DISTANCE_KM) {
+        tooFar += 1;
+      } else {
+        // Optimistic, but reverted on a failed save — a provider finding a
+        // point and the save actually persisting are two different things
+        // (e.g. the delivery fails its own validation on save); silently
+        // leaving the pin looking "placed" when it wasn't actually saved is
+        // exactly the bug that made this look broken.
+        setManualOverrides((prev) => ({ ...prev, [d._id]: point }));
+        try {
+          await api.post(`/deliveries/${d._id}/manual-coords`, point);
+          placed += 1;
+        } catch (err) {
+          setManualOverrides((prev) => {
+            const next = { ...prev };
+            delete next[d._id];
+            return next;
+          });
+          saveFailed += 1;
+          lastSaveError = err?.response?.data?.message || err.message;
+        }
+      }
+      setGeoProgress((p) => ({ ...p, done: p.done + 1 }));
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    routeCacheRef.current.clear();
+    etaCacheRef.current.clear();
+    setGeoMsg({
+      text: `${providerLabel} geocoding: placed ${placed} of ${targetDeliveries.length}`
+        + (tooFar ? `, ${tooFar} too far from the kitchen to trust (left unchanged)` : '')
+        + (notFound ? `, ${notFound} not found (left unchanged)` : '')
+        + (saveFailed ? `, ${saveFailed} found but could not be saved${lastSaveError ? ` (${lastSaveError})` : ''}` : '') + '.',
+      error: placed === 0
+    });
+    setGeoRunning(null);
+  };
+
+  // Bulk buttons — every geocodable delivery for the day, with a confirm
+  // first since this can overwrite a lot of real, possibly-correct locations.
+  const handleBulkGeocode = (providerLabel) => {
+    if (geoRunning || allGeocodableDeliveries.length === 0) return;
+    if (!window.confirm(
+      `Re-geocode all ${allGeocodableDeliveries.length} deliveries via ${providerLabel}? This replaces any location they already have — `
+      + `including ones already geocoded by another provider — with ${providerLabel}'s own result.`
+    )) return;
+    runGeocode(providerLabel, allGeocodableDeliveries);
+  };
+
+  // Selection buttons — just the checked stop(s), no confirm needed (the
+  // dispatcher already made a deliberate selection, same as "Assign").
+  const handleSelectionGeocode = (providerLabel) => {
+    const targets = deliveries.filter((d) => selectedStopIds.includes(d._id));
+    runGeocode(providerLabel, targets);
+  };
+
+  useEffect(() => {
+    if (!geoMsg) return undefined;
+    const t = setTimeout(() => setGeoMsg(null), 8000);
+    return () => clearTimeout(t);
+  }, [geoMsg]);
+
+  const toggleStopSelection = (deliveryId) => {
+    setSelectedStopIds((prev) => (
+      prev.includes(deliveryId) ? prev.filter((id) => id !== deliveryId) : [...prev, deliveryId]
+    ));
+  };
+
+  // "Select all" (owner, 2026-09-14) — checks/unchecks every stop currently
+  // in view (on-map + no-location), so bulk assign/geocode doesn't require
+  // clicking each box by hand.
+  const toggleSelectAll = () => {
+    setSelectedStopIds(allSelected ? [] : allSelectableIds);
+  };
+
+  // Assign the checked stops straight from Driver Routes (owner, 2026-09-11)
+  // — the same endpoint the dispatcher table's "Assign to Driver" uses.
+  const handleAssignSelected = async () => {
+    if (!assignDriverId || selectedStopIds.length === 0) return;
+    setAssigning(true);
+    setAssignMsg(null);
+    try {
+      await api.patch('/deliveries/assign-driver', { deliveryIds: selectedStopIds, driverId: assignDriverId });
+      const driver = drivers.find((d) => String(d._id) === assignDriverId);
+      setAssignMsg({
+        text: `Assigned ${selectedStopIds.length} ${selectedStopIds.length === 1 ? 'delivery' : 'deliveries'} to ${driverDisplayName(driver)}.`,
+        error: false
+      });
+      setSelectedStopIds([]);
+      setAssignDriverId('');
+      onAssigned?.();
+    } catch (err) {
+      setAssignMsg({ text: err?.response?.data?.message || 'Could not assign — nothing was changed.', error: true });
+    } finally {
+      setAssigning(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!assignMsg) return undefined;
+    const t = setTimeout(() => setAssignMsg(null), 5000);
+    return () => clearTimeout(t);
+  }, [assignMsg]);
+
+  // A stale selection from a different driver's list is just confusing —
+  // clear it whenever the visible list changes.
+  useEffect(() => {
+    setSelectedStopIds([]);
+  }, [selected]);
 
   // If the selected driver drops out of the list (filters changed), fall back to all.
   useEffect(() => {
@@ -678,6 +942,30 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     }
   }, [mapReady, visibleGroups, depot, activeId, eta, editMode, handlePinDrop, simMode, simHubVanIds, simHubLocation, driverAnchorPoint, drivers]);
 
+  // "Place on map" for a delivery with no stored location at all — it has no
+  // marker to drag, so instead the next click ANYWHERE on the map becomes
+  // its pin. Reuses handlePinDrop (same save/undo/cache-clear as dragging an
+  // existing pin) once a spot is picked.
+  useEffect(() => {
+    const map = mapRef.current;
+    const container = document.getElementById(MAP_ID);
+    if (!mapReady || !map || !container || !placingLocationId) return undefined;
+    const delivery = deliveries.find((d) => d._id === placingLocationId);
+    if (!delivery) { setPlacingLocationId(null); return undefined; }
+    const onClick = (evt) => {
+      const rect = container.getBoundingClientRect();
+      const [lng, lat] = map.unproject([evt.clientX - rect.left, evt.clientY - rect.top]);
+      setPlacingLocationId(null);
+      handlePinDrop(delivery, [lng, lat]);
+    };
+    container.style.cursor = 'crosshair';
+    container.addEventListener('click', onClick);
+    return () => {
+      container.style.cursor = '';
+      container.removeEventListener('click', onClick);
+    };
+  }, [mapReady, placingLocationId, deliveries, handlePinDrop]);
+
   // Fit the view when the selection (not the highlighted stop) changes.
   useEffect(() => {
     if (!mapReady) return;
@@ -831,9 +1119,26 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const runSimulation = async () => {
     setSimStatus('loading');
     setSimError('');
+    setSimKitchenSummary(null);
     try {
       const fixedDepartureSeconds = simDeparture ? clockToSeconds(simDeparture) : null;
       if (simDeparture && fixedDepartureSeconds == null) throw new Error('Invalid departure time.');
+      // Only meaningful when the departure is left floating — a fixed
+      // departure already pins the exact time, making an early-limit moot.
+      // The validation below is gated the same way the value itself is
+      // (bug fixed 2026-09-14): previously it checked `simMaxEarlyHours`
+      // alone, so a fixed departure — which forces this to null by design —
+      // still failed validation against that forced null, throwing this
+      // error on every run whenever the (now-disabled) field still held a
+      // leftover number, no matter what was typed into it.
+      let maxEarlyDepartureSeconds = null;
+      if (!simDeparture && simMaxEarlyHours) {
+        const parsedMaxEarlyHours = Number(simMaxEarlyHours);
+        if (!Number.isFinite(parsedMaxEarlyHours) || parsedMaxEarlyHours < 0) {
+          throw new Error('Max hours early must be a non-negative number.');
+        }
+        maxEarlyDepartureSeconds = parsedMaxEarlyHours * 3600;
+      }
       const includedDriverIds = drivers.map((d) => String(d._id)).filter((id) => !simExcludedDriverIds.includes(id));
       if (includedDriverIds.length === 0) throw new Error('At least one active driver must be included.');
       const hubVans = [];
@@ -869,10 +1174,12 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         // by design (owner, 2026-09-09): choosing an earlier time in the
         // simulation is exactly how you'd test bypassing that rule.
         ...(fixedDepartureSeconds != null ? { fixedDepartureSeconds } : {}),
+        ...(maxEarlyDepartureSeconds != null ? { maxEarlyDepartureSeconds } : {}),
         ...(hubVans.length > 0 ? { hubVans } : {}),
         ...(bikeTripCapacity != null ? { bikeTripCapacity } : {})
       });
-      setSimPlan(res.data?.data || null);
+      const plan = res.data?.data || null;
+      setSimPlan(plan);
       // Remember the departure this run actually used, so the per-driver ETA
       // panel below honours it too instead of re-applying the 1:00 AM floor.
       setSimRunDeparture(fixedDepartureSeconds);
@@ -880,6 +1187,40 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       // Tuck the rules away so the result is visible on the full map — expand
       // again from the ▸ chevron to change anything.
       setSimPanelOpen(false);
+
+      // "Mention when they return to the kitchen" (owner, 2026-09-14) — reuse
+      // the same real /route-eta calculation each driver's own ETA panel
+      // already trusts, once per route with stops, and surface the
+      // earliest/latest across the whole plan so it doesn't take clicking
+      // into every driver one at a time to find out.
+      const routesWithStops = (plan?.routes || []).filter((r) => r.stops.length > 0);
+      if (routesWithStops.length > 0) {
+        const results = await Promise.all(routesWithStops.map(async (r) => {
+          try {
+            const etaRes = await api.post('/deliveries/route-eta', {
+              deliveryIds: r.stops.map((s) => s.deliveryId),
+              vehicleType: r.vehicleType,
+              ...(fixedDepartureSeconds != null ? { fixedDepartureSeconds } : {}),
+              date
+            });
+            const seconds = etaRes.data?.data?.totals?.backAtKitchenSeconds;
+            return Number.isFinite(seconds) ? { driverName: r.driverName, seconds } : null;
+          } catch (err) {
+            return null;
+          }
+        }));
+        const valid = results.filter(Boolean);
+        if (valid.length > 0) {
+          const last = valid.reduce((a, b) => (b.seconds > a.seconds ? b : a));
+          const first = valid.reduce((a, b) => (b.seconds < a.seconds ? b : a));
+          setSimKitchenSummary({
+            count: valid.length,
+            lastDriverName: last.driverName,
+            lastSeconds: last.seconds,
+            firstSeconds: first.seconds
+          });
+        }
+      }
     } catch (err) {
       setSimError(err.response?.data?.message || err.message || 'Simulation failed.');
       setSimStatus('error');
@@ -890,6 +1231,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     setSimMode(false);
     setSimPlan(null);
     setSimRunDeparture(null);
+    setSimKitchenSummary(null);
     setSimStatus('idle');
     setSimError('');
   };
@@ -998,6 +1340,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
               onClick={() => {
                 if (simMode) { exitSimulation(); return; }
                 setEditMode(false);
+                setPlacingLocationId(null);
                 setSimPanelOpen(true);
                 setSimMode(true);
               }}
@@ -1012,7 +1355,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
             <button
               type="button"
               disabled={simMode}
-              onClick={() => setEditMode((v) => !v)}
+              onClick={() => { setPlacingLocationId(null); setEditMode((v) => !v); }}
               className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed ${
                 editMode ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50'
               }`}
@@ -1020,6 +1363,30 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
             >
               {editMode ? <CheckCircle2 className="w-4 h-4" /> : <Pencil className="w-4 h-4" />}
               {editMode ? 'Done fixing pins' : 'Fix a pin'}
+            </button>
+            <button
+              type="button"
+              disabled={!!geoRunning || allGeocodableDeliveries.length === 0}
+              onClick={() => handleBulkGeocode('2GIS')}
+              className="px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              title={allGeocodableDeliveries.length === 0
+                ? 'No delivery today has an address to geocode'
+                : `Re-geocode all ${allGeocodableDeliveries.length} deliveries via 2GIS — replaces any existing location, incl. ${missingDeliveries.length} with none at all`}
+            >
+              {geoRunning === '2GIS' ? <Loader2 className="w-4 h-4 animate-spin" /> : <SearchIcon className="w-4 h-4" />}
+              {geoRunning === '2GIS' ? `Geocoding ${geoProgress.done}/${geoProgress.total}…` : `2GIS Geocoding${allGeocodableDeliveries.length ? ` (${allGeocodableDeliveries.length})` : ''}`}
+            </button>
+            <button
+              type="button"
+              disabled={!!geoRunning || allGeocodableDeliveries.length === 0}
+              onClick={() => handleBulkGeocode('Google')}
+              className="px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              title={allGeocodableDeliveries.length === 0
+                ? 'No delivery today has an address to geocode'
+                : `Re-geocode all ${allGeocodableDeliveries.length} deliveries via Google — replaces any existing location, incl. ${missingDeliveries.length} with none at all`}
+            >
+              {geoRunning === 'Google' ? <Loader2 className="w-4 h-4 animate-spin" /> : <SearchIcon className="w-4 h-4" />}
+              {geoRunning === 'Google' ? `Geocoding ${geoProgress.done}/${geoProgress.total}…` : `Google Geocoding${allGeocodableDeliveries.length ? ` (${allGeocodableDeliveries.length})` : ''}`}
             </button>
             {!asPage ? (
               <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-gray-100" aria-label="Close">
@@ -1067,6 +1434,21 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
             {!simPanelOpen && simError ? (
               <p className="text-xs text-red-700 mt-1 flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5" />{simError}</p>
             ) : null}
+            {/* Kitchen-return summary: deliberately OUTSIDE the simPanelOpen
+                gate below — the panel auto-collapses right after a run
+                (Phase 17), and this line is computed asynchronously after
+                that, so it must stay visible whether the panel is open or
+                collapsed (owner, 2026-09-14: "mention when they return to
+                the kitchen"). */}
+            {simulating && simKitchenSummary ? (
+              <p className="text-xs text-indigo-800 mt-1">
+                🏠 Back at the kitchen: everyone in by <strong>{clock(simKitchenSummary.lastSeconds)}</strong>
+                {' '}({simKitchenSummary.lastDriverName} last{simKitchenSummary.count > 1 ? `, first back ${clock(simKitchenSummary.firstSeconds)}` : ''})
+                {simRunDeparture == null ? <span className="text-indigo-500"> — departure was floating, so this is per-driver's own optimal start</span> : null}
+              </p>
+            ) : simulating && simStatus === 'ok' ? (
+              <p className="text-xs text-indigo-500 mt-1">Working out when everyone's back at the kitchen…</p>
+            ) : null}
             {simPanelOpen ? (
             <div className="space-y-2.5 mt-2.5">
             <div className="flex flex-wrap items-end gap-4">
@@ -1075,9 +1457,31 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                 <input
                   type="time"
                   value={simDeparture}
-                  onChange={(e) => setSimDeparture(e.target.value)}
+                  onChange={(e) => {
+                    setSimDeparture(e.target.value);
+                    // The two are mutually exclusive — clear any leftover
+                    // value in the (now-disabled) Max hours early field so
+                    // it can't silently linger unused.
+                    if (e.target.value) setSimMaxEarlyHours('');
+                  }}
                   className="border border-indigo-200 rounded-lg px-2 py-1 text-sm bg-white"
                   title="A time set here overrides the normal 1:00 AM earliest-departure rule for this simulation only"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium text-indigo-900">
+                Max hours early
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  placeholder="e.g. 3"
+                  disabled={!!simDeparture}
+                  value={simMaxEarlyHours}
+                  onChange={(e) => setSimMaxEarlyHours(e.target.value)}
+                  className="border border-indigo-200 rounded-lg px-2 py-1 text-sm bg-white w-28 disabled:opacity-50"
+                  title={simDeparture
+                    ? 'Not used when a fixed departure is set above'
+                    : "Caps how much earlier than the usual departure the solver may float to — e.g. 3 means it won't leave more than 3 hours early"}
                 />
               </label>
               <label className="flex flex-col gap-1 text-xs font-medium text-indigo-900">
@@ -1101,7 +1505,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                 {simStatus === 'loading' ? 'Running… up to ~1 min' : 'Run Simulation'}
               </button>
               {simulating ? (
-                <button type="button" onClick={() => setSimPlan(null)} className="text-xs text-indigo-700 underline">
+                <button type="button" onClick={() => { setSimPlan(null); setSimKitchenSummary(null); }} className="text-xs text-indigo-700 underline">
                   Clear result
                 </button>
               ) : null}
@@ -1244,12 +1648,35 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
             Drag any pin on the map to its correct spot — it saves as soon as you drop it, and also fills in the same location for any other delivery this customer has that doesn't have a pin yet.
           </div>
         ) : null}
+        {placingLocationId ? (
+          <div className="px-5 py-2 bg-amber-50 border-b border-amber-200 text-sm text-amber-800 flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2">
+              <MapPin className="w-4 h-4 flex-shrink-0" />
+              Click anywhere on the map to place{' '}
+              <span className="font-semibold">
+                {(deliveries.find((d) => d._id === placingLocationId) || {}).customerName || 'this delivery'}
+              </span>
+              's pin.
+            </span>
+            <button type="button" onClick={() => setPlacingLocationId(null)} className="text-xs font-medium underline flex-shrink-0">
+              Cancel
+            </button>
+          </div>
+        ) : null}
         {saveMsg ? (
           <div className={`px-5 py-2 border-b text-sm flex items-center gap-2 ${
             saveMsg.error ? 'bg-red-50 border-red-200 text-red-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
           }`}>
             {saveMsg.error ? <AlertTriangle className="w-4 h-4 flex-shrink-0" /> : <CheckCircle2 className="w-4 h-4 flex-shrink-0" />}
             {saveMsg.text}
+          </div>
+        ) : null}
+        {geoMsg ? (
+          <div className={`px-5 py-2 border-b text-sm flex items-center gap-2 ${
+            geoMsg.error ? 'bg-red-50 border-red-200 text-red-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+          }`}>
+            {geoMsg.error ? <AlertTriangle className="w-4 h-4 flex-shrink-0" /> : <CheckCircle2 className="w-4 h-4 flex-shrink-0" />}
+            {geoMsg.text}
           </div>
         ) : null}
 
@@ -1309,6 +1736,61 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                 </div>
               </div>
             ) : null}
+            {/* top-4 left-4, not right-4 — 2GIS renders its own zoom +/- control
+                in the top-right corner, which sits above regular DOM siblings
+                and would swallow clicks on a card placed there. */}
+            {activeStop ? (
+              <div data-testid="delivery-detail-card" className="absolute top-4 left-4 bg-white rounded-lg shadow-lg border border-gray-200 px-4 py-3 max-w-xs w-full text-sm z-10">
+                <div className="flex items-start justify-between gap-2">
+                  <p className="font-semibold text-gray-900 min-w-0 truncate">{activeStop.customerName || 'Customer'}</p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveId(null)}
+                    className="p-0.5 rounded hover:bg-gray-100 flex-shrink-0"
+                    aria-label="Close delivery details"
+                  >
+                    <X className="w-3.5 h-3.5 text-gray-400" />
+                  </button>
+                </div>
+                <p className="mt-1.5 flex items-start gap-1.5 text-gray-700">
+                  <MapPin className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-gray-400" />
+                  <span>{activeStop.address || 'No address on file'}</span>
+                </p>
+                {activeStop.zone ? (
+                  <p className="mt-1 text-xs text-gray-500">Zone: <span className="font-medium text-gray-700">{activeStop.zone}</span></p>
+                ) : null}
+                {activeStop.combinedSunday ? (
+                  <p className="mt-1.5 text-xs bg-indigo-50 border border-indigo-200 text-indigo-800 rounded px-2 py-1">
+                    📦 Sunday delivery included — no separate Sunday trip needed for this customer.
+                  </p>
+                ) : null}
+                {activeStop.scheduledTime ? (
+                  <p className="mt-1.5 flex items-center gap-1.5 text-gray-700">
+                    <Clock className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" />
+                    <span>
+                      {activeStopEta?.windowStartSeconds != null
+                        ? `${clock(activeStopEta.windowStartSeconds)} – ${clock(activeStopEta.scheduledSeconds)}`
+                        : formatBusinessTime(activeStop.scheduledTime)}
+                    </span>
+                  </p>
+                ) : null}
+                {activeStopEta && activeStopEta.etaSeconds != null ? (
+                  <p className="mt-1 text-xs text-gray-600">
+                    {activeStopEta.actual ? 'Delivered' : 'ETA'} <span className="font-medium">{clock(activeStopEta.etaSeconds)}</span>
+                    {(() => {
+                      const label = stopStatusLabel(activeStopEta);
+                      return label ? <span className={`ml-1.5 font-medium ${label.className}`}>· {label.text}</span> : null;
+                    })()}
+                  </p>
+                ) : null}
+                {activeStop.status ? (
+                  <p className="mt-1 text-xs text-gray-500 capitalize">{String(activeStop.status).replace(/_/g, ' ')}</p>
+                ) : null}
+                {activeStop.routeOrder != null ? (
+                  <p className="mt-1 text-xs text-gray-400">Stop #{activeStop.routeOrder + 1}</p>
+                ) : null}
+              </div>
+            ) : null}
           </div>
 
           {/* Side panel */}
@@ -1333,6 +1815,81 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                   Unassigned ({groups.unassigned.stops.length + groups.unassigned.missing.length})
                 </option>
               </select>
+
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <SearchIcon className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={customerSearch}
+                    onChange={(e) => setCustomerSearch(e.target.value)}
+                    placeholder="Search customer…"
+                    className="w-full border border-gray-300 rounded-lg pl-8 pr-7 py-1.5 text-sm"
+                  />
+                  {customerSearch ? (
+                    <button
+                      type="button"
+                      onClick={() => setCustomerSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      aria-label="Clear search"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  ) : null}
+                </div>
+                <div ref={areaDropdownRef} className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setAreaDropdownOpen((v) => !v)}
+                    className={`h-full px-3 py-1.5 rounded-lg border text-sm flex items-center gap-1 ${
+                      areaFilters.length > 0 ? 'bg-blue-50 border-blue-300 text-blue-700 font-medium' : 'border-gray-300 text-gray-700'
+                    }`}
+                  >
+                    Areas{areaFilters.length > 0 ? ` (${areaFilters.length})` : ''}
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${areaDropdownOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {areaDropdownOpen ? (
+                    <div data-testid="area-filter-dropdown" className="absolute right-0 top-full mt-1 w-56 bg-white border border-gray-300 rounded-lg shadow-lg z-30 max-h-72 overflow-hidden flex flex-col">
+                      <div className="p-2 border-b border-gray-200">
+                        <input
+                          type="text"
+                          value={areaSearchTerm}
+                          onChange={(e) => setAreaSearchTerm(e.target.value)}
+                          placeholder="Filter areas…"
+                          className="w-full border border-gray-300 rounded px-2 py-1 text-xs"
+                          autoFocus
+                        />
+                      </div>
+                      <div className="overflow-y-auto p-1">
+                        {filteredAreaOptions.length === 0 ? (
+                          <p className="text-xs text-gray-400 px-2 py-1.5">No matching areas.</p>
+                        ) : filteredAreaOptions.map((zone) => (
+                          <label key={zone} className="flex items-center gap-2 px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50 rounded cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={areaFilters.includes(zone)}
+                              onChange={() => setAreaFilters((prev) => (
+                                prev.includes(zone) ? prev.filter((z) => z !== zone) : [...prev, zone]
+                              ))}
+                              className="accent-blue-600"
+                            />
+                            <span className="truncate">{zone}</span>
+                          </label>
+                        ))}
+                      </div>
+                      {areaFilters.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => setAreaFilters([])}
+                          className="text-xs text-blue-600 hover:underline border-t border-gray-200 py-1.5"
+                        >
+                          Clear areas
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
 
               <div>
                 <div className="flex items-center justify-between mb-1">
@@ -1504,6 +2061,97 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
               ) : null}
             </div>
 
+            {/* Assign selected stops straight from Driver Routes (owner,
+                2026-09-11) — a real write, so unavailable while previewing a
+                simulated plan. Sits outside the scrollable list so it's
+                always visible once something's checked. */}
+            {listGroup && !simulating ? (
+              <div className="px-4 py-2 border-b border-gray-200 bg-gray-50 space-y-1.5">
+                {allSelectableIds.length > 0 ? (
+                  <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      ref={(el) => { if (el) el.indeterminate = someSelected; }}
+                      onChange={toggleSelectAll}
+                      className="accent-blue-600"
+                    />
+                    Select all ({allSelectableIds.length})
+                  </label>
+                ) : null}
+                {selectedStopIds.length > 0 ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-gray-700 flex-shrink-0">
+                      {selectedStopIds.length} selected
+                    </span>
+                    <select
+                      value={assignDriverId}
+                      onChange={(e) => setAssignDriverId(e.target.value)}
+                      className="flex-1 min-w-0 border border-gray-300 rounded-lg px-2 py-1 text-xs"
+                    >
+                      <option value="">Assign to driver…</option>
+                      {drivers.map((d) => (
+                        <option key={d._id} value={String(d._id)}>
+                          {driverDisplayName(d)}{d.profile?.vehicleType ? ` · ${d.profile.vehicleType}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleAssignSelected}
+                      disabled={!assignDriverId || assigning}
+                      className="flex-shrink-0 inline-flex items-center gap-1 px-2.5 py-1 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      {assigning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserPlus className="w-3.5 h-3.5" />}
+                      Assign
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedStopIds([])}
+                      className="flex-shrink-0 text-xs text-gray-500 hover:underline"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-gray-400">Check stops below to assign them to a driver, or geocode just the checked ones.</p>
+                )}
+                {selectedStopIds.length > 0 ? (
+                  <div data-testid="selection-geocode-row" className="flex items-center gap-2">
+                    <span className="text-[11px] text-gray-500 flex-shrink-0">Geocode {selectedStopIds.length === 1 ? 'this one' : 'selected'}:</span>
+                    <button
+                      type="button"
+                      disabled={!!geoRunning}
+                      onClick={() => handleSelectionGeocode('2GIS')}
+                      className="flex-shrink-0 px-2 py-0.5 rounded border border-gray-300 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                    >
+                      2GIS
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!!geoRunning}
+                      onClick={() => handleSelectionGeocode('Google')}
+                      className="flex-shrink-0 px-2 py-0.5 rounded border border-gray-300 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                    >
+                      Google
+                    </button>
+                    {geoRunning ? <span className="text-[11px] text-gray-400">{geoProgress.done}/{geoProgress.total}…</span> : null}
+                  </div>
+                ) : null}
+                {assignMsg ? (
+                  <p className={`text-[11px] flex items-center gap-1 ${assignMsg.error ? 'text-red-600' : 'text-emerald-600'}`}>
+                    {assignMsg.error ? <AlertTriangle className="w-3 h-3 flex-shrink-0" /> : <CheckCircle2 className="w-3 h-3 flex-shrink-0" />}
+                    {assignMsg.text}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+            {listGroup && simulating ? (
+              <p className="px-4 py-2 text-[11px] text-indigo-600 border-b border-gray-200 bg-indigo-50">
+                Exit Simulation to assign — this list is a what-if preview.
+              </p>
+            ) : null}
+
             <div className="flex-1 overflow-y-auto">
               {selected === ALL ? (
                 <ul className="divide-y divide-gray-100">
@@ -1572,6 +2220,16 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                           onClick={() => setActiveId(stop._id)}
                           className={`p-3 flex items-start gap-3 cursor-pointer ${isActive ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                         >
+                          {!simulating ? (
+                            <input
+                              type="checkbox"
+                              checked={selectedStopIds.includes(stop._id)}
+                              onChange={() => toggleStopSelection(stop._id)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="mt-1.5 flex-shrink-0 accent-blue-600"
+                              title="Select to assign to a driver"
+                            />
+                          ) : null}
                           <span
                             className="w-6 h-6 rounded-full text-white text-[11px] font-bold flex items-center justify-center flex-shrink-0"
                             style={{ backgroundColor: stop.timeColor, opacity: stop.status === 'delivered' ? 0.55 : 1 }}
@@ -1620,19 +2278,42 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                     })}
                   </ol>
                   {listGroup.missing.length > 0 ? (
-                    <details className="border-t border-gray-200">
-                      <summary className="px-3 py-2 text-xs font-medium text-amber-700 cursor-pointer flex items-center gap-1">
-                        <AlertTriangle className="w-3 h-3" /> {listGroup.missing.length} without a location (not on the map)
-                      </summary>
-                      <ul className="px-3 pb-3 space-y-1">
+                    <div className="border-t border-gray-200 bg-amber-50/40">
+                      <p className="px-3 pt-2 pb-1 text-xs font-medium text-amber-700 flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3 flex-shrink-0" /> {listGroup.missing.length} without a location (not on the map)
+                      </p>
+                      <ul className="px-3 pb-3 space-y-1.5">
                         {listGroup.missing.map((d) => (
-                          <li key={d._id} className="text-xs text-gray-700">
-                            <span className="font-medium">{d.customerName || 'Customer'}</span>
-                            {d.address ? <span className="text-gray-500"> — {d.address}</span> : null}
+                          <li key={d._id} className="text-xs text-gray-700 flex items-start gap-1.5">
+                            {!simulating ? (
+                              <input
+                                type="checkbox"
+                                checked={selectedStopIds.includes(d._id)}
+                                onChange={() => toggleStopSelection(d._id)}
+                                className="mt-0.5 flex-shrink-0 accent-blue-600"
+                                title="Select to assign to a driver (no location needed)"
+                              />
+                            ) : null}
+                            <span className="flex-1 min-w-0">
+                              <span className="font-medium">{d.customerName || 'Customer'}</span>
+                              {d.address ? <span className="text-gray-500"> — {d.address}</span> : null}
+                            </span>
+                            {!simulating && !editMode ? (
+                              <button
+                                type="button"
+                                onClick={() => setPlacingLocationId(d._id)}
+                                disabled={placingLocationId === d._id}
+                                className="flex-shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-300 text-amber-800 hover:bg-amber-100 disabled:opacity-50 font-medium"
+                                title="Click, then click the spot on the map"
+                              >
+                                <MapPin className="w-3 h-3" />
+                                {placingLocationId === d._id ? 'Click map…' : 'Place on map'}
+                              </button>
+                            ) : null}
                           </li>
                         ))}
                       </ul>
-                    </details>
+                    </div>
                   ) : null}
                 </>
               ) : null}

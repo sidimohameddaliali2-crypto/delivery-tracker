@@ -859,9 +859,16 @@ function CustomerProfilePanel({ subscriptionId }) {
                             </span>
                             {addr.label || addr.type || 'Address'}
                           </span>
-                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${addr.status === 'active' ? 'bg-white/70 text-gray-700' : 'bg-white text-gray-500'}`}>
-                            {addr.status === 'active' ? 'Active' : 'Previous'}
-                          </span>
+                          <div className="flex items-center gap-1.5 flex-shrink-0">
+                            {addr.emirate && (
+                              <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-matter-sky/50 text-matter-navy whitespace-nowrap">
+                                {addr.emirate}
+                              </span>
+                            )}
+                            <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full whitespace-nowrap ${addr.status === 'active' ? 'bg-white/70 text-gray-700' : 'bg-white text-gray-500'}`}>
+                              {addr.status === 'active' ? 'Active' : 'Previous'}
+                            </span>
+                          </div>
                         </div>
                         <p className="text-sm text-gray-600 mt-1.5">
                           {[addr.building, addr.unit ? `Unit ${addr.unit}` : null, addr.floor, addr.area, addr.emirate].filter(Boolean).join(', ') || '—'}

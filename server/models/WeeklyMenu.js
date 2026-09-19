@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
 
 const breakfastPresetSchema = new mongoose.Schema({
   breakfastName: { type: String, default: '' },
@@ -104,25 +105,30 @@ const weeklyMenuSchema = new mongoose.Schema({
     default: true
   },
   
-  // Per-day selection deadlines
-  // e.g. for Monday delivery, lock selections by Friday 23:59
-  selectionDeadlines: [{
-    deliveryDay: {
-      type: String,
-      enum: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-    },
-    // How many days before the delivery day the deadline falls
-    // e.g. 3 means the deadline is 3 days before the delivery date
-    daysBefore: {
-      type: Number,
-      default: 3
-    },
-    // Time of day for the deadline in HH:MM (24h)
-    deadlineTime: {
-      type: String,
-      default: '23:59'
-    }
-  }],
+  // Per-day selection deadlines — a fixed company-wide policy (see
+  // config/selectionDeadlines.js), not something set per menu. Always
+  // (re)applied by routes/menus.js on create and update; this schema default
+  // is just a defensive fallback for any doc created some other way.
+  selectionDeadlines: {
+    type: [{
+      deliveryDay: {
+        type: String,
+        enum: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+      },
+      // How many days before the delivery day the deadline falls
+      // e.g. 3 means the deadline is 3 days before the delivery date
+      daysBefore: {
+        type: Number,
+        default: 3
+      },
+      // Time of day for the deadline in HH:MM (24h)
+      deadlineTime: {
+        type: String,
+        default: '23:59'
+      }
+    }],
+    default: FIXED_SELECTION_DEADLINES
+  },
 
   // Completion Message
   enableCompletionMessage: {

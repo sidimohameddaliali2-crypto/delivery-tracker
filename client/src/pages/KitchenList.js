@@ -1042,6 +1042,22 @@ const KitchenList = () => {
     return hour + (parseInt(match[2], 10) || 0) / 60;
   };
 
+  // Turns a parsed hour back into a clean "H:MM AM/PM" label — used as the
+  // Day Kitchen Paper's group heading instead of the raw delivery window
+  // string, since that raw string can carry zone/area text along with the
+  // time (e.g. "By 6 AM (Downtown)"). Papers there are grouped by emirate and
+  // time only, never by zone, so two windows that differ only in zone text
+  // but share the same hour must collapse into one paper, not split into two.
+  const formatDeliveryHourLabel = (hourDecimal) => {
+    if (hourDecimal === 999) return 'No delivery window';
+    const totalMinutes = Math.round(hourDecimal * 60);
+    const hour24 = Math.floor(totalMinutes / 60);
+    const minute = totalMinutes % 60;
+    const meridiem = hour24 >= 12 ? 'PM' : 'AM';
+    const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+    return `${hour12}:${String(minute).padStart(2, '0')} ${meridiem}`;
+  };
+
   // One row per MEAL (not per customer) across everyone currently loaded for
   // this menu — a customer with several meals across several days gets one
   // row each. Columns: Customer ID, Name, CPF, Date, Meal Name, then that
@@ -1102,8 +1118,15 @@ const KitchenList = () => {
 
       let cursorY = 32;
 
-      // Group by delivery window, then sort groups early -> late and
-      // customers within each group alphabetically.
+      // Group by delivery emirate first, then by delivery window within each
+      // emirate — every (emirate, window) combination is its own physical
+      // "paper": it always starts on a fresh page, never sharing a page with
+      // a different window or a different emirate, even if there'd be room
+      // left on the current page. A window with many customers can still
+      // legitimately span several pages (the per-customer overflow check
+      // below) — that's fine, it's still all the same paper/section; what
+      // must never happen is a DIFFERENT window or emirate starting partway
+      // down an existing page.
       const entriesWithMeals = customerRows
         .map((entry) => ({
           entry,
@@ -1111,92 +1134,115 @@ const KitchenList = () => {
         }))
         .filter((row) => row.dayMeals.length > 0);
 
-      const groups = new Map();
+      const emirateOf = (row) => String(row.entry.deliveryAddress?.emirate || '').trim() || 'No Emirate';
+
+      const emirateGroups = new Map();
       entriesWithMeals.forEach((row) => {
-        const windowLabel = row.entry.deliveryWindow?.label || 'No delivery window';
-        if (!groups.has(windowLabel)) groups.set(windowLabel, []);
-        groups.get(windowLabel).push(row);
+        const emirate = emirateOf(row);
+        if (!emirateGroups.has(emirate)) emirateGroups.set(emirate, []);
+        emirateGroups.get(emirate).push(row);
       });
+      const sortedEmirates = Array.from(emirateGroups.keys()).sort((a, b) => a.localeCompare(b));
 
-      const sortedGroups = Array.from(groups.entries()).sort(
-        (a, b) => parseDeliveryHour(a[0]) - parseDeliveryHour(b[0])
-      );
-      sortedGroups.forEach(([, rows]) => {
-        rows.sort((a, b) => (a.entry.customerName || a.entry.email || '')
-          .localeCompare(b.entry.customerName || b.entry.email || ''));
-      });
+      let isFirstSection = true;
 
-      for (const [windowLabel, rows] of sortedGroups) {
-        if (cursorY > pageHeight - 40) {
-          doc.addPage();
-          cursorY = 20;
-        }
+      for (const emirate of sortedEmirates) {
+        // Keyed by parsed hour, not the raw delivery window string — two
+        // windows that differ only by zone/area text but share the same
+        // time must collapse into one paper, never split into two.
+        const windowGroups = new Map();
+        emirateGroups.get(emirate).forEach((row) => {
+          const hourKey = parseDeliveryHour(row.entry.deliveryWindow?.label);
+          if (!windowGroups.has(hourKey)) windowGroups.set(hourKey, []);
+          windowGroups.get(hourKey).push(row);
+        });
 
-        doc.setFontSize(13);
-        doc.setFont(undefined, 'bold');
-        doc.setFillColor(241, 245, 249);
-        doc.rect(14, cursorY - 5, pageWidth - 28, 8, 'F');
-        doc.text(windowLabel, 16, cursorY);
-        doc.setFont(undefined, 'normal');
-        cursorY += 10;
+        const sortedWindows = Array.from(windowGroups.entries()).sort((a, b) => a[0] - b[0]);
+        sortedWindows.forEach(([, rows]) => {
+          rows.sort((a, b) => (a.entry.customerName || a.entry.email || '')
+            .localeCompare(b.entry.customerName || b.entry.email || ''));
+        });
 
-        for (const { entry, dayMeals } of rows) {
-          if (cursorY > pageHeight - 50) {
+        for (const [hourKey, rows] of sortedWindows) {
+          const windowLabel = formatDeliveryHourLabel(hourKey);
+          if (!isFirstSection) {
             doc.addPage();
             cursorY = 20;
           }
-
-          doc.setFontSize(12);
-          doc.setFont(undefined, 'bold');
-          doc.text(entry.customerName || entry.email || 'Unknown customer', 14, cursorY);
-          doc.setFont(undefined, 'normal');
-          cursorY += 6;
-
-          doc.setFontSize(9);
-          doc.text(`Address: ${formatAddress(entry.deliveryAddress)}`, 14, cursorY, { maxWidth: pageWidth - 28 });
-          cursorY += 5;
-
-          const tableRows = dayMeals.map((meal) => {
-            const label = getMealLabel(meal);
-            return [
-              label.mealType,
-              label.mealName,
-              `${meal.proteinWeight || 0}g`,
-              `${meal.carbWeight || 0}g`,
-              `${meal.vegWeight || 0}g`
-            ];
-          });
-
-          autoTable(doc, {
-            startY: cursorY,
-            head: [['Type', 'Meal', 'P', 'C', 'V']],
-            body: tableRows,
-            theme: 'grid',
-            styles: { fontSize: 9 },
-            headStyles: { fillColor: [30, 41, 59] },
-            margin: { left: 14, right: 14 }
-          });
-
-          cursorY = doc.lastAutoTable.finalY + 6;
-          if (cursorY > pageHeight - 20) {
-            doc.addPage();
-            cursorY = 20;
-          }
+          isFirstSection = false;
 
           doc.setFontSize(10);
+          doc.setTextColor(120);
+          doc.text(`${dayLabel} — ${emirate}`, 14, cursorY);
+          doc.setTextColor(0);
+          cursorY += 8;
+
+          doc.setFontSize(13);
           doc.setFont(undefined, 'bold');
-          doc.text(
-            `Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}`,
-            14,
-            cursorY
-          );
+          doc.setFillColor(241, 245, 249);
+          doc.rect(14, cursorY - 5, pageWidth - 28, 8, 'F');
+          doc.text(windowLabel, 16, cursorY);
           doc.setFont(undefined, 'normal');
           cursorY += 10;
-        }
 
-        // Yield between delivery-window groups so a busy day (many
-        // customers) never blocks the main thread in one unbroken stretch.
-        await new Promise((resolve) => setTimeout(resolve, 0));
+          for (const { entry, dayMeals } of rows) {
+            if (cursorY > pageHeight - 50) {
+              doc.addPage();
+              cursorY = 20;
+            }
+
+            doc.setFontSize(12);
+            doc.setFont(undefined, 'bold');
+            doc.text(entry.customerName || entry.email || 'Unknown customer', 14, cursorY);
+            doc.setFont(undefined, 'normal');
+            cursorY += 6;
+
+            doc.setFontSize(9);
+            doc.text(`Address: ${formatAddress(entry.deliveryAddress)}`, 14, cursorY, { maxWidth: pageWidth - 28 });
+            cursorY += 5;
+
+            const tableRows = dayMeals.map((meal) => {
+              const label = getMealLabel(meal);
+              return [
+                label.mealType,
+                label.mealName,
+                `${meal.proteinWeight || 0}g`,
+                `${meal.carbWeight || 0}g`,
+                `${meal.vegWeight || 0}g`
+              ];
+            });
+
+            autoTable(doc, {
+              startY: cursorY,
+              head: [['Type', 'Meal', 'P', 'C', 'V']],
+              body: tableRows,
+              theme: 'grid',
+              styles: { fontSize: 9 },
+              headStyles: { fillColor: [30, 41, 59] },
+              margin: { left: 14, right: 14 }
+            });
+
+            cursorY = doc.lastAutoTable.finalY + 6;
+            if (cursorY > pageHeight - 20) {
+              doc.addPage();
+              cursorY = 20;
+            }
+
+            doc.setFontSize(10);
+            doc.setFont(undefined, 'bold');
+            doc.text(
+              `Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}`,
+              14,
+              cursorY
+            );
+            doc.setFont(undefined, 'normal');
+            cursorY += 10;
+          }
+
+          // Yield between delivery-window/emirate sections so a busy day
+          // (many customers) never blocks the main thread in one unbroken stretch.
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
       }
 
       if (entriesWithMeals.length === 0) {

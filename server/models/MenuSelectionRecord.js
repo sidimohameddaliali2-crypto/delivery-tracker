@@ -138,17 +138,16 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Unique: one record per customer per weekly menu. Two partial indexes so
-// existing records (which predate the `customer` field) stay protected by
-// the old email-based constraint until backfilled, while every new/migrated
-// record moves onto the customer-based constraint.
+// Unique: one record per customer per weekly menu. Partial (only applies once
+// `customer` is set) rather than a plain unique index on the whole
+// collection, because MongoDB partial indexes can't express "customer is
+// missing" (no $exists:false/$not support) — there's deliberately no
+// fallback index protecting not-yet-linked records; those are an edge case
+// (customerMatchService resolves a Customer on every write path now) that
+// needs a human's attention anyway, not a database constraint.
 menuSelectionRecordSchema.index(
   { weeklyMenuId: 1, customer: 1 },
   { unique: true, partialFilterExpression: { customer: { $type: 'objectId' } } }
-);
-menuSelectionRecordSchema.index(
-  { weeklyMenuId: 1, email: 1 },
-  { unique: true, partialFilterExpression: { customer: { $exists: false } } }
 );
 
 export default mongoose.model('MenuSelectionRecord', menuSelectionRecordSchema);

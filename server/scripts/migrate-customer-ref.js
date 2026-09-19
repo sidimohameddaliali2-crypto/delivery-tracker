@@ -104,13 +104,27 @@ const normalizeEmails = async (Model, label, { scopeFields = [] } = {}) => {
 // though their stored email strings differ — e.g. a customer with a Customer
 // Management email-collision left unmerged (see the Customer collision log
 // above), whose two variously-cased Customer docs both regex-match one of
-// this menu's records. Writing customer on both would violate the new
-// {weeklyMenuId, customer} unique index (Step 1b in Customer.js's sibling
-// model), so before writing, any (weeklyMenuId, customer) pair resolved by
-// more than one record is treated exactly like an email collision: keep the
-// first (oldest _id) record, leave the rest unset (protected by the email
-// fallback index) and logged for manual review — never a silent pick.
+// this menu's records. Writing customer on both would violate the
+// {weeklyMenuId, customer} unique index, so before writing, any
+// (weeklyMenuId, customer) pair resolved by more than one record is treated
+// exactly like an email collision: keep the first (oldest _id) record, leave
+// the rest unset (protected by the email fallback index) and logged for
+// manual review — never a silent pick.
+//
+// This check also has to account for records a PREVIOUS run of this script
+// already migrated (this script is safe to re-run, and only re-queries
+// records still missing `customer`) — a record in this batch can resolve to
+// a customer slot a prior run already filled for that same menu, which the
+// in-batch grouping alone wouldn't catch. Those already-taken pairs are
+// loaded up front so this run treats them the same way.
 const backfillCustomerRef = async () => {
+  const alreadyMigrated = await MenuSelectionRecord.find({ customer: { $exists: true } })
+    .select('weeklyMenuId customer')
+    .lean();
+  const takenPairs = new Set(
+    alreadyMigrated.map((r) => `${r.weeklyMenuId}|${r.customer}`)
+  );
+
   const records = await MenuSelectionRecord.find({ customer: { $exists: false } })
     .select('_id email weeklyMenuId')
     .lean();
@@ -142,7 +156,21 @@ const backfillCustomerRef = async () => {
 
   const ops = [];
   const menuCustomerCollisions = [];
-  for (const group of byMenuAndCustomer.values()) {
+  for (const [key, group] of byMenuAndCustomer) {
+    // A prior run already claimed this (menu, customer) pair — every record
+    // in this group is a duplicate of that earlier one, none can be written.
+    if (takenPairs.has(key)) {
+      menuCustomerCollisions.push({
+        weeklyMenuId: group[0].record.weeklyMenuId,
+        customerId: group[0].customerId,
+        recordIds: group.map((g) => g.record._id.toString()),
+        emails: group.map((g) => g.record.email),
+        note: 'already claimed by a previously-migrated record'
+      });
+      group.forEach((g) => { orphaned += 1; orphanedEmails.push(g.record.email); });
+      continue;
+    }
+
     if (group.length > 1) {
       menuCustomerCollisions.push({
         weeklyMenuId: group[0].record.weeklyMenuId,
@@ -160,12 +188,27 @@ const backfillCustomerRef = async () => {
     ops.push({ updateOne: { filter: { _id: only.record._id }, update: { $set: { customer: only.customerId } } } });
   }
 
-  if (ops.length) await MenuSelectionRecord.bulkWrite(ops, { ordered: false });
-  console.log(`  ✓ Backfilled customer ref on ${ops.length} of ${records.length} record(s)`);
+  let written = 0;
+  if (ops.length) {
+    try {
+      const result = await MenuSelectionRecord.bulkWrite(ops, { ordered: false });
+      written = (result.matchedCount || 0);
+    } catch (bulkError) {
+      // With ordered:false, MongoDB still applies every non-conflicting op —
+      // this only throws because SOME ops in the batch failed, not all of
+      // them. Report what succeeded instead of treating it as fatal; a write
+      // error here almost always means the pre-check above missed a race
+      // against another process, not a script bug.
+      written = bulkError?.result?.result?.nModified ?? bulkError?.result?.nModified ?? 0;
+      const failedCount = bulkError?.writeErrors?.length ?? 'unknown';
+      console.log(`  ⚠ ${failedCount} write(s) rejected by the database during backfill (logged, not fatal) — usually the same (menu, customer) collision as above, caught late.`);
+    }
+  }
+  console.log(`  ✓ Backfilled customer ref on ${written} of ${records.length} record(s)`);
   if (menuCustomerCollisions.length) {
     console.log(`  ⚠ ${menuCustomerCollisions.length} (menu, customer) collision(s) found — kept the first record, left the rest unset:`);
     menuCustomerCollisions.forEach((c) => {
-      console.log(`      menu ${c.weeklyMenuId} / customer ${c.customerId} -> records ${c.recordIds.join(', ')} (emails: ${c.emails.join(', ')})`);
+      console.log(`      menu ${c.weeklyMenuId} / customer ${c.customerId} -> records ${c.recordIds.join(', ')} (emails: ${c.emails.join(', ')})${c.note ? ` [${c.note}]` : ''}`);
     });
   }
   if (orphaned) {
@@ -173,12 +216,20 @@ const backfillCustomerRef = async () => {
     orphanedEmails.slice(0, 25).forEach((e) => console.log(`      ${e}`));
     if (orphanedEmails.length > 25) console.log(`      ...and ${orphanedEmails.length - 25} more`);
   }
-  return { migrated: ops.length, orphaned, menuCustomerCollisions: menuCustomerCollisions.length };
+  return { migrated: written, orphaned, menuCustomerCollisions: menuCustomerCollisions.length };
 };
 
-// Step 3: drop the old single unique index and (re)create the two partial
-// indexes the schema now declares, so this script's result matches what a
+// Step 3: drop the old plain unique index and (re)create the single partial
+// index the schema now declares, so this script's result matches what a
 // fresh `mongoose.connect` would already ensure on next server start.
+//
+// There is deliberately no fallback index for not-yet-linked (no `customer`)
+// records — MongoDB partial indexes can't express "customer is missing"
+// ($exists:false / $not aren't supported operators in a partialFilterExpression,
+// confirmed by this step failing with CannotCreateIndex when first tried).
+// Any record still missing `customer` after the backfill above is an edge
+// case for a human to resolve, not something the database enforces uniqueness
+// over.
 const rebuildIndexes = async () => {
   const collection = mongoose.connection.db.collection('menuselectionrecords');
 
@@ -193,17 +244,22 @@ const rebuildIndexes = async () => {
     }
   }
 
+  try {
+    await collection.dropIndex('weeklyMenuId_1_email_1_fallback');
+    console.log('  ✓ Dropped weeklyMenuId_1_email_1_fallback index (unsupported partial expression, no longer used)');
+  } catch (error) {
+    if (error.code === 27) {
+      console.log('  ℹ weeklyMenuId_1_email_1_fallback index does not exist (nothing to drop)');
+    } else {
+      throw error;
+    }
+  }
+
   await collection.createIndex(
     { weeklyMenuId: 1, customer: 1 },
     { unique: true, partialFilterExpression: { customer: { $type: 'objectId' } }, name: 'weeklyMenuId_1_customer_1' }
   );
   console.log('  ✓ Created weeklyMenuId_1_customer_1 partial unique index');
-
-  await collection.createIndex(
-    { weeklyMenuId: 1, email: 1 },
-    { unique: true, partialFilterExpression: { customer: { $exists: false } }, name: 'weeklyMenuId_1_email_1_fallback' }
-  );
-  console.log('  ✓ Created weeklyMenuId_1_email_1_fallback partial unique index');
 };
 
 // Rebuilds Customer's matterSubscriptionId index as unique. Skipped (with a

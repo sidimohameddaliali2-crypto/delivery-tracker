@@ -9,6 +9,7 @@ import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { protect } from '../middleware/auth.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
+import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
 import athleatService from '../services/athleatService.js';
 import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
 import {
@@ -1565,8 +1566,14 @@ const mapWithConcurrency = async (items, limit, mapper) => {
  * `customers` here additionally carries `subscriptionId` (the Matter
  * subscription id) so snacks_per_day can be looked up directly, and
  * `mealFrequency` from that same subscription (see runAutoPopulateMissing).
+ *
+ * `snackOnly` (default false): when true, main meal and breakfast filling is
+ * skipped entirely — only snacks are considered. Used for customers who
+ * already made their own meal selection: snacks are never customer-
+ * selectable, so they're always auto-assigned regardless, but an existing
+ * selection must never be touched otherwise.
  */
-async function runAssignMatterCoreMeals(menuId, dateKey, customers) {
+async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly = false } = {}) {
   const menu = await WeeklyMenu.findById(menuId)
     .select('matterCoreMealOptionsByDate breakfastOptionsByDate snackOptionsByDate')
     .lean();
@@ -1645,7 +1652,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers) {
     const newMeals = [];
     const mealTypeForSlot = (index) => (index === 1 ? 'dinner' : 'lunch');
 
-    if (slotsNeeded > 0) {
+    if (!snackOnly && slotsNeeded > 0) {
       for (let i = 0; i < slotsNeeded; i += 1) {
         const position = existingMainMealsCount + i;
         const chosen = mealList[position];
@@ -1665,7 +1672,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers) {
       }
     }
 
-    if (breakfastInclude && !hasBreakfastAlready) {
+    if (!snackOnly && breakfastInclude && !hasBreakfastAlready) {
       const choice = breakfastOptions[0];
       if (choice) {
         newMeals.push({
@@ -1797,9 +1804,13 @@ async function runAutoPopulateMissing(menuId, dateKey) {
       newlyCreatedCustomers: 0,
       customersAssigned: 0,
       matterCoreCustomersAssigned: 0,
+      snackOnlyCustomersAssigned: 0,
+      matterCoreSnackOnlyCustomersAssigned: 0,
       assignedMainMeals: null,
       assignedSnacks: null,
-      assignedMatterCore: null
+      assignedSnacksOnly: null,
+      assignedMatterCore: null,
+      assignedMatterCoreSnacksOnly: null
     };
     await cacheSet(cacheKey, empty, 900);
     return { data: empty };
@@ -1824,6 +1835,13 @@ async function runAutoPopulateMissing(menuId, dateKey) {
   // by the Matter subscription's own plan.name, same source KitchenList
   // already shows as "planName".
   const needsMatterCoreAssignment = [];
+  // Snacks are never customer-selectable — every subscriber with a delivery
+  // this date always gets auto-assigned snacks, even one who already made
+  // their own full meal selection. Those customers land here instead of the
+  // buckets above: only their snack slots are filled, their existing meal
+  // selection is never touched.
+  const needsSnackOnly = [];
+  const needsMatterCoreSnackOnly = [];
 
   for (const sub of subscriptions) {
     const subId = String(sub.subscription_id);
@@ -1838,8 +1856,16 @@ async function runAutoPopulateMissing(menuId, dateKey) {
     }
 
     const hasSelectionThatDay = (existingRecord?.selectedMeals || []).some((m) => toDateKey(m.date) === dateKey);
+    const isMatterCore = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
+
     if (hasSelectionThatDay) {
       alreadyCovered += 1;
+      const email = customer?.email || sub.email;
+      if (email) {
+        const item = { email, subscriptionId: sub.subscription_id };
+        if (isMatterCore) needsMatterCoreSnackOnly.push(item);
+        else needsSnackOnly.push(item);
+      }
       continue;
     }
 
@@ -1858,7 +1884,7 @@ async function runAutoPopulateMissing(menuId, dateKey) {
       exclusions: sub.exclusions || []
     };
 
-    if (String(sub.plan_name || '').trim().toLowerCase() === 'matter core') {
+    if (isMatterCore) {
       needsMatterCoreAssignment.push(item);
     } else {
       needsAssignment.push(item);
@@ -1878,10 +1904,32 @@ async function runAutoPopulateMissing(menuId, dateKey) {
     assignedSnacks = snackResult.error ? { error: snackResult.error } : snackResult.data;
   }
 
+  let assignedSnacksOnly = null;
+  if (needsSnackOnly.length > 0) {
+    const snackOnlyResult = await runAssignSnacks(menuId, {
+      date: dateKey,
+      customers: needsSnackOnly.map((c) => ({ email: c.email }))
+    });
+    assignedSnacksOnly = snackOnlyResult.error ? { error: snackOnlyResult.error } : snackOnlyResult.data;
+  }
+
   let assignedMatterCore = null;
   if (needsMatterCoreAssignment.length > 0) {
     const matterCoreResult = await runAssignMatterCoreMeals(menuId, dateKey, needsMatterCoreAssignment);
     assignedMatterCore = matterCoreResult.error ? { error: matterCoreResult.error } : matterCoreResult.data;
+  }
+
+  let assignedMatterCoreSnacksOnly = null;
+  if (needsMatterCoreSnackOnly.length > 0) {
+    const matterCoreSnackOnlyResult = await runAssignMatterCoreMeals(
+      menuId,
+      dateKey,
+      needsMatterCoreSnackOnly,
+      { snackOnly: true }
+    );
+    assignedMatterCoreSnacksOnly = matterCoreSnackOnlyResult.error
+      ? { error: matterCoreSnackOnlyResult.error }
+      : matterCoreSnackOnlyResult.data;
   }
 
   const summary = {
@@ -1890,9 +1938,13 @@ async function runAutoPopulateMissing(menuId, dateKey) {
     newlyCreatedCustomers,
     customersAssigned: needsAssignment.length,
     matterCoreCustomersAssigned: needsMatterCoreAssignment.length,
+    snackOnlyCustomersAssigned: needsSnackOnly.length,
+    matterCoreSnackOnlyCustomersAssigned: needsMatterCoreSnackOnly.length,
     assignedMainMeals,
     assignedSnacks,
-    assignedMatterCore
+    assignedSnacksOnly,
+    assignedMatterCore,
+    assignedMatterCoreSnacksOnly
   };
 
   // 15 min TTL — long enough to cover a kitchen shift's repeat page loads
@@ -2440,8 +2492,7 @@ router.post('/', protect, async (req, res) => {
       days,
       enableCompletionMessage,
       completionMessage,
-      bodybuilderMode,
-      selectionDeadlines
+      bodybuilderMode
     } = req.body;
 
     console.log('=== POST /menus - Creating new menu ===');
@@ -2457,7 +2508,8 @@ router.post('/', protect, async (req, res) => {
       meals: meals || [],
       enableCompletionMessage: enableCompletionMessage || false,
       completionMessage: completionMessage || 'Your meal selections have been saved successfully.',
-      selectionDeadlines: Array.isArray(selectionDeadlines) ? selectionDeadlines : [],
+      // Fixed company-wide deadline policy — not configurable per menu.
+      selectionDeadlines: FIXED_SELECTION_DEADLINES,
       createdBy: req.user._id,
       shareLink: {
         token: crypto.randomBytes(32).toString('hex'),
@@ -2579,7 +2631,6 @@ router.put('/:id', protect, async (req, res) => {
       completionMessage,
       shareLinkActive,
       bodybuilderMode,
-      selectionDeadlines,
       breakfastPreset,
       breakfastPresetsByName
     } = req.body;
@@ -2607,7 +2658,10 @@ router.put('/:id', protect, async (req, res) => {
     if (isPublished !== undefined) menu.isPublished = isPublished;
     if (enableCompletionMessage !== undefined) menu.enableCompletionMessage = enableCompletionMessage;
     if (completionMessage !== undefined) menu.completionMessage = completionMessage;
-    if (Array.isArray(selectionDeadlines)) menu.selectionDeadlines = selectionDeadlines;
+    // Fixed company-wide deadline policy — reasserted on every update so it
+    // can never drift (and any older menu with a different/missing table
+    // gets migrated onto the fixed one the next time it's saved).
+    menu.selectionDeadlines = FIXED_SELECTION_DEADLINES;
     if (breakfastPreset !== undefined) menu.breakfastPreset = breakfastPreset;
     if (breakfastPresetsByName !== undefined) menu.breakfastPresetsByName = breakfastPresetsByName;
     if (typeof shareLinkActive === 'boolean') {

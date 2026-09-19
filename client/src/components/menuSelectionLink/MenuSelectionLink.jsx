@@ -351,6 +351,43 @@ const MenuSelectionLink = ({ token }) => {
     [model, qty]
   );
 
+  // Whether a delivery day's selection deadline has passed — mirrors the
+  // formula in the old MenuSelection.jsx / the Menu Management admin tools:
+  // a day locks at (deliveryDate - daysBefore calendar days) at
+  // deadlineTime, local time. Preview/demo mode never locks — there's no
+  // real menu (or real deadlines) behind it.
+  const isDayDeadlineLocked = useCallback(
+    (dateKey) => {
+      if (preview || !dateKey) return false;
+      const deliveryDate = dateFromKey(dateKey);
+      if (Number.isNaN(deliveryDate.getTime())) return false;
+
+      const deadlines = rawMenu?.selectionDeadlines;
+      const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const rule = Array.isArray(deadlines)
+        ? deadlines.find((d) => d.deliveryDay === DAY_NAMES[deliveryDate.getDay()])
+        : null;
+
+      if (!rule) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        return deliveryDate < today;
+      }
+
+      const deadlineDateLocal = new Date(
+        deliveryDate.getFullYear(),
+        deliveryDate.getMonth(),
+        deliveryDate.getDate() - (rule.daysBefore || 0)
+      );
+      const [hh, mm] = String(rule.deadlineTime || '23:59').split(':').map(Number);
+      deadlineDateLocal.setHours(hh, mm, 59, 999);
+      return new Date() > deadlineDateLocal;
+    },
+    [preview, rawMenu]
+  );
+
+  const deadlineLockedToday = isDayDeadlineLocked(dayKeys[day]);
+
   const conflictOf = useCallback(
     (m) => {
       if (!account) return null;
@@ -497,10 +534,12 @@ const MenuSelectionLink = ({ token }) => {
   const onSubmitButton = useCallback(() => {
     // A day is either skipped entirely, or filled to exactly the customer's
     // meals-per-day count — no partial days (e.g. 1 of 3) get through to the
-    // next day or the final submit.
+    // next day or the final submit. That requirement is waived once the
+    // day's own deadline has already passed — there's nothing left for the
+    // customer to fix, so it shouldn't block them from moving on.
     const isSkipped = !!skipped[day];
     const chosen = dayCount(day);
-    if (!isSkipped && chosen < target) {
+    if (!isSkipped && !deadlineLockedToday && chosen < target) {
       flash(
         chosen === 0
           ? `Please select ${target} meal${target === 1 ? '' : 's'} for this day, or skip it.`
@@ -513,7 +552,7 @@ const MenuSelectionLink = ({ token }) => {
       return;
     }
     doSubmit();
-  }, [day, dayCount, doSubmit, flash, lastDay, skipped, target]);
+  }, [day, dayCount, deadlineLockedToday, doSubmit, flash, lastDay, skipped, target]);
 
   const resetAll = useCallback(() => {
     setStep('signin');
@@ -602,11 +641,12 @@ const MenuSelectionLink = ({ token }) => {
             tags,
             blocked,
             warned,
-            selectable: !blocked,
+            selectable: !blocked && !deadlineLockedToday,
             qty: q,
-            minusDisabled: q === 0,
-            plusDisabled: dayFull,
+            minusDisabled: q === 0 || deadlineLockedToday,
+            plusDisabled: dayFull || deadlineLockedToday,
             onCard: () => {
+              if (deadlineLockedToday) return;
               if (blocked) return openAllergen(conflict.items);
               if (warned && !acknowledged[m.key]) return openExclusion(m, conflict.items);
             },
@@ -616,7 +656,7 @@ const MenuSelectionLink = ({ token }) => {
         }),
       };
     }).filter((c) => c.meals.length > 0);
-  }, [account, acknowledged, bump, conflictOf, day, dayFull, model, openAllergen, openExclusion, qty, tryAdd]);
+  }, [account, acknowledged, bump, conflictOf, day, dayFull, deadlineLockedToday, model, openAllergen, openExclusion, qty, tryAdd]);
 
   const dayTabs = useMemo(
     () =>
@@ -626,12 +666,14 @@ const MenuSelectionLink = ({ token }) => {
         const isSkip = !!skipped[i];
         const n = dayCount(i);
         const isComplete = !isSkip && target > 0 && n >= target;
+        const isPastDeadline = isDayDeadlineLocked(k);
 
         // Status color always shows — skipped days are amber, fully-picked
-        // days (exactly their meal count) are green — regardless of whether
-        // it's the day currently being viewed. The currently-viewed day gets
-        // a ring on top of that (see `current` below) instead of losing its
-        // status color to a solid highlight fill.
+        // days (exactly their meal count) are green, and a day whose
+        // deadline passed with nothing decided is greyed out — regardless of
+        // whether it's the day currently being viewed. The currently-viewed
+        // day gets a ring on top of that (see `current` below) instead of
+        // losing its status color to a solid highlight fill.
         let bg = 'transparent';
         let fg = 'var(--color-text)';
         let border = 'var(--color-neutral-300)';
@@ -643,13 +685,17 @@ const MenuSelectionLink = ({ token }) => {
           bg = 'var(--color-accent-2-200)';
           fg = 'var(--color-accent-2-900)';
           border = 'var(--color-accent-2-700)';
+        } else if (isPastDeadline) {
+          bg = 'var(--color-neutral-200)';
+          fg = 'var(--color-neutral-600)';
+          border = 'var(--color-neutral-400)';
         }
 
         return {
           key: k,
           dow: DAYS[d.getDay()] || '',
           num: d.getDate() || i + 1,
-          badge: isSkip ? 'skip' : n ? `${n} sel` : '–',
+          badge: isSkip ? 'skip' : isComplete ? `${n} sel` : isPastDeadline ? 'closed' : n ? `${n} sel` : '–',
           bg,
           fg,
           border,
@@ -657,7 +703,7 @@ const MenuSelectionLink = ({ token }) => {
           onClick: () => setDay(i),
         };
       }),
-    [day, dayCount, dayKeys, skipped, target]
+    [day, dayCount, dayKeys, isDayDeadlineLocked, skipped, target]
   );
 
   const summary = useMemo(
@@ -881,16 +927,24 @@ const MenuSelectionLink = ({ token }) => {
               <div className="text-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
                 {skipLockedToday
                   ? 'Already submitted — contact customer service to change this.'
-                  : skippedToday
-                    ? 'No delivery scheduled.'
-                    : 'Skip before browsing the menu.'}
+                  : deadlineLockedToday
+                    ? 'The deadline for this day has passed — contact customer service to change this.'
+                    : skippedToday
+                      ? 'No delivery scheduled.'
+                      : 'Skip before browsing the menu.'}
               </div>
             </div>
             <button
               className="btn btn-secondary"
               onClick={() => setSkipped((s) => ({ ...s, [day]: !s[day] }))}
-              disabled={skipLockedToday}
-              title={skipLockedToday ? 'This skip was already submitted and can no longer be changed here.' : undefined}
+              disabled={skipLockedToday || deadlineLockedToday}
+              title={
+                skipLockedToday
+                  ? 'This skip was already submitted and can no longer be changed here.'
+                  : deadlineLockedToday
+                    ? 'The deadline for this day has passed.'
+                    : undefined
+              }
               style={{ fontSize: 13, whiteSpace: 'nowrap' }}
             >
               {skippedToday ? 'Undo skip' : 'Skip this day'}
@@ -898,6 +952,20 @@ const MenuSelectionLink = ({ token }) => {
           </div>
         </div>
       </div>
+
+      {!skippedToday && deadlineLockedToday && (
+        <div style={{ padding: '18px 22px 0' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: '#FEE2E2', border: '1px solid #FCA5A5', borderRadius: 'var(--radius-lg)', padding: '12px 14px' }}>
+            <span style={{ fontSize: 18, lineHeight: 1 }}>🔒</span>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: '#991B1B' }}>Selection closed</div>
+              <p style={{ margin: '2px 0 0', fontSize: 12.5, color: '#991B1B', lineHeight: 1.5 }}>
+                The deadline to select meals for {dayHeading} has passed. What's shown below is read-only.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {skippedToday ? (
         <div style={{ padding: '26px 22px' }}>

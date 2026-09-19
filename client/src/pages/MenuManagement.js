@@ -25,6 +25,21 @@ import {
 // (The much larger ingredient-exclusion list in constants/exclusionList.js
 // stays a free-text/textarea field below — 170+ entries don't fit as chips.)
 const ALLERGEN_OPTIONS = ['Gluten', 'Dairy', 'Eggs', 'Nuts', 'Peanuts', 'Soy', 'Fish', 'Shellfish', 'Sesame'];
+
+// Display-only mirror of the fixed, company-wide policy the server actually
+// enforces (server/config/selectionDeadlines.js) — the server applies this
+// same table to every menu on create/update regardless of what's submitted,
+// so this is shown for admin visibility only, never sent as editable input.
+// Keep in sync with the server copy if the policy ever changes.
+const FIXED_SELECTION_DEADLINES = [
+  { deliveryDay: 'Monday', daysBefore: 3, deadlineTime: '15:00' },
+  { deliveryDay: 'Tuesday', daysBefore: 2, deadlineTime: '00:00' },
+  { deliveryDay: 'Wednesday', daysBefore: 2, deadlineTime: '00:00' },
+  { deliveryDay: 'Thursday', daysBefore: 2, deadlineTime: '00:00' },
+  { deliveryDay: 'Friday', daysBefore: 2, deadlineTime: '00:00' },
+  { deliveryDay: 'Saturday', daysBefore: 3, deadlineTime: '00:00' },
+  { deliveryDay: 'Sunday', daysBefore: 4, deadlineTime: '00:00' },
+];
 import api from '../utils/api';
 import { lookupProteinWeight, lookupCarbWeight } from '../utils/nutrition';
 import XLSX from 'xlsx-js-style';
@@ -1615,105 +1630,27 @@ const MenuManagement = () => {
                 )}
               </div>
 
-              {/* Selection Deadlines Section */}
+              {/* Selection Deadlines — fixed company policy, not editable per
+                  menu. The server applies FIXED_SELECTION_DEADLINES to every
+                  menu on create and update regardless of what's sent here;
+                  this panel is read-only so it can't look configurable. */}
               <div className="bg-matter-neutral-200 border border-matter-neutral-300 rounded-lg p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <label className="font-semibold text-matter-navy">Selection Deadlines</label>
-                    <p className="text-xs text-matter-neutral-600 mt-0.5">
-                      Set a cutoff: after this deadline customers can no longer edit meals for that day.
-                      E.g. Monday delivery → locked Friday at 23:59 (3 days before).
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFormData({
-                        ...formData,
-                        selectionDeadlines: [
-                          ...formData.selectionDeadlines,
-                          { deliveryDay: 'Monday', daysBefore: 3, deadlineTime: '23:59' }
-                        ]
-                      });
-                    }}
-                    className="flex-shrink-0 px-3 py-1.5 bg-matter-accent-600 text-white text-sm rounded-lg hover:opacity-90"
-                  >
-                    + Add Rule
-                  </button>
+                <div>
+                  <label className="font-semibold text-matter-navy">Selection Deadlines</label>
+                  <p className="text-xs text-matter-neutral-600 mt-0.5">
+                    Fixed for every menu — after the deadline, customers can no longer edit meals for that day.
+                  </p>
                 </div>
-
-                {formData.selectionDeadlines.length === 0 && (
-                  <p className="text-sm text-matter-neutral-500 italic">No deadlines set — customers can edit anytime.</p>
-                )}
-
-                {formData.selectionDeadlines.map((rule, idx) => (
-                  <div key={idx} className="flex flex-wrap items-center gap-3 bg-white border border-matter-neutral-300 rounded-lg p-3">
-                    <div className="flex flex-col gap-0.5">
-                      <label className="text-xs text-matter-neutral-600">Delivery Day</label>
-                      <select
-                        value={rule.deliveryDay}
-                        onChange={(e) => {
-                          const updated = [...formData.selectionDeadlines];
-                          updated[idx] = { ...updated[idx], deliveryDay: e.target.value };
-                          setFormData({ ...formData, selectionDeadlines: updated });
-                        }}
-                        className="px-2 py-1 border border-matter-neutral-300 rounded text-sm focus:ring-2 focus:ring-matter-accent-500"
-                      >
-                        {['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'].map(d => (
-                          <option key={d} value={d}>{d}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="flex flex-col gap-0.5">
-                      <label className="text-xs text-matter-neutral-600">Lock N days before</label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={6}
-                        value={rule.daysBefore}
-                        onChange={(e) => {
-                          const updated = [...formData.selectionDeadlines];
-                          updated[idx] = { ...updated[idx], daysBefore: Number(e.target.value) };
-                          setFormData({ ...formData, selectionDeadlines: updated });
-                        }}
-                        className="w-20 px-2 py-1 border border-matter-neutral-300 rounded text-sm focus:ring-2 focus:ring-matter-accent-500"
-                      />
-                    </div>
-
-                    <div className="flex flex-col gap-0.5">
-                      <label className="text-xs text-matter-neutral-600">Deadline Time</label>
-                      <input
-                        type="time"
-                        value={rule.deadlineTime}
-                        onChange={(e) => {
-                          const updated = [...formData.selectionDeadlines];
-                          updated[idx] = { ...updated[idx], deadlineTime: e.target.value };
-                          setFormData({ ...formData, selectionDeadlines: updated });
-                        }}
-                        className="px-2 py-1 border border-matter-neutral-300 rounded text-sm focus:ring-2 focus:ring-matter-accent-500"
-                      />
-                    </div>
-
-                    <div className="flex flex-col gap-0.5 flex-1 min-w-[140px]">
-                      <label className="text-xs text-matter-neutral-600">Summary</label>
-                      <span className="text-xs text-matter-neutral-800 font-medium">
-                        {rule.deliveryDay} → locked {rule.daysBefore} day{rule.daysBefore !== 1 ? 's' : ''} before at {rule.deadlineTime}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {FIXED_SELECTION_DEADLINES.map((rule) => (
+                    <div key={rule.deliveryDay} className="flex items-center justify-between bg-white border border-matter-neutral-300 rounded-lg px-3 py-2">
+                      <span className="text-sm font-medium text-matter-navy">{rule.deliveryDay}</span>
+                      <span className="text-xs text-matter-neutral-600">
+                        locks {rule.daysBefore} day{rule.daysBefore !== 1 ? 's' : ''} before at {rule.deadlineTime}
                       </span>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const updated = formData.selectionDeadlines.filter((_, i) => i !== idx);
-                        setFormData({ ...formData, selectionDeadlines: updated });
-                      }}
-                      className="ml-auto text-red-500 hover:text-red-700 text-lg leading-none"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
 
               {weeklyItems.length > 0 && (() => {
@@ -1947,7 +1884,7 @@ const MenuManagement = () => {
               <div className="sticky bottom-0 -mx-6 mt-8 px-6 py-4 bg-white border-t border-matter-neutral-300 flex items-center justify-between gap-4">
                 <span className="text-xs text-matter-neutral-600 hidden sm:block">
                   {weeklyItems.reduce((s, d) => s + d.items.length, 0)} meal{weeklyItems.reduce((s, d) => s + d.items.length, 0) !== 1 ? 's' : ''} planned
-                  {formData.selectionDeadlines?.length ? ` · ${formData.selectionDeadlines.length} deadline${formData.selectionDeadlines.length !== 1 ? 's' : ''} set` : ''}
+                  {' · fixed deadlines apply'}
                 </span>
                 <div className="flex gap-3 ml-auto">
                   <button

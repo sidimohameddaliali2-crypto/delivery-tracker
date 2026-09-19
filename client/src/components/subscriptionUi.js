@@ -8,7 +8,7 @@ export const statusColors = {
   expired: 'bg-gray-100 text-gray-500',
 };
 
-export const matchLabels = { email: 'Matched by email', phone: 'Matched by phone', name: 'Matched by name' };
+export const matchLabels = { email: 'Matched by email', phone: 'Matched by phone', name: 'Matched by name', manual: 'Linked manually' };
 
 export const StatusBadge = ({ status }) => (
   <span className={`text-xs font-semibold px-2 py-0.5 rounded-full capitalize ${statusColors[status] || 'bg-gray-100 text-gray-600'}`}>

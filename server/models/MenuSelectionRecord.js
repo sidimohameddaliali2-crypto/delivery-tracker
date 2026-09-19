@@ -15,10 +15,21 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  // Primary join to Customer going forward. Records created/updated before
+  // this field existed (or where matching couldn't resolve a Customer) may
+  // have this unset — see the {weeklyMenuId, email} fallback index below and
+  // server/scripts/migrate-customer-ref.js for backfilling existing records.
+  customer: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Customer',
+    index: true
+  },
   email: {
     type: String,
     required: true,
-    index: true
+    index: true,
+    lowercase: true,
+    trim: true
   },
   customerId: {
     type: String,
@@ -68,6 +79,15 @@ const menuSelectionRecordSchema = new mongoose.Schema({
       C: Number,
       P: Number,
       F: Number
+    },
+    // True for meals filled in by kitchen staff via "Auto-Assign Main Meals" /
+    // "Auto-Assign Snacks" (server/routes/menus.js) rather than picked by the
+    // customer. Kept out of the customer-facing menu-selection preview
+    // (GET /menus/customers/:customerId/meal-profile) — visible only in the
+    // Kitchen List — so customers are never shown a choice they didn't make.
+    isAutoAssigned: {
+      type: Boolean,
+      default: false
     }
   }],
 
@@ -118,7 +138,17 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Unique: one record per customer email per weekly menu
-menuSelectionRecordSchema.index({ weeklyMenuId: 1, email: 1 }, { unique: true });
+// Unique: one record per customer per weekly menu. Two partial indexes so
+// existing records (which predate the `customer` field) stay protected by
+// the old email-based constraint until backfilled, while every new/migrated
+// record moves onto the customer-based constraint.
+menuSelectionRecordSchema.index(
+  { weeklyMenuId: 1, customer: 1 },
+  { unique: true, partialFilterExpression: { customer: { $type: 'objectId' } } }
+);
+menuSelectionRecordSchema.index(
+  { weeklyMenuId: 1, email: 1 },
+  { unique: true, partialFilterExpression: { customer: { $exists: false } } }
+);
 
 export default mongoose.model('MenuSelectionRecord', menuSelectionRecordSchema);

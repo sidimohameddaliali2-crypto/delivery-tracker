@@ -93,6 +93,7 @@ const userSchema = new mongoose.Schema({
     delivery_changes: { type: Boolean, default: false },
     menus: { type: Boolean, default: false },
     kitchen_list: { type: Boolean, default: false },
+    kitchen_counting: { type: Boolean, default: false },
     matter_core: { type: Boolean, default: false },
     partners: { type: Boolean, default: false },
     employees: { type: Boolean, default: false },
@@ -181,7 +182,7 @@ const PERMISSION_KEYS = [
   'dashboard',
   'deliveries', 'drivers', 'fleet', 'delivery_changes', 'bags', 'reports', 'events', 'complaints',
   'customers', 'website_subscriptions', 'subscription', 'customer_analytics', 'renewal',
-  'menus', 'kitchen_list', 'matter_core',
+  'menus', 'kitchen_list', 'kitchen_counting', 'matter_core',
   'partners',
   'users', 'employees',
   'late_deliveries', 'live_map', 'settings', 'yellowblock',
@@ -193,7 +194,7 @@ const ROLE_DEFAULT_KEYS = {
   admin: [
     'dashboard', 'deliveries', 'drivers', 'fleet', 'delivery_changes', 'bags', 'reports', 'events', 'complaints',
     'customers', 'website_subscriptions', 'subscription', 'customer_analytics', 'renewal',
-    'menus', 'kitchen_list', 'matter_core', 'partners', 'users', 'employees',
+    'menus', 'kitchen_list', 'kitchen_counting', 'matter_core', 'partners', 'users', 'employees',
     'late_deliveries', 'live_map',
   ],
   manager: [
@@ -209,7 +210,7 @@ const ROLE_DEFAULT_KEYS = {
   viewer: ['dashboard', 'reports'],
   store_keeper: ['bags'],
   yellowblock_user: ['events', 'yellowblock'],
-  kitchen: ['kitchen_list', 'partners'],
+  kitchen: ['kitchen_list', 'kitchen_counting', 'partners'],
 };
 
 function getDefaultPermissions(role) {

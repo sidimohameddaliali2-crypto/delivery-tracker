@@ -17,18 +17,23 @@ const getDateKey = (value) => {
     }
   }
 
+  // Meal dates arrive as UTC-midnight Date objects (Mongo returns
+  // "YYYY-MM-DD" strings parsed via `new Date(...)`, which is UTC midnight
+  // per spec) — reading them back with local getters shifts the day
+  // backward in any timezone behind UTC, misfiling a meal into the wrong
+  // day's macro bucket. UTC getters read the same calendar date it was built from.
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const y = value.getFullYear();
-    const m = String(value.getMonth() + 1).padStart(2, '0');
-    const d = String(value.getDate()).padStart(2, '0');
+    const y = value.getUTCFullYear();
+    const m = String(value.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(value.getUTCDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
   }
 
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return String(value);
-  const y = parsed.getFullYear();
-  const m = String(parsed.getMonth() + 1).padStart(2, '0');
-  const d = String(parsed.getDate()).padStart(2, '0');
+  const y = parsed.getUTCFullYear();
+  const m = String(parsed.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(parsed.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
 };
 
@@ -62,15 +67,6 @@ const getCarbMealWeight = (grams) => {
   if (rounded <= 70) return 200;
   if (rounded <= 75) return 210;
   return 225;
-};
-
-const getBreakfastVegWeight = (preset = {}) => {
-  const isLargeBreakfast = !!preset?.isLargeBreakfast;
-  const customVeg = Number(preset?.V);
-  if (isLargeBreakfast && Number.isFinite(customVeg) && customVeg > 0) {
-    return customVeg;
-  }
-  return 80;
 };
 
 const normalizeBreakfastName = (value) => normalizeText(String(value || '').replace(/\s+/g, ' ').trim());
@@ -163,6 +159,73 @@ const resolveBreakfastPresetForMeal = (meal, preset = {}) => {
     V: Number(match.V) || 80,
     isLargeBreakfast: !!match.isLargeBreakfast
   };
+};
+
+// Global snack macro table (see KitchenSnackPreset, kitchen-snack-presets
+// endpoint): each entry is that snack's own fixed C/P/F, matched by name the
+// same fuzzy way breakfast presets are — used directly, with NO division by
+// snacksPerDay, unlike the per-date Snack Rotation list's C/P/F. A snack
+// whose name doesn't match anything here falls back to whatever macros are
+// already stored on the meal (meal.snackMacros — the per-date option's own
+// value, divided by snacksPerDay at assignment time), so nothing regresses
+// for snacks the kitchen hasn't added to this table yet.
+const resolveSnackPresetForMeal = (meal, snackPresetsByName = {}) => {
+  const mealSnackName = String(meal?.mealName || meal?.menuItemName || meal?.menuItemId?.mealName || '').trim();
+  if (!mealSnackName) return null;
+
+  const exactKey = normalizeBreakfastName(mealSnackName);
+  const simplifiedMealKey = simplifyBreakfastName(mealSnackName);
+  const compactMealKey = compactBreakfastName(mealSnackName);
+
+  let match = exactKey ? snackPresetsByName[exactKey] : null;
+
+  if (!match && simplifiedMealKey) {
+    const mapEntries = Object.entries(snackPresetsByName || {});
+
+    const exactSimplifiedEntry = mapEntries.find(([rawKey, rawValue]) => {
+      const candidateName = rawValue?.snackName || rawKey;
+      return simplifyBreakfastName(candidateName) === simplifiedMealKey;
+    });
+    if (exactSimplifiedEntry) match = exactSimplifiedEntry[1];
+
+    if (!match && compactMealKey) {
+      const compactEntry = mapEntries.find(([rawKey, rawValue]) => {
+        const candidateName = rawValue?.snackName || rawKey;
+        return compactBreakfastName(candidateName) === compactMealKey;
+      });
+      if (compactEntry) match = compactEntry[1];
+    }
+  }
+
+  if (!match) return null;
+  return {
+    C: Number(match.C) || 0,
+    P: Number(match.P) || 0,
+    F: Number(match.F) || 0
+  };
+};
+
+// Matter Core plan customers skip the proportional macro-split entirely.
+// Their Matter API macros.carbohydrates/protein aren't a macro-nutrient
+// budget — they're the customer's TOTAL DAILY WEIGHT (grams of food) for
+// carbs and protein, divided evenly by however many main meals they have
+// that day to get a per-meal weight, which is then looked up here to get
+// that meal's actual C/P/F. Only these exact combinations are known; a
+// combination outside this table is never guessed at — the meal is flagged
+// (matterCoreLookupMissing) for a human to fill in instead.
+const MATTER_CORE_WEIGHT_TO_MACROS = [
+  { carbWeight: 100, proteinWeight: 100, C: 28, P: 25, F: 11 },
+  { carbWeight: 150, proteinWeight: 150, C: 40, P: 40, F: 15 },
+  { carbWeight: 150, proteinWeight: 200, C: 40, P: 50, F: 18 },
+  { carbWeight: 200, proteinWeight: 200, C: 50, P: 50, F: 20 }
+];
+
+const lookupMatterCoreMacros = (carbWeight, proteinWeight) => {
+  const roundedCarb = Math.round(carbWeight);
+  const roundedProtein = Math.round(proteinWeight);
+  return MATTER_CORE_WEIGHT_TO_MACROS.find(
+    (row) => row.carbWeight === roundedCarb && row.proteinWeight === roundedProtein
+  ) || null;
 };
 
 const getMacroAdjustment = (deliveryNumber) => {
@@ -316,7 +379,8 @@ const calculateByProteinRule = ({
   };
 };
 
-export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakfastPreset = {} }) => {
+export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakfastPreset = {}, snackPreset = {} }) => {
+  const snackPresetsByName = snackPreset?.presetsByName || {};
   const customerMacros = customer?.targetMacros
     || customer?.customerMacros
     || customer?.macros
@@ -342,11 +406,14 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
   const breakfastProteinRaw = Number(defaultBreakfast.P) || 0;
   const breakfastProtein = breakfastProteinRaw <= 30 ? 30 : breakfastProteinRaw;
   const breakfastFats = Number(defaultBreakfast.F) || 0;
-  // Only "Custom" plan customers (per the website subscription plan name)
-  // have their snack macros deducted from the rest of the day's meal budget.
-  // Other plans still get their assigned snack — it just doesn't shrink the
-  // other meals' macros.
-  const isCustomPlan = normalizeText(customer?.planName) === 'custom';
+  // Matter Core: main meals use the weight-lookup path (see
+  // lookupMatterCoreMacros above) instead of the proportional split — the
+  // cap/large-breakfast-escalation machinery below exists only to keep that
+  // proportional split's per-meal protein/carbs under MEAL_PROTEIN_CAP/
+  // MEAL_CARB_CAP, so it doesn't apply here and is skipped entirely.
+  // Breakfast and snacks are unaffected either way — they're always
+  // additive on top of the main meals, for every plan.
+  const isMatterCorePlan = normalizeText(customer?.planName) === 'matter core';
 
   const sortedDayKeys = Array.from(new Set(selectedMeals.map((m) => getDateKey(m?.date)))).sort();
   const deliveryNumberByDay = new Map(sortedDayKeys.map((key, idx) => [key, idx + 1]));
@@ -358,6 +425,90 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
     return acc;
   }, {});
 
+  // A single meal's protein/carbs must never exceed these — kitchen portion
+  // control, not a nutrition target. When honoring that cap would otherwise
+  // leave a meal short of what the proportional split calls for, the day's
+  // breakfast automatically escalates to a large, FIXED macro profile
+  // (not scaled from whatever preset is assigned — always exactly this) so
+  // the customer's daily total still lands on target without any single
+  // meal's portion growing past the cap.
+  const MEAL_PROTEIN_CAP = 65;
+  const MEAL_CARB_CAP = 75;
+  const LARGE_BREAKFAST_FIXED_MACROS = { C: 200, P: 150, F: 0 };
+
+  // Trial-runs a day's non-breakfast/non-snack meals against a given
+  // breakfast macro deduction and reports whether any meal's raw (pre-cap)
+  // protein or carbs would exceed the per-meal cap.
+  const dayWouldExceedCap = (dayKey, dayMeta, breakfastMacros) => {
+    const dayMeals = mealsByDay[dayKey] || [];
+    const dayMealCount = Math.max(1, dayMeta.nonBreakfastCount || Number(customer?.mealPerDay) || 1);
+    const deliveryNumber = deliveryNumberByDay.get(dayKey) || 1;
+    const macroAdjustment = getMacroAdjustment(deliveryNumber);
+
+    const daySnackMeals = dayMeals.filter((m) => normalizeText(m?.mealType) === 'snack');
+    const daySnackTotals = daySnackMeals.reduce((acc, m) => {
+      const preset = resolveSnackPresetForMeal(m, snackPresetsByName);
+      const snackMacros = preset || {
+        C: Number(m?.snackMacros?.C) || 0,
+        P: Number(m?.snackMacros?.P) || 0,
+        F: Number(m?.snackMacros?.F) || 0
+      };
+      return {
+        C: acc.C + snackMacros.C,
+        P: acc.P + snackMacros.P,
+        F: acc.F + snackMacros.F
+      };
+    }, { C: 0, P: 0, F: 0 });
+
+    const carbsDefault = Math.max(0, normalizedMacros.C - breakfastMacros.C - daySnackTotals.C);
+    const proteinDefault = Math.max(0, normalizedMacros.P - breakfastMacros.P - daySnackTotals.P);
+    const fatsDefault = Math.max(0, normalizedMacros.F - breakfastMacros.F - daySnackTotals.F);
+
+    const carbsBase = (carbsDefault / dayMealCount) + (carbsDefault * macroAdjustment);
+    const proteinBase = (proteinDefault / dayMealCount) + (proteinDefault * macroAdjustment);
+    const fatsBase = (fatsDefault / dayMealCount) + (fatsDefault * macroAdjustment);
+
+    return dayMeals
+      .filter((m) => {
+        const t = normalizeText(m?.mealType);
+        return t !== 'breakfast' && t !== 'snack';
+      })
+      .some((meal) => {
+        const type = resolveProteinType(meal);
+        const computed = calculateByProteinRule({ type, carbsBase, proteinBase, fatsBase, meta: dayMeta, meal });
+        return Math.round(computed.P) > MEAL_PROTEIN_CAP || Math.round(computed.C) > MEAL_CARB_CAP;
+      });
+  };
+
+  // dateKey -> true once escalated to the fixed large-breakfast profile;
+  // dateKey -> true if a meal would still exceed the cap even after that
+  // (accepted — flagged for kitchen visibility, nothing further attempted).
+  const dayUsesLargeBreakfast = new Set();
+  const dayHasMacroShortfall = new Set();
+
+  sortedDayKeys.forEach((dayKey) => {
+    if (isMatterCorePlan) return;
+    const dayMeals = mealsByDay[dayKey] || [];
+    const dayMeta = buildDayMealMeta(dayMeals);
+    if (!dayMeta.hasBreakfast || dayMeta.nonBreakfastCount === 0) return;
+
+    const breakfastMeal = dayMeals.find((m) => normalizeText(m?.mealType) === 'breakfast');
+    const defaultPreset = resolveBreakfastPresetForMeal(breakfastMeal, breakfastPreset);
+    const defaultProteinRaw = Number(defaultPreset.P) || 0;
+    const defaultBreakfastMacros = {
+      C: Number(defaultPreset.C) || 0,
+      P: defaultProteinRaw <= 30 ? 30 : defaultProteinRaw,
+      F: Number(defaultPreset.F) || 0
+    };
+
+    if (dayWouldExceedCap(dayKey, dayMeta, defaultBreakfastMacros)) {
+      dayUsesLargeBreakfast.add(dayKey);
+      if (dayWouldExceedCap(dayKey, dayMeta, LARGE_BREAKFAST_FIXED_MACROS)) {
+        dayHasMacroShortfall.add(dayKey);
+      }
+    }
+  });
+
   const normalizedMeals = selectedMeals.map((meal, index) => {
     const mealType = normalizeText(meal.mealType);
     const isBreakfast = mealType === 'breakfast';
@@ -365,17 +516,25 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
     const type = resolveProteinType(meal);
 
     if (isBreakfast) {
+      const dayKey = getDateKey(meal?.date);
+      const autoLarge = dayUsesLargeBreakfast.has(dayKey);
       const mealBreakfastPreset = resolveBreakfastPresetForMeal(meal, breakfastPreset);
-      const mealBreakfastProtein = (Number(mealBreakfastPreset.P) || 0) <= 30 ? 30 : (Number(mealBreakfastPreset.P) || 0);
-      const proteinWeight = Number(mealBreakfastPreset?.isLargeBreakfast) ? 150 : 100;
-      const carbWeight = Number(mealBreakfastPreset?.isLargeBreakfast) ? 200 : 100;
-      const vegWeight = getBreakfastVegWeight(mealBreakfastPreset);
+      const isLarge = autoLarge || !!mealBreakfastPreset?.isLargeBreakfast;
+      const proteinWeight = isLarge ? 150 : 100;
+      const carbWeight = isLarge ? 150 : 100;
+      // Breakfast never includes a veg portion, for every plan.
+      const vegWeight = 0;
       const totalWeight = proteinWeight + carbWeight + vegWeight;
-      const breakfastMacros = {
-        C: Number(mealBreakfastPreset.C) || 0,
-        P: mealBreakfastProtein,
-        F: Number(mealBreakfastPreset.F) || 0
-      };
+      // Auto-escalated days use the fixed large-breakfast macro profile
+      // outright (never the assigned item's own preset values) — see
+      // LARGE_BREAKFAST_FIXED_MACROS above for why.
+      const breakfastMacros = autoLarge
+        ? { ...LARGE_BREAKFAST_FIXED_MACROS }
+        : {
+            C: Number(mealBreakfastPreset.C) || 0,
+            P: (Number(mealBreakfastPreset.P) || 0) <= 30 ? 30 : (Number(mealBreakfastPreset.P) || 0),
+            F: Number(mealBreakfastPreset.F) || 0
+          };
       return {
         ...meal,
         category: 'breakfast',
@@ -387,7 +546,11 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
         proteinWeight,
         carbWeight,
         vegWeight,
-        position: index + 1
+        position: index + 1,
+        flags: {
+          autoUpgradedToLarge: autoLarge,
+          macroShortfall: dayHasMacroShortfall.has(dayKey)
+        }
       };
     }
 
@@ -396,7 +559,12 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
       const carbWeight = 50;
       const vegWeight = 0;
       const totalWeight = proteinWeight + carbWeight + vegWeight;
-      const snackMacros = {
+      // Global snack preset (by name) takes priority — that's this snack's
+      // own fixed macro value. Falls back to whatever's already stored on
+      // the meal (the per-date option's C/P/F, divided by snacksPerDay at
+      // assignment time) when no preset name matches.
+      const presetMatch = resolveSnackPresetForMeal(meal, snackPresetsByName);
+      const snackMacros = presetMatch || {
         C: Number(meal?.snackMacros?.C) || 0,
         P: Number(meal?.snackMacros?.P) || 0,
         F: Number(meal?.snackMacros?.F) || 0
@@ -416,11 +584,52 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
       };
     }
 
-    const dayMeals = mealsByDay[getDateKey(meal?.date)] || [];
+    const dayKey = getDateKey(meal?.date);
+    const dayMeals = mealsByDay[dayKey] || [];
     const dayMeta = buildDayMealMeta(dayMeals);
     const dayMealCount = Math.max(1, dayMeta.nonBreakfastCount || Number(customer?.mealPerDay) || 1);
-    const deliveryNumber = deliveryNumberByDay.get(getDateKey(meal?.date)) || 1;
+
+    if (isMatterCorePlan) {
+      // normalizedMacros.C/P are this customer's TOTAL DAILY carb/protein
+      // WEIGHT (grams of food) here, not macro-nutrient grams — split evenly
+      // across the day's main meals (breakfast/snacks are separate and
+      // additive, never subtracted from this count or this weight).
+      const perMealCarbWeight = normalizedMacros.C / dayMealCount;
+      const perMealProteinWeight = normalizedMacros.P / dayMealCount;
+      const tableMatch = lookupMatterCoreMacros(perMealCarbWeight, perMealProteinWeight);
+
+      const proteinWeight = Math.round(perMealProteinWeight);
+      const carbWeight = Math.round(perMealCarbWeight);
+      // Matter Core meals don't include a veg portion at all, unlike every
+      // other plan's fixed 80g.
+      const vegWeight = 0;
+      const weight = proteinWeight + carbWeight + vegWeight;
+      const macros = tableMatch ? { C: tableMatch.C, P: tableMatch.P, F: tableMatch.F } : { C: 0, P: 0, F: 0 };
+
+      return {
+        ...meal,
+        category: 'meal',
+        macros: {
+          ...macros,
+          calories: calculateCalories(macros)
+        },
+        weight,
+        proteinWeight,
+        carbWeight,
+        vegWeight,
+        position: index + 1,
+        flags: {
+          matterCorePlan: true,
+          matterCoreLookupMissing: !tableMatch,
+          matterCorePerMealCarbWeight: Math.round(perMealCarbWeight * 100) / 100,
+          matterCorePerMealProteinWeight: Math.round(perMealProteinWeight * 100) / 100
+        }
+      };
+    }
+
+    const deliveryNumber = deliveryNumberByDay.get(dayKey) || 1;
     const macroAdjustment = getMacroAdjustment(deliveryNumber);
+    const dayAutoLargeBreakfast = dayUsesLargeBreakfast.has(dayKey);
 
     const dayBreakfastMeal = dayMeals.find((m) => normalizeText(m?.mealType) === 'breakfast') || null;
     const dayBreakfastPreset = dayBreakfastMeal
@@ -429,20 +638,37 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
     const dayBreakfastProteinRaw = Number(dayBreakfastPreset.P) || 0;
     const dayBreakfastProtein = dayBreakfastProteinRaw <= 30 ? 30 : dayBreakfastProteinRaw;
 
-    // Apply breakfast deductions only when breakfast exists on this specific day.
-    const breakfastCarbsForDefault = dayMeta.hasBreakfast ? (Number(dayBreakfastPreset.C) || 0) : 0;
-    const breakfastProteinForDefault = dayMeta.hasBreakfast ? dayBreakfastProtein : 0;
-    const breakfastFatsForDefault = dayMeta.hasBreakfast ? (Number(dayBreakfastPreset.F) || 0) : 0;
+    // Apply breakfast deductions only when breakfast exists on this specific
+    // day. A day auto-escalated to the large breakfast profile always uses
+    // the fixed macros (never the assigned item's own preset values).
+    const breakfastCarbsForDefault = dayMeta.hasBreakfast
+      ? (dayAutoLargeBreakfast ? LARGE_BREAKFAST_FIXED_MACROS.C : (Number(dayBreakfastPreset.C) || 0))
+      : 0;
+    const breakfastProteinForDefault = dayMeta.hasBreakfast
+      ? (dayAutoLargeBreakfast ? LARGE_BREAKFAST_FIXED_MACROS.P : dayBreakfastProtein)
+      : 0;
+    const breakfastFatsForDefault = dayMeta.hasBreakfast
+      ? (dayAutoLargeBreakfast ? LARGE_BREAKFAST_FIXED_MACROS.F : (Number(dayBreakfastPreset.F) || 0))
+      : 0;
 
-    // Snack macros only reduce the day's remaining budget for Custom-plan
-    // customers — everyone else keeps their snack without it affecting
-    // the other meals' portions.
-    const daySnackMeals = isCustomPlan ? dayMeals.filter((m) => normalizeText(m?.mealType) === 'snack') : [];
-    const daySnackTotals = daySnackMeals.reduce((acc, m) => ({
-      C: acc.C + (Number(m?.snackMacros?.C) || 0),
-      P: acc.P + (Number(m?.snackMacros?.P) || 0),
-      F: acc.F + (Number(m?.snackMacros?.F) || 0)
-    }), { C: 0, P: 0, F: 0 });
+    // Snack macros reduce the day's remaining budget for every plan except
+    // Matter Core (which never reaches this point — see the early return
+    // above): whatever a customer's snack actually contains comes out of
+    // their day's total before the rest is split across main meals.
+    const daySnackMeals = dayMeals.filter((m) => normalizeText(m?.mealType) === 'snack');
+    const daySnackTotals = daySnackMeals.reduce((acc, m) => {
+      const preset = resolveSnackPresetForMeal(m, snackPresetsByName);
+      const snackMacros = preset || {
+        C: Number(m?.snackMacros?.C) || 0,
+        P: Number(m?.snackMacros?.P) || 0,
+        F: Number(m?.snackMacros?.F) || 0
+      };
+      return {
+        C: acc.C + snackMacros.C,
+        P: acc.P + snackMacros.P,
+        F: acc.F + snackMacros.F
+      };
+    }, { C: 0, P: 0, F: 0 });
 
     const carbsDefault = Math.max(0, normalizedMacros.C - breakfastCarbsForDefault - daySnackTotals.C);
     const proteinDefault = Math.max(0, normalizedMacros.P - breakfastProteinForDefault - daySnackTotals.P);
@@ -465,9 +691,16 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
     const proteinValue = computed.P;
     const fatValue = computed.F;
 
-    const carbsRounded = Math.round(carbsValue);
-    const proteinRounded = Math.round(proteinValue);
+    const carbsRoundedRaw = Math.round(carbsValue);
+    const proteinRoundedRaw = Math.round(proteinValue);
     const fatsRounded = Math.round(fatValue);
+
+    // Kitchen portion cap — a single meal never exceeds this, even if that
+    // means it comes in under its proportional share (the day's breakfast
+    // was already sized, above, to make up for that where possible).
+    const wasCapped = proteinRoundedRaw > MEAL_PROTEIN_CAP || carbsRoundedRaw > MEAL_CARB_CAP;
+    const proteinRounded = Math.min(proteinRoundedRaw, MEAL_PROTEIN_CAP);
+    const carbsRounded = Math.min(carbsRoundedRaw, MEAL_CARB_CAP);
 
     const carbsWeight = getCarbMealWeight(carbsRounded);
     const proteinWeight = getProteinMealWeight(proteinRounded);
@@ -498,7 +731,9 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
         isFish: type === 'fish',
         manualProteinType: normalizeText(meal.manualProteinType || '') || null,
         deliveryNumber,
-        macroAdjustment
+        macroAdjustment,
+        macroCapped: wasCapped,
+        macroShortfall: dayHasMacroShortfall.has(dayKey)
       }
     };
   });
@@ -510,22 +745,38 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
     customerId: customer?.customerId,
     customerName: [customer?.firstName, customer?.lastName].filter(Boolean).join(' ').trim(),
     email: customer?.email,
+    cpf: customer?.cpf ?? null,
     macros: normalizedMacros,
     snacksPerDay: customer?.snacksPerDay ?? null,
     planName: customer?.planName ?? null,
     deliveryAddress: customer?.deliveryAddress ?? null,
     deliveryWindow: customer?.deliveryWindow ?? null,
+    // Dietary restrictions from the Matter website subscription (resolved via
+    // matterSubscriptionId for an internally-matched customer, same as the
+    // rest of this nutrition data) — display only here, not used for filtering.
+    dietaryRestrictions: Array.isArray(customer?.dietaryRestrictions) ? customer.dietaryRestrictions : [],
     missingSelection: !!customer?.missingSelection,
     missingSelectionDate: customer?.missingSelectionDate ?? null,
     breakfastPreset: {
       C: breakfastCarbs,
       P: breakfastProtein,
       F: breakfastFats,
-      V: getBreakfastVegWeight(defaultBreakfast)
+      V: 0
     },
     selectedMeals: normalizedMeals,
     totalWeight,
     totalCalories,
+    // True if any day's meals still needed more protein/carbs than the
+    // per-meal cap allows even after that day's breakfast auto-upgraded to
+    // the large fixed profile — surfaced so kitchen staff can see at a
+    // glance which customers are coming in under their daily macro target
+    // this way, without digging into every meal.
+    hasMacroShortfall: dayHasMacroShortfall.size > 0,
+    // Matter Core only: true if any meal's per-meal carb/protein weight
+    // (total weight ÷ meals that day) didn't land on one of the known
+    // weight->macro combinations — that meal was left at 0 macros and needs
+    // a human to fill in, rather than a guessed value.
+    hasMatterCoreLookupIssue: normalizedMeals.some((meal) => meal?.flags?.matterCoreLookupMissing),
     mealCount: selectedMeals.filter((meal) => normalizeText(meal.mealType) !== 'breakfast').length
   };
 };

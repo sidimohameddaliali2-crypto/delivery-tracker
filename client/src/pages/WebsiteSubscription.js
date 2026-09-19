@@ -45,6 +45,9 @@ function CustomerListPanel({ selectedId, onSelect }) {
   const [search, setSearch] = useState('');
   const [statusTab, setStatusTab] = useState('all');
   const [visibleCount, setVisibleCount] = useState(PAGE_STEP);
+  const [noMatchIds, setNoMatchIds] = useState(new Set());
+  const [noMatchOnly, setNoMatchOnly] = useState(false);
+  const [noMatchError, setNoMatchError] = useState('');
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -64,6 +67,38 @@ function CustomerListPanel({ selectedId, onSelect }) {
   }, []);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Which of these subscriptions have no internal customer match, computed
+  // in bulk in one call (the same email -> name cascade as GET
+  // /customers/match, minus phone — the list endpoint doesn't return phone
+  // numbers, only the full per-subscription detail does).
+  useEffect(() => {
+    if (allSubscriptions.length === 0) {
+      setNoMatchIds(new Set());
+      setNoMatchError('');
+      return undefined;
+    }
+    let mounted = true;
+    setNoMatchError('');
+    api.post('/customers/match/bulk', {
+      subscriptions: allSubscriptions.map((s) => ({
+        subscriptionId: s.subscription_id,
+        email: s.email,
+        name: s.name,
+      })),
+    })
+      .then((res) => {
+        if (mounted) setNoMatchIds(new Set((res.data?.data?.unmatchedIds || []).map(String)));
+      })
+      .catch((err) => {
+        console.error('Bulk customer match failed:', err);
+        if (mounted) {
+          setNoMatchIds(new Set());
+          setNoMatchError('Could not check internal matches.');
+        }
+      });
+    return () => { mounted = false; };
+  }, [allSubscriptions]);
 
   const statusCounts = useMemo(() => {
     const counts = { all: allSubscriptions.length, active: 0, renewal: 0, cycleEnded: 0, cancelled: 0 };
@@ -85,15 +120,16 @@ function CustomerListPanel({ selectedId, onSelect }) {
       if (statusTab === 'renewal' && !isDueForRenewal(s)) return false;
       if (statusTab === 'cycleEnded' && !cycleEnded) return false;
       if (statusTab === 'cancelled' && s.subscription_status !== 'cancelled') return false;
+      if (noMatchOnly && !noMatchIds.has(String(s.subscription_id))) return false;
       if (term) {
         const haystack = `${s.name || ''} ${s.email || ''} ${s.subscription_id || ''} ${s.customer_id || ''}`.toLowerCase();
         if (!haystack.includes(term)) return false;
       }
       return true;
     });
-  }, [allSubscriptions, statusTab, search]);
+  }, [allSubscriptions, statusTab, search, noMatchOnly, noMatchIds]);
 
-  useEffect(() => { setVisibleCount(PAGE_STEP); }, [statusTab, search]);
+  useEffect(() => { setVisibleCount(PAGE_STEP); }, [statusTab, search, noMatchOnly]);
 
   const visible = filtered.slice(0, visibleCount);
 
@@ -130,6 +166,19 @@ function CustomerListPanel({ selectedId, onSelect }) {
             {tab.label}
           </button>
         ))}
+        <button
+          onClick={() => setNoMatchOnly((v) => !v)}
+          title="Show only subscriptions with no internal customer match"
+          className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${
+            noMatchOnly ? 'bg-matter-red/15 text-matter-red' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+          }`}
+        >
+          <span className="material-symbols-outlined text-[14px]">person_off</span>
+          No internal match{noMatchIds.size > 0 ? ` (${noMatchIds.size})` : ''}
+        </button>
+        {noMatchError && (
+          <span className="text-xs text-matter-red self-center">{noMatchError}</span>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto no-scrollbar space-y-2 min-h-[200px]">
@@ -485,6 +534,15 @@ function CustomerProfilePanel({ subscriptionId }) {
   const [showPauseModal, setShowPauseModal] = useState(false);
   const [activeTab, setActiveTab] = useState('logistics');
 
+  // Manual "Internal Customer Match" linking — for when the automatic
+  // email/phone/name match finds nothing (or finds the wrong record).
+  const [showLinkPicker, setShowLinkPicker] = useState(false);
+  const [linkSearch, setLinkSearch] = useState('');
+  const [linkResults, setLinkResults] = useState([]);
+  const [linkSearching, setLinkSearching] = useState(false);
+  const [linkingId, setLinkingId] = useState(null);
+  const [linkError, setLinkError] = useState('');
+
   const loadProfile = useCallback(() => {
     if (!subscriptionId) return undefined;
     let mounted = true;
@@ -512,7 +570,9 @@ function CustomerProfilePanel({ subscriptionId }) {
     if (!profile) return;
     let mounted = true;
     setMatchLoading(true);
-    api.get('/customers/match', { params: { email: profile.email, phone: profile.phone, name: profile.name } })
+    api.get('/customers/match', {
+      params: { email: profile.email, phone: profile.phone, name: profile.name, subscriptionId: profile.subscription_id },
+    })
       .then((res) => { if (mounted) setMatch(res.data?.data || null); })
       .catch((err) => {
         console.error('Customer match failed:', err);
@@ -521,6 +581,49 @@ function CustomerProfilePanel({ subscriptionId }) {
       .finally(() => mounted && setMatchLoading(false));
     return () => { mounted = false; };
   }, [profile]);
+
+  // Search internal customers to manually link one to this subscription.
+  useEffect(() => {
+    if (!showLinkPicker) return undefined;
+    const q = linkSearch.trim();
+    if (!q) {
+      setLinkResults([]);
+      return undefined;
+    }
+    let mounted = true;
+    setLinkSearching(true);
+    const timer = setTimeout(() => {
+      api.get('/customers', { params: { search: q, limit: 8 } })
+        .then((res) => { if (mounted) setLinkResults(res.data?.data || []); })
+        .catch((err) => {
+          console.error('Customer search failed:', err);
+          if (mounted) setLinkResults([]);
+        })
+        .finally(() => mounted && setLinkSearching(false));
+    }, 300);
+    return () => { mounted = false; clearTimeout(timer); };
+  }, [showLinkPicker, linkSearch]);
+
+  const handleLinkCustomer = async (customerId) => {
+    if (!profile?.subscription_id) return;
+    setLinkingId(customerId);
+    setLinkError('');
+    try {
+      const res = await api.post('/customers/match/link', {
+        customerId,
+        subscriptionId: profile.subscription_id,
+      });
+      setMatch(res.data?.data || null);
+      setShowLinkPicker(false);
+      setLinkSearch('');
+      setLinkResults([]);
+    } catch (err) {
+      console.error('Failed to link customer:', err);
+      setLinkError(err.response?.data?.message || 'Could not link this customer.');
+    } finally {
+      setLinkingId(null);
+    }
+  };
 
   useEffect(() => {
     const customerId = match?.customer?.customerId;
@@ -652,9 +755,18 @@ function CustomerProfilePanel({ subscriptionId }) {
       <div className="grid grid-cols-12 gap-4 mb-4">
         <div className="col-span-12 lg:col-span-7 bg-white rounded-2xl border border-matter-dust/40 shadow-md p-6">
           <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-1">Subscription</p>
-          <h3 className="font-serif-mgmt text-xl font-bold text-matter-navy mb-4">{profile.plan?.name || 'No plan'}</h3>
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
+            <h3 className="font-serif-mgmt text-xl font-bold text-matter-navy">{profile.plan?.name || 'No plan'}</h3>
+            {profile.breakfast_included && (
+              <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-matter-green/30 text-matter-navy">
+                Breakfast included
+              </span>
+            )}
+          </div>
           <div className="grid grid-cols-2 gap-y-4 gap-x-3 mb-4">
-            <MiniField label="Meals / Day" value={profile.total_meals} />
+            {/* API's total_meals is the meal count for the whole cycle, not a
+                daily figure — the per-day count lives at plan.meal_frequency. */}
+            <MiniField label="Meal per day" value={profile.plan?.meal_frequency} />
             <MiniField label="Snacks / Day" value={profile.snacks_per_day} />
             <MiniField label="Duration" value={durationDays !== null ? `${durationDays} days` : '—'} />
             <MiniField label="Days Remaining" value={daysRemaining !== null ? daysRemaining : '—'} />
@@ -794,9 +906,76 @@ function CustomerProfilePanel({ subscriptionId }) {
                       <MiniField label="Internal ID" value={match.customer.customerId} />
                       <MiniField label="Email" value={match.customer.email} />
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowLinkPicker((v) => !v)}
+                      className="text-xs text-matter-navy underline underline-offset-2 hover:opacity-70 mt-2"
+                    >
+                      Not the right customer? Link a different one
+                    </button>
                   </div>
                 ) : (
-                  <p className="text-sm text-gray-400">No matching internal customer found.</p>
+                  <div>
+                    <p className="text-sm text-gray-400 mb-2">No matching internal customer found — their email and phone don't match anything on file.</p>
+                    {!showLinkPicker && (
+                      <button
+                        type="button"
+                        onClick={() => setShowLinkPicker(true)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-matter-sky text-matter-navy rounded-lg text-xs font-semibold hover:opacity-90 transition"
+                      >
+                        <span className="material-symbols-outlined text-[16px]">link</span>
+                        Link a customer manually
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {showLinkPicker && (
+                  <div className="mt-3 border border-matter-dust/50 rounded-xl p-3 bg-gray-50">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs font-semibold text-gray-700">Find the internal customer</p>
+                      <button
+                        type="button"
+                        onClick={() => { setShowLinkPicker(false); setLinkSearch(''); setLinkResults([]); setLinkError(''); }}
+                        className="text-gray-400 hover:text-gray-700"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      autoFocus
+                      value={linkSearch}
+                      onChange={(e) => setLinkSearch(e.target.value)}
+                      placeholder="Search by name, email, or customer ID…"
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-matter-sky focus:border-matter-sky mb-2"
+                    />
+                    {linkError && <p className="text-xs text-matter-red mb-2">{linkError}</p>}
+                    {linkSearching ? (
+                      <p className="text-xs text-gray-400">Searching…</p>
+                    ) : linkSearch.trim() && linkResults.length === 0 ? (
+                      <p className="text-xs text-gray-400">No internal customers match "{linkSearch.trim()}".</p>
+                    ) : (
+                      <div className="flex flex-col gap-1.5 max-h-56 overflow-y-auto">
+                        {linkResults.map((c) => (
+                          <div key={c.customerId} className="flex items-center justify-between gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium text-gray-900 truncate">{c.firstName} {c.lastName}</p>
+                              <p className="text-xs text-gray-500 truncate">{c.email || 'No email'} · {c.customerId}</p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleLinkCustomer(c.customerId)}
+                              disabled={linkingId === c.customerId}
+                              className="flex-shrink-0 px-3 py-1.5 bg-matter-navy text-white rounded-lg text-xs font-semibold hover:opacity-90 disabled:opacity-50"
+                            >
+                              {linkingId === c.customerId ? 'Linking…' : 'Link'}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
 

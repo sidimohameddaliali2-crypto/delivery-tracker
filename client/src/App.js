@@ -33,6 +33,7 @@ import BatchAutoAssign from './pages/BatchAutoAssign';
 import TestAPI from './pages/TestAPI';
 import MenuManagement from './pages/MenuManagement';
 import KitchenList from './pages/KitchenList';
+import KitchenCounting from './pages/KitchenCounting';
 import MenuSelectPage from './pages/MenuSelectPage';
 import MenuSelectionLinkPage from './pages/MenuSelectionLinkPage';
 import MatterCore from './pages/MatterCore';
@@ -584,6 +585,16 @@ function App() {
                 <PermissionBasedRoute permission="kitchen_list">
                   <Layout>
                     <KitchenList />
+                  </Layout>
+                </PermissionBasedRoute>
+              </ProtectedRoute>
+            } />
+
+            <Route path="/kitchen-counting" element={
+              <ProtectedRoute allowKitchen>
+                <PermissionBasedRoute permission="kitchen_counting">
+                  <Layout>
+                    <KitchenCounting />
                   </Layout>
                 </PermissionBasedRoute>
               </ProtectedRoute>

@@ -1,6 +1,7 @@
 import express from 'express';
 import Customer from '../models/Customer.js';
 import Delivery from '../models/Delivery.js';
+import { resolveCustomerMatch, resolveCustomerMatchBulk } from '../services/customerMatchService.js';
 
 const router = express.Router();
 
@@ -397,77 +398,7 @@ router.post('/', async (req, res) => {
     if (existingCustomer) {
       return res.status(409).json({
         success: false,
-        message: existingCustomer.email.toLowerCase() === email.toLowerCase() 
-          ? `Customer with email ${email} already exists`
-          : `Customer with ID ${customerId} already exists`
-      });
-    }
-
-    // Create new customer
-    const newCustomer = new Customer({
-      customerId: customerId.trim(),
-      firstName: firstName.trim(),
-      lastName: lastName?.trim() || '',
-      email: email.trim(),
-      phone: phone?.trim() || '',
-      company: company?.trim() || '',
-      dataSource: 'ManualEntry'
-    });
-
-    await newCustomer.save();
-
-    res.status(201).json({
-      success: true,
-      message: 'Customer created successfully',
-      data: newCustomer
-    });
-  } catch (error) {
-    console.error('Error creating customer:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error creating customer',
-      error: error.message
-    });
-  }
-});
-
-/**
- * Create a new customer
- * POST /api/customers
- */
-router.post('/', async (req, res) => {
-  try {
-    const { customerId, firstName, lastName, email, phone, company } = req.body;
-
-    // Validate required fields
-    if (!customerId || !firstName || !email) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing required fields: customerId, firstName, and email are required'
-      });
-    }
-
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid email format'
-      });
-    }
-
-    // Check if customer already exists
-    const existingCustomer = await Customer.findOne({
-      $or: [
-        { email: buildEmailRegex(email) },
-        { customerId: customerId.trim() }
-      ]
-    });
-
-    if (existingCustomer) {
-      return res.status(409).json({
-        success: false,
-        message: existingCustomer.email.toLowerCase() === email.toLowerCase() 
+        message: existingCustomer.email.toLowerCase() === email.toLowerCase()
           ? `Customer with email ${email} already exists`
           : `Customer with ID ${customerId} already exists`
       });
@@ -667,49 +598,129 @@ router.patch('/:customerId', async (req, res) => {
 
 const normalizePhoneDigits = (value) => String(value || '').replace(/\D/g, '');
 const phoneSuffix = (value, len = 9) => normalizePhoneDigits(value).slice(-len);
-const MATCH_PROJECTION = 'customerId email firstName lastName phone company planStartDate cycleDuration amountPaid discount mealExclusion';
 
 /**
  * Match a customer against an external record (e.g. a Matter website
- * subscription) by cascading through email -> phone -> name, in that order
- * of confidence. Stops at the first level that finds a match.
- * GET /api/customers/match?email=&phone=&name=
+ * subscription) by cascading through: a saved manual link -> email -> phone
+ * -> name, in that order of confidence. Stops at the first level that finds
+ * a match. A manual link (see POST /match/link below) always wins over the
+ * automatic email/phone/name guess, since a human already confirmed it.
+ * Delegates to customerMatchService so this stays in lockstep with the bulk
+ * version below and with the Kitchen auto-populate job.
+ * GET /api/customers/match?email=&phone=&name=&subscriptionId=
  */
 router.get('/match', async (req, res) => {
   try {
-    const { email, phone, name } = req.query;
-    let customer = null;
-    let matchedBy = null;
-
-    if (email && String(email).trim()) {
-      customer = await Customer.findOne({ email: buildEmailRegex(email) }).select(MATCH_PROJECTION);
-      if (customer) matchedBy = 'email';
-    }
-
-    if (!customer && phone) {
-      const suffix = phoneSuffix(phone);
-      if (suffix) {
-        const candidates = await Customer.find({ phone: { $exists: true, $ne: '' } }).select(MATCH_PROJECTION);
-        customer = candidates.find((c) => phoneSuffix(c.phone) === suffix) || null;
-        if (customer) matchedBy = 'phone';
-      }
-    }
-
-    if (!customer && name && String(name).trim()) {
-      const parts = String(name).trim().split(/\s+/);
-      const firstName = parts[0];
-      const lastName = parts.slice(1).join(' ');
-      const query = lastName
-        ? { firstName: new RegExp(`^${escapeRegex(firstName)}$`, 'i'), lastName: new RegExp(`^${escapeRegex(lastName)}$`, 'i') }
-        : { firstName: new RegExp(`^${escapeRegex(firstName)}$`, 'i') };
-      customer = await Customer.findOne(query).select(MATCH_PROJECTION);
-      if (customer) matchedBy = 'name';
-    }
-
+    const { email, phone, name, subscriptionId } = req.query;
+    const { customer, matchedBy } = await resolveCustomerMatch({ email, phone, name, subscriptionId });
     res.json({ success: true, data: { customer, matchedBy } });
   } catch (error) {
     console.error('Error matching customer:', error);
     res.status(500).json({ success: false, message: 'Error matching customer', error: error.message });
+  }
+});
+
+/**
+ * Manually link an internal customer to an external (Matter website)
+ * subscription id, for when the automatic email/phone/name match in GET
+ * /match finds nothing (or finds the wrong record). Saved on the customer as
+ * matterSubscriptionId, so it wins over the auto-match on every later load.
+ *
+ * A subscription can only ever point at one customer: linking it here first
+ * clears it off whichever customer (if any) had it before.
+ *
+ * POST /api/customers/match/link  { customerId, subscriptionId }
+ */
+router.post('/match/link', async (req, res) => {
+  try {
+    const { customerId, subscriptionId } = req.body || {};
+    if (!customerId || !subscriptionId) {
+      return res.status(400).json({ success: false, message: 'customerId and subscriptionId are required' });
+    }
+
+    const subId = String(subscriptionId).trim();
+
+    await Customer.updateMany(
+      { matterSubscriptionId: subId, customerId: { $ne: customerId } },
+      { $set: { matterSubscriptionId: null } }
+    );
+
+    const customer = await Customer.findOneAndUpdate(
+      { customerId },
+      { $set: { matterSubscriptionId: subId } },
+      { new: true }
+    ).select(MATCH_PROJECTION);
+
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+
+    res.json({ success: true, data: { customer, matchedBy: 'manual' } });
+  } catch (error) {
+    console.error('Error linking customer to subscription:', error);
+    res.status(500).json({ success: false, message: 'Error linking customer', error: error.message });
+  }
+});
+
+/**
+ * Remove a manual subscription link, e.g. to fix a mistaken match.
+ * POST /api/customers/match/unlink  { subscriptionId }
+ */
+router.post('/match/unlink', async (req, res) => {
+  try {
+    const { subscriptionId } = req.body || {};
+    if (!subscriptionId) {
+      return res.status(400).json({ success: false, message: 'subscriptionId is required' });
+    }
+    await Customer.updateMany(
+      { matterSubscriptionId: String(subscriptionId).trim() },
+      { $set: { matterSubscriptionId: null } }
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error unlinking customer from subscription:', error);
+    res.status(500).json({ success: false, message: 'Error unlinking customer', error: error.message });
+  }
+});
+
+/**
+ * Bulk version of GET /match, for the "No internal match" filter on the
+ * subscription list — checking hundreds of subscriptions one at a time
+ * (each doing its own Customer.find) would be far too slow for a list view.
+ * One Customer query, then every subscription is matched against it in
+ * memory via the same cascade as GET /match (manual link -> email -> phone
+ * -> name), using the shared customerMatchService so the two views can no
+ * longer disagree. Phone-level matches only appear here if the caller's
+ * subscription payload actually includes a `phone` field — the subscription
+ * list endpoint historically didn't send one, so until that's added a
+ * phone-only match still won't surface until the subscription is opened via
+ * GET /match. That's a caller-side gap, not a matching-logic one.
+ *
+ * POST /api/customers/match/bulk  { subscriptions: [{ subscriptionId, email, name, phone }] }
+ * -> { unmatchedIds: [subscriptionId, ...] }
+ */
+router.post('/match/bulk', async (req, res) => {
+  try {
+    const { subscriptions } = req.body || {};
+    if (!Array.isArray(subscriptions) || subscriptions.length === 0) {
+      return res.json({ success: true, data: { unmatchedIds: [] } });
+    }
+
+    const customers = await Customer.find({})
+      .select('email firstName lastName phone matterSubscriptionId')
+      .lean();
+
+    const results = resolveCustomerMatchBulk(customers, subscriptions);
+
+    const unmatchedIds = subscriptions
+      .filter((s) => s && s.subscriptionId != null)
+      .map((s) => String(s.subscriptionId))
+      .filter((subId) => !results.get(subId)?.customer);
+
+    res.json({ success: true, data: { unmatchedIds } });
+  } catch (error) {
+    console.error('Error bulk-matching customers:', error);
+    res.status(500).json({ success: false, message: 'Error bulk-matching customers', error: error.message });
   }
 });
 

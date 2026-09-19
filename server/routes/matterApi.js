@@ -33,6 +33,25 @@ router.get('/subscriptions/nutrition-by-email', protect, async (req, res) => {
   }
 });
 
+// Same as nutrition-by-email, but keyed by Matter subscription_id — for
+// customers whose internal Customer.email doesn't match their Matter
+// subscription's email (linked instead via Customer.matterSubscriptionId in
+// Customer Management's "Internal Customer Match" panel).
+router.get('/subscriptions/nutrition-by-subscription-id', protect, async (req, res) => {
+  try {
+    const { subscriptionId } = req.query;
+    if (!subscriptionId) {
+      return res.status(400).json({ success: false, message: 'subscriptionId is required' });
+    }
+    const data = await matterApiService.getSubscriptionNutritionBySubscriptionId(subscriptionId);
+    res.json({ success: true, data });
+  } catch (error) {
+    const status = error?.response?.status || 500;
+    console.error('Matter API nutrition-by-subscription-id error:', error.response?.data || error.message);
+    res.status(status).json({ success: false, message: describeMatterApiError(error) || 'Failed to fetch subscription nutrition', error: error.response?.data || error.message });
+  }
+});
+
 // Find active, non-cycle-ended subscriptions with a scheduled delivery on a
 // given date, or across a date range when dateTo is also passed (per their
 // own delivery_schedule). Expensive — checks every active/paused

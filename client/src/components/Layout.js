@@ -52,6 +52,7 @@ const NAV_ITEMS = [
 
   { name: 'Menus', href: '/menus', icon: Menu, permission: 'menus', group: 'Kitchen & Menus' },
   { name: 'Kitchen List', href: '/kitchen-list', icon: UtensilsCrossed, permission: 'kitchen_list', group: 'Kitchen & Menus' },
+  { name: 'Kitchen Counting', href: '/kitchen-counting', icon: BarChart3, permission: 'kitchen_counting', group: 'Kitchen & Menus' },
   { name: 'Matter Core', href: '/matter-core', icon: FileText, permission: 'matter_core', group: 'Kitchen & Menus' },
 
   { name: 'Partners', href: '/admin/partners', icon: Building2, permission: 'partners', group: 'Partners' },

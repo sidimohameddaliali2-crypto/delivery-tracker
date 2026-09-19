@@ -40,6 +40,7 @@ export const PERMISSION_GROUPS = [
     items: [
       { key: 'menus', label: 'Menus', description: 'Weekly menus and meal planning' },
       { key: 'kitchen_list', label: 'Kitchen List', description: 'Kitchen preparation lists' },
+      { key: 'kitchen_counting', label: 'Kitchen Counting', description: 'Meal cook-counts and prep weights, exportable to Excel' },
       { key: 'matter_core', label: 'Matter Core', description: 'Matter Core documents' },
     ],
   },
@@ -72,7 +73,7 @@ const ROLE_DEFAULT_KEYS = {
   admin: [
     'dashboard', 'deliveries', 'drivers', 'fleet', 'delivery_changes', 'bags', 'reports', 'events', 'complaints',
     'customers', 'website_subscriptions', 'subscription', 'customer_analytics', 'renewal',
-    'menus', 'kitchen_list', 'matter_core', 'partners', 'users', 'employees',
+    'menus', 'kitchen_list', 'kitchen_counting', 'matter_core', 'partners', 'users', 'employees',
     'late_deliveries', 'live_map',
   ],
   manager: [
@@ -88,7 +89,7 @@ const ROLE_DEFAULT_KEYS = {
   viewer: ['dashboard', 'reports'],
   store_keeper: ['bags'],
   yellowblock_user: ['events', 'yellowblock'],
-  kitchen: ['kitchen_list', 'partners'],
+  kitchen: ['kitchen_list', 'kitchen_counting', 'partners'],
 };
 
 export const getDefaultPermissions = (role) => {

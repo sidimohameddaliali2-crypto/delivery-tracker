@@ -11,7 +11,9 @@ const customerSchema = new mongoose.Schema({
   email: {
     type: String,
     sparse: true,
-    index: true
+    index: true,
+    lowercase: true,
+    trim: true
   },
   cpf: {
     type: String,
@@ -23,6 +25,19 @@ const customerSchema = new mongoose.Schema({
   phone: String,
   company: String,
   address: String,
+
+  // Manual override for the automatic email/phone/name match against a
+  // Matter website subscription (see GET /api/customers/match). Set from
+  // Customer Management's "Internal Customer Match" panel when the
+  // subscription's email/phone don't match anything here automatically —
+  // once set, it takes priority over the auto-match every time, so a
+  // dispatcher never has to re-link the same customer twice.
+  matterSubscriptionId: {
+    type: String,
+    default: null,
+    index: true,
+    sparse: true
+  },
 
   // Geocoded location, cached here (not just per-delivery) so a customer's
   // address is only ever sent to Google Geocoding once. Every delivery for
@@ -178,5 +193,9 @@ const customerSchema = new mongoose.Schema({
 customerSchema.index({ customerId: 1 }, { unique: true });
 customerSchema.index({ email: 1 }, { unique: true, sparse: true }); // Sparse allows multiple null values
 customerSchema.index({ athleatId: 1 }, { sparse: true });
+// One Matter subscription can only ever belong to one internal customer.
+// Enforced here at the DB level in addition to the clear-then-set app logic
+// in POST /api/customers/match/link.
+customerSchema.index({ matterSubscriptionId: 1 }, { unique: true, sparse: true });
 
 export default mongoose.model('Customer', customerSchema);

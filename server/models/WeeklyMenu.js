@@ -25,6 +25,23 @@ const mainMealOptionSchema = new mongoose.Schema({
   exclusions: { type: [String], default: [] }
 }, { _id: false });
 
+const breakfastOptionSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  // Ingredient/allergen tags this breakfast contains — matched against the
+  // customer's exclusion list, same as snack/main-meal options. Macros are
+  // NOT stored here: they're resolved at read time by name against the
+  // menu's breakfastPresetsByName (the same global preset system used by
+  // the kitchen weight calculator), so one upload feeds both.
+  exclusions: { type: [String], default: [] }
+}, { _id: false });
+
+// Matter Core plan customers get a simpler, purely positional rotation: no
+// type (chicken/beef/fish), no exclusion filtering — a customer needing 2
+// meals just gets list[0] and list[1], in the order the kitchen entered them.
+const matterCoreMealOptionSchema = new mongoose.Schema({
+  name: { type: String, required: true }
+}, { _id: false });
+
 const weeklyMenuSchema = new mongoose.Schema({
   // Menu info
   title: {
@@ -128,12 +145,18 @@ const weeklyMenuSchema = new mongoose.Schema({
     default: () => ({})
   },
 
-  // Kitchen-defined snack ingredient options per date (YYYY-MM-DD keys).
-  // The customer never chooses these — they're auto-assigned at random,
-  // excluding anything on the customer's exclusion list.
+  // Kitchen-defined snack ingredient options per date (YYYY-MM-DD keys), split
+  // into a "first snack" and "second snack" pool. The customer never chooses
+  // these — Auto-Assign fills each day's snack slots by drawing slot 1 (and
+  // every odd-numbered slot) from `first`, slot 2 (and every even-numbered
+  // slot) from `second`, each pick random within its pool and excluding
+  // anything on the customer's exclusion list.
   snackOptionsByDate: {
     type: Map,
-    of: [snackOptionSchema],
+    of: {
+      first: { type: [snackOptionSchema], default: [] },
+      second: { type: [snackOptionSchema], default: [] }
+    },
     default: () => ({})
   },
 
@@ -146,6 +169,28 @@ const weeklyMenuSchema = new mongoose.Schema({
       mainMeals: { type: [mainMealOptionSchema], default: [] },
       subMeals: { type: [mainMealOptionSchema], default: [] }
     },
+    default: () => ({})
+  },
+
+  // Kitchen-defined breakfast rotation per date (YYYY-MM-DD keys) — which
+  // breakfast names (from breakfastPresetsByName) are offered that day, and
+  // their exclusion tags. Used by Auto-Assign Main Meals to fill a
+  // customer's breakfast slot when their profile has breakfastInclude set.
+  breakfastOptionsByDate: {
+    type: Map,
+    of: [breakfastOptionSchema],
+    default: () => ({})
+  },
+
+  // Kitchen-defined meal rotation per date for Matter Core plan customers —
+  // a plain ordered list (no type, no exclusions). Auto-populate assigns
+  // these positionally: a customer needing N meals gets list[0]..list[N-1]
+  // (offset by however many they already have that day), first breakfast
+  // option and first snack option/pool pick, no randomization or exclusion
+  // filtering — Matter Core customers get whatever's next on the list.
+  matterCoreMealOptionsByDate: {
+    type: Map,
+    of: [matterCoreMealOptionSchema],
     default: () => ({})
   },
 

@@ -91,7 +91,42 @@ class MatterApiService {
       snacks_per_day: subscription.snacks_per_day ?? null,
       plan_name: subscription.plan?.name ?? null,
       customer_addresses: subscription.customer_addresses || [],
-      delivery_window: subscription.delivery_window || null
+      delivery_window: subscription.delivery_window || null,
+      // Dietary restrictions — same field findSubscriptionsWithDeliveryInRange
+      // already pulls for exclusion filtering; surfaced here too so the
+      // Kitchen List customer card can display them.
+      exclusions: (subscription.exclusions || []).map((ex) => ex.title).filter(Boolean),
+      // Used to cross-reference this subscription against internal Customer
+      // records (customerMatchService) when the subscription's own email
+      // doesn't match anything internally.
+      customer_name: subscription.name || null,
+      phone: subscription.phone || null
+    };
+  }
+
+  /**
+   * Same shape as getSubscriptionNutritionByEmail, but for when the internal
+   * Customer's email doesn't match their Matter website subscription's email
+   * (e.g. Athleat/manual account setup used a different address). Customer
+   * Management's "Internal Customer Match" panel links these two records by
+   * setting Customer.matterSubscriptionId — when that's set, this looks the
+   * subscription up directly instead of guessing by email.
+   */
+  async getSubscriptionNutritionBySubscriptionId(subscriptionId) {
+    if (!subscriptionId) return null;
+    const detail = await this.getSubscription(subscriptionId);
+    const subscription = detail?.data;
+    if (!subscription) return null;
+
+    return {
+      subscription_id: subscription.subscription_id,
+      macros: subscription.macros || null,
+      total_calories: subscription.total_calories ?? null,
+      snacks_per_day: subscription.snacks_per_day ?? null,
+      plan_name: subscription.plan?.name ?? null,
+      customer_addresses: subscription.customer_addresses || [],
+      delivery_window: subscription.delivery_window || null,
+      exclusions: (subscription.exclusions || []).map((ex) => ex.title).filter(Boolean)
     };
   }
 
@@ -208,6 +243,32 @@ class MatterApiService {
   }
 
   /**
+   * Fetches each subscription's full detail with bounded concurrency, maps
+   * it through `mapFn`, and drops any that failed or mapped to null/[].
+   * Shared by the "every active subscription's full detail" exports below —
+   * they only differ in which fields they pull off the detail record.
+   */
+  async #fetchDetailsConcurrently(subs, mapFn, concurrency = 20) {
+    const results = [];
+    for (let i = 0; i < subs.length; i += concurrency) {
+      const batch = subs.slice(i, i + concurrency);
+      const batchResults = await Promise.all(batch.map(async (sub) => {
+        try {
+          const detail = await this.getSubscription(sub.subscription_id);
+          const subscription = detail?.data;
+          if (!subscription) return null;
+          return mapFn(sub, subscription);
+        } catch (error) {
+          console.error(`Failed to fetch detail for subscription ${sub.subscription_id}:`, error.message);
+          return null;
+        }
+      }));
+      results.push(...batchResults.flat().filter((r) => r !== null && r !== undefined));
+    }
+    return results;
+  }
+
+  /**
    * All active subscriptions' contact info (name/email/phone/address).
    * Phone and address only exist on the full-detail record, so this fetches
    * every active subscription's detail — hundreds of calls — meant to be
@@ -217,31 +278,12 @@ class MatterApiService {
     const all = await this.listAllSubscriptions();
     const activeSubs = all.filter((sub) => sub.subscription_status === 'active');
 
-    const CONCURRENCY = 20;
-    const contacts = [];
-
-    for (let i = 0; i < activeSubs.length; i += CONCURRENCY) {
-      const batch = activeSubs.slice(i, i + CONCURRENCY);
-      const results = await Promise.all(batch.map(async (sub) => {
-        try {
-          const detail = await this.getSubscription(sub.subscription_id);
-          const subscription = detail?.data;
-          if (!subscription) return null;
-          return {
-            name: subscription.name || sub.name,
-            email: subscription.email || sub.email,
-            phone: subscription.phone || '',
-            address: formatAddress(subscription.customer_addresses?.[0])
-          };
-        } catch (error) {
-          console.error(`Failed to fetch contact info for subscription ${sub.subscription_id}:`, error.message);
-          return null;
-        }
-      }));
-      contacts.push(...results.filter(Boolean));
-    }
-
-    return contacts;
+    return this.#fetchDetailsConcurrently(activeSubs, (sub, subscription) => ({
+      name: subscription.name || sub.name,
+      email: subscription.email || sub.email,
+      phone: subscription.phone || '',
+      address: formatAddress(subscription.customer_addresses?.[0])
+    }));
   }
 
   /**
@@ -254,32 +296,13 @@ class MatterApiService {
     const all = await this.listAllSubscriptions();
     const activeSubs = all.filter((sub) => sub.subscription_status === 'active');
 
-    const CONCURRENCY = 20;
-    const results = [];
-
-    for (let i = 0; i < activeSubs.length; i += CONCURRENCY) {
-      const batch = activeSubs.slice(i, i + CONCURRENCY);
-      const batchResults = await Promise.all(batch.map(async (sub) => {
-        try {
-          const detail = await this.getSubscription(sub.subscription_id);
-          const subscription = detail?.data;
-          if (!subscription) return null;
-          return {
-            subscription_id: sub.subscription_id,
-            customer_id: sub.customer_id,
-            email: subscription.email || sub.email,
-            gross_paid: subscription.gross_paid ?? null,
-            currency: subscription.currency ?? null
-          };
-        } catch (error) {
-          console.error(`Failed to fetch financials for subscription ${sub.subscription_id}:`, error.message);
-          return null;
-        }
-      }));
-      results.push(...batchResults.filter(Boolean));
-    }
-
-    return results;
+    return this.#fetchDetailsConcurrently(activeSubs, (sub, subscription) => ({
+      subscription_id: sub.subscription_id,
+      customer_id: sub.customer_id,
+      email: subscription.email || sub.email,
+      gross_paid: subscription.gross_paid ?? null,
+      currency: subscription.currency ?? null
+    }));
   }
 
   /**
@@ -291,33 +314,16 @@ class MatterApiService {
     const all = await this.listAllSubscriptions();
     const activeSubs = all.filter((sub) => sub.subscription_status === 'active');
 
-    const CONCURRENCY = 20;
-    const results = [];
-
-    for (let i = 0; i < activeSubs.length; i += CONCURRENCY) {
-      const batch = activeSubs.slice(i, i + CONCURRENCY);
-      const batchResults = await Promise.all(batch.map(async (sub) => {
-        try {
-          const detail = await this.getSubscription(sub.subscription_id);
-          const subscription = detail?.data;
-          if (!subscription) return null;
-          const addresses = subscription.customer_addresses || [];
-          const activeAddress = addresses.find((a) => a.status === 'active') || addresses[0];
-          return {
-            subscription_id: sub.subscription_id,
-            plan_name: subscription.plan?.name || sub.plan?.name || null,
-            created_at: subscription.created_at || subscription.starting_date || null,
-            zone: activeAddress?.area || null
-          };
-        } catch (error) {
-          console.error(`Failed to fetch analytics detail for subscription ${sub.subscription_id}:`, error.message);
-          return null;
-        }
-      }));
-      results.push(...batchResults.filter(Boolean));
-    }
-
-    return results;
+    return this.#fetchDetailsConcurrently(activeSubs, (sub, subscription) => {
+      const addresses = subscription.customer_addresses || [];
+      const activeAddress = addresses.find((a) => a.status === 'active') || addresses[0];
+      return {
+        subscription_id: sub.subscription_id,
+        plan_name: subscription.plan?.name || sub.plan?.name || null,
+        created_at: subscription.created_at || subscription.starting_date || null,
+        zone: activeAddress?.area || null
+      };
+    });
   }
 }
 

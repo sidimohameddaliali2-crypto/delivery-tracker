@@ -53,6 +53,48 @@ const fmtShort = (value) => {
   return `${DAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate()}`;
 };
 
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// Whether a delivery day's selection deadline (deliveryDate - daysBefore
+// calendar days, at deadlineTime, local time) has passed. Pure — no React
+// state — so it can be used both from the render-time day-lock check and
+// from signIn, before `model`/`day` state have even been set.
+const isPastSelectionDeadline = (dateKey, selectionDeadlines) => {
+  if (!dateKey) return false;
+  const deliveryDate = dateFromKey(dateKey);
+  if (Number.isNaN(deliveryDate.getTime())) return false;
+
+  const rule = Array.isArray(selectionDeadlines)
+    ? selectionDeadlines.find((d) => d.deliveryDay === DAY_NAMES[deliveryDate.getDay()])
+    : null;
+
+  if (!rule) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return deliveryDate < today;
+  }
+
+  const deadlineDateLocal = new Date(
+    deliveryDate.getFullYear(),
+    deliveryDate.getMonth(),
+    deliveryDate.getDate() - (rule.daysBefore || 0)
+  );
+  const [hh, mm] = String(rule.deadlineTime || '23:59').split(':').map(Number);
+  deadlineDateLocal.setHours(hh, mm, 59, 999);
+  return new Date() > deadlineDateLocal;
+};
+
+// Index of the first day whose deadline hasn't passed yet — so a customer
+// opening the link after some days have already closed lands straight on a
+// day they can still act on, instead of a closed Monday. Falls back to 0
+// (and the "Selection closed" banner takes it from there) when every day is
+// already closed, or there's nothing to check.
+const firstAvailableDayIndex = (dayKeys, selectionDeadlines) => {
+  if (!Array.isArray(dayKeys) || dayKeys.length === 0) return 0;
+  const idx = dayKeys.findIndex((k) => !isPastSelectionDeadline(k, selectionDeadlines));
+  return idx === -1 ? 0 : idx;
+};
+
 const tokens = (value) =>
   String(value || '')
     .split(/[,;|\n\r/]+/)
@@ -207,6 +249,7 @@ const MenuSelectionLink = ({ token }) => {
   const [submitting, setSubmitting] = useState(false);
   const toastTimer = useRef(null);
   const phoneRef = useRef(null); // the scrollable container (see msl-phone below)
+  const activeTabRef = useRef(null); // the current day's tab, inside the horizontally-scrolling strip
 
   // "Save and go to next day" (and picking a day tab directly) should always
   // land at the top of that day's meals, not wherever the page happened to be
@@ -220,6 +263,14 @@ const MenuSelectionLink = ({ token }) => {
       window.scrollTo({ top: 0 });
     }
   }, [day, preview]);
+
+  // Bring the current day's tab into view within the horizontally-scrolling
+  // strip — matters most right after sign-in, when the landing day may not
+  // be Monday (see firstAvailableDayIndex) and would otherwise sit
+  // off-screen to the right with no visual cue which day is showing.
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [day]);
 
   /* -- load the real menu by share token -- */
   useEffect(() => {
@@ -327,7 +378,9 @@ const MenuSelectionLink = ({ token }) => {
       setQty(preQty);
       setSkipped({});
       setAcknowledged({});
-      setDay(0);
+      // Land on the first day that isn't already closed, instead of always
+      // opening on Monday even when Monday (and maybe more) has passed.
+      setDay(firstAvailableDayIndex(built.dayKeys, rawMenu?.selectionDeadlines));
       setStep('menu');
     } catch (err) {
       setEmailError(
@@ -351,38 +404,12 @@ const MenuSelectionLink = ({ token }) => {
     [model, qty]
   );
 
-  // Whether a delivery day's selection deadline has passed — mirrors the
-  // formula in the old MenuSelection.jsx / the Menu Management admin tools:
-  // a day locks at (deliveryDate - daysBefore calendar days) at
-  // deadlineTime, local time. Preview/demo mode never locks — there's no
-  // real menu (or real deadlines) behind it.
+  // Whether a delivery day's selection deadline has passed (see
+  // isPastSelectionDeadline above) — mirrors the formula in the old
+  // MenuSelection.jsx / the Menu Management admin tools. Preview/demo mode
+  // never locks — there's no real menu (or real deadlines) behind it.
   const isDayDeadlineLocked = useCallback(
-    (dateKey) => {
-      if (preview || !dateKey) return false;
-      const deliveryDate = dateFromKey(dateKey);
-      if (Number.isNaN(deliveryDate.getTime())) return false;
-
-      const deadlines = rawMenu?.selectionDeadlines;
-      const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-      const rule = Array.isArray(deadlines)
-        ? deadlines.find((d) => d.deliveryDay === DAY_NAMES[deliveryDate.getDay()])
-        : null;
-
-      if (!rule) {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        return deliveryDate < today;
-      }
-
-      const deadlineDateLocal = new Date(
-        deliveryDate.getFullYear(),
-        deliveryDate.getMonth(),
-        deliveryDate.getDate() - (rule.daysBefore || 0)
-      );
-      const [hh, mm] = String(rule.deadlineTime || '23:59').split(':').map(Number);
-      deadlineDateLocal.setHours(hh, mm, 59, 999);
-      return new Date() > deadlineDateLocal;
-    },
+    (dateKey) => (preview ? false : isPastSelectionDeadline(dateKey, rawMenu?.selectionDeadlines)),
     [preview, rawMenu]
   );
 
@@ -892,6 +919,7 @@ const MenuSelectionLink = ({ token }) => {
           {dayTabs.map((d) => (
             <button
               key={d.key}
+              ref={d.current ? activeTabRef : undefined}
               className="btn"
               onClick={d.onClick}
               style={{

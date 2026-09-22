@@ -41,6 +41,17 @@ const AREA_FILTER_OPTIONS = [
   'Ajman'
 ];
 
+// Matter's own `emirate` field sometimes carries a sub-area suffix (found
+// live, 2026-09-22: "Abu Dhabi - Al Dana", "Abu Dhabi - Khalifa City", 8
+// variants in total) and inconsistent casing ("DUBAI" vs "Dubai") — an
+// emirate filter needs the real, clean emirate name, not a dozen near-
+// duplicate entries that all mean the same emirate.
+const normalizeEmirateLabel = (city) => {
+  if (!city) return '';
+  const base = city.split(' - ')[0].trim();
+  return base.replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+};
+
 const statusPills = {
   pending: 'bg-amber-100 text-amber-800',
   assigned: 'bg-blue-100 text-blue-800',
@@ -65,6 +76,7 @@ const DispatcherDesktop = () => {
   };
 
   const [areaFilters, setAreaFilters] = useState([]);
+  const [emirateFilters, setEmirateFilters] = useState([]);
   const [driverFilters, setDriverFilters] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [areaSearchTerm, setAreaSearchTerm] = useState('');
@@ -82,6 +94,7 @@ const DispatcherDesktop = () => {
   const [routePreviewError, setRoutePreviewError] = useState('');
   const [feedback, setFeedback] = useState({ message: '', error: false });
   const [areaDropdownOpen, setAreaDropdownOpen] = useState(false);
+  const [emirateDropdownOpen, setEmirateDropdownOpen] = useState(false);
   const [driverFilterDropdownOpen, setDriverFilterDropdownOpen] = useState(false);
   const [timingDropdownOpen, setTimingDropdownOpen] = useState(false);
   const [showUnassignedOnly, setShowUnassignedOnly] = useState(false);
@@ -109,6 +122,7 @@ const DispatcherDesktop = () => {
   });
 
   const areaButtonRef = useRef(null);
+  const emirateButtonRef = useRef(null);
   const driverFilterButtonRef = useRef(null);
   const timingButtonRef = useRef(null);
 
@@ -149,6 +163,17 @@ const DispatcherDesktop = () => {
     document.addEventListener('mousedown', handleClickAway);
     return () => document.removeEventListener('mousedown', handleClickAway);
   }, [areaDropdownOpen]);
+
+  useEffect(() => {
+    if (!emirateDropdownOpen) return;
+    const handleClickAway = (event) => {
+      if (emirateButtonRef.current && !emirateButtonRef.current.contains(event.target)) {
+        setEmirateDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickAway);
+    return () => document.removeEventListener('mousedown', handleClickAway);
+  }, [emirateDropdownOpen]);
 
   useEffect(() => {
     if (!driverFilterDropdownOpen) return;
@@ -194,6 +219,23 @@ const DispatcherDesktop = () => {
     return zones.sort((a, b) => a.localeCompare(b));
   }, [deliveries, showUnassignedOnly]);
 
+  // Emirate filter (owner, 2026-09-22) — reads addressDetails.city, the
+  // field the Matter delivery import populates from each subscription's
+  // address (see server/services/matterDeliveryImportService.js). Only
+  // Matter-imported deliveries have this filled in today, so older/manual
+  // deliveries just won't have an emirate to filter by yet.
+  const emirateOptions = useMemo(() => {
+    const emirateSource = deliveries.filter((delivery) => !showUnassignedOnly || !delivery.driver);
+    const emirates = Array.from(
+      new Set(
+        emirateSource
+          .map((delivery) => normalizeEmirateLabel(delivery.addressDetails?.city))
+          .filter(Boolean)
+      )
+    );
+    return emirates.sort((a, b) => a.localeCompare(b));
+  }, [deliveries, showUnassignedOnly]);
+
   const filteredAreaOptions = useMemo(() => {
     if (!areaSearchTerm.trim()) {
       return areaOptions;
@@ -212,6 +254,8 @@ const DispatcherDesktop = () => {
   const normalizedSearch = searchTerm.trim().toLowerCase();
   const normalizedAreaFilters = areaFilters.map((area) => area.toLowerCase().trim());
   const normalizedAreaFiltersKey = normalizedAreaFilters.join('|');
+  const normalizedEmirateFilters = emirateFilters.map((emirate) => emirate.toLowerCase().trim());
+  const normalizedEmirateFiltersKey = normalizedEmirateFilters.join('|');
   const driverFiltersKey = driverFilters.join('|');
 
   const filteredDeliveries = useMemo(() => {
@@ -241,6 +285,15 @@ const DispatcherDesktop = () => {
         return false;
       }
 
+      const deliveryEmirate = normalizeEmirateLabel(delivery.addressDetails?.city).toLowerCase();
+      const emirateMatch =
+        normalizedEmirateFilters.length === 0 ||
+        (deliveryEmirate && normalizedEmirateFilters.includes(deliveryEmirate));
+
+      if (!emirateMatch) {
+        return false;
+      }
+
       const driverMatch =
         driverFilters.length === 0 ||
         driverFilters.includes(delivery.driver?._id) ||
@@ -265,7 +318,7 @@ const DispatcherDesktop = () => {
     return filtered.sort(
       (a, b) => new Date(a.scheduledTime).getTime() - new Date(b.scheduledTime).getTime()
     );
-  }, [deliveries, normalizedAreaFiltersKey, driverFiltersKey, normalizedSearch, showUnassignedOnly, showCollectionsOnly, timingFilters]);
+  }, [deliveries, normalizedAreaFiltersKey, normalizedEmirateFiltersKey, driverFiltersKey, normalizedSearch, showUnassignedOnly, showCollectionsOnly, timingFilters]);
 
   const driverLoadCounts = useMemo(() => {
     const counts = {};
@@ -307,11 +360,19 @@ const DispatcherDesktop = () => {
     return map;
   }, [sortedDrivers]);
 
+  // 12-hour lowercase clock ("6:00am", "3:00am") — owner, 2026-09-22:
+  // Matter's delivery_window label ("By 6 AM") should read this way once
+  // converted to a scheduled time, not the previous 24-hour "06:00".
+  // Minutes are always shown for consistency even on the hour.
   const formatTime = (value) => {
     if (!value) return '--:--';
     const date = new Date(value);
+    let hours = date.getHours();
+    const minutes = date.getMinutes();
+    const ampm = hours >= 12 ? 'pm' : 'am';
+    hours = hours % 12 || 12;
     const pad = (n) => String(n).padStart(2, '0');
-    return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    return `${hours}:${pad(minutes)}${ampm}`;
   };
 
   const formatDate = (value) => {
@@ -367,6 +428,7 @@ const DispatcherDesktop = () => {
       setSelectedDeliveryIds([]);
       setActiveAssignmentDeliveries([]);
       setAreaFilters([]);
+      setEmirateFilters([]);
       setTimingFilters([]);
       setDriverFilters([]);
       setRoutePreview(null);
@@ -476,6 +538,15 @@ const DispatcherDesktop = () => {
     });
   };
 
+  const toggleEmirateSelection = (emirate) => {
+    setEmirateFilters((prev) => {
+      if (prev.includes(emirate)) {
+        return prev.filter((item) => item !== emirate);
+      }
+      return [...prev, emirate];
+    });
+  };
+
   const toggleDriverSelection = (driverId) => {
     setDriverFilters((prev) => {
       if (prev.includes(driverId)) {
@@ -498,11 +569,16 @@ const DispatcherDesktop = () => {
     setAreaFilters([]);
   };
 
+  const clearEmirateFilters = () => {
+    setEmirateFilters([]);
+  };
+
   const clearDriverFilters = () => {
     setDriverFilters([]);
   };
 
   const areaLabel = areaFilters.length === 0 ? 'All Areas' : areaFilters.join(', ');
+  const emirateLabel = emirateFilters.length === 0 ? 'All Emirates' : emirateFilters.join(', ');
 
   const driverLabel = useMemo(() => {
     if (driverFilters.length === 0) return 'All Drivers';
@@ -737,6 +813,48 @@ const DispatcherDesktop = () => {
                 <div className="border-t border-gray-200 p-2">
                   <button
                     onClick={clearAreaFilters}
+                    className="w-full text-sm text-blue-600 font-semibold hover:bg-blue-50 px-4 py-2 rounded"
+                  >
+                    Clear All
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Emirate Filter */}
+          <div ref={emirateButtonRef} className="relative">
+            <label className="block text-sm font-semibold text-gray-700 mb-2">Emirate</label>
+            <button
+              onClick={() => setEmirateDropdownOpen(!emirateDropdownOpen)}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg text-left bg-white hover:bg-gray-50 flex justify-between items-center"
+            >
+              <span className="truncate text-sm">{emirateLabel}</span>
+              <ChevronDown className={`w-4 h-4 transition ${emirateDropdownOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {emirateDropdownOpen && (
+              <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-gray-300 rounded-lg shadow-lg z-30 max-h-96 overflow-y-auto">
+                <div className="p-2">
+                  {emirateOptions.length === 0 ? (
+                    <p className="px-4 py-2 text-sm text-gray-400">No emirate data on today's deliveries yet.</p>
+                  ) : (
+                    emirateOptions.map((emirate) => (
+                      <button
+                        key={emirate}
+                        onClick={() => toggleEmirateSelection(emirate)}
+                        className={`w-full text-left px-4 py-2 rounded text-sm flex items-center justify-between hover:bg-gray-100 ${
+                          emirateFilters.includes(emirate) ? 'bg-blue-50 text-blue-600' : ''
+                        }`}
+                      >
+                        <span>{emirate}</span>
+                        {emirateFilters.includes(emirate) && <Check className="w-4 h-4" />}
+                      </button>
+                    ))
+                  )}
+                </div>
+                <div className="border-t border-gray-200 p-2">
+                  <button
+                    onClick={clearEmirateFilters}
                     className="w-full text-sm text-blue-600 font-semibold hover:bg-blue-50 px-4 py-2 rounded"
                   >
                     Clear All
@@ -1485,13 +1603,53 @@ const DispatcherDesktop = () => {
               <div className="border-b border-gray-200 pb-4">
                 <h3 className="text-sm font-semibold text-gray-600 mb-3">Delivery Information</h3>
                 <div className="space-y-2">
-                  <div className="flex items-start gap-2">
-                    <MapPin className="w-4 h-4 text-gray-400 flex-shrink-0 mt-0.5" />
-                    <div className="flex-1">
-                      <p className="text-xs text-gray-500">Address</p>
-                      <p className="font-semibold text-gray-900 text-sm">{selectedDeliveryDetail.address || 'Not provided'}</p>
-                    </div>
-                  </div>
+                  {(() => {
+                    const ad = selectedDeliveryDetail.addressDetails || {};
+                    // Owner (2026-09-22): "the delivery address ... need to
+                    // be not one line as before but changed to field: label,
+                    // emirate, area, building, unit, floor, status" — shown
+                    // as separate labeled fields whenever that structured
+                    // data exists (currently: Matter-imported deliveries).
+                    // Older/manually-entered deliveries that only ever had
+                    // the flat string still fall back to the single line.
+                    const hasStructuredAddress = [ad.label, ad.city, ad.area, ad.building, ad.apartment, ad.floor, ad.addressStatus].some(Boolean);
+                    if (!hasStructuredAddress) {
+                      return (
+                        <div className="flex items-start gap-2">
+                          <MapPin className="w-4 h-4 text-gray-400 flex-shrink-0 mt-0.5" />
+                          <div className="flex-1">
+                            <p className="text-xs text-gray-500">Address</p>
+                            <p className="font-semibold text-gray-900 text-sm">{selectedDeliveryDetail.address || 'Not provided'}</p>
+                          </div>
+                        </div>
+                      );
+                    }
+                    const fields = [
+                      ['Label', ad.label],
+                      ['Emirate', ad.city],
+                      ['Area', ad.area],
+                      ['Building', ad.building],
+                      ['Unit', ad.apartment],
+                      ['Floor', ad.floor],
+                      ['Status', ad.addressStatus]
+                    ].filter(([, value]) => value);
+                    return (
+                      <div className="flex items-start gap-2">
+                        <MapPin className="w-4 h-4 text-gray-400 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1">
+                          <p className="text-xs text-gray-500 mb-1">Address</p>
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 bg-gray-50 rounded-lg p-2.5">
+                            {fields.map(([label, value]) => (
+                              <div key={label}>
+                                <p className="text-[11px] text-gray-500">{label}</p>
+                                <p className="font-semibold text-gray-900 text-sm">{value}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {selectedDeliveryDetail.zone && (
                     <div className="flex items-start gap-2">
                       <MapPin className="w-4 h-4 text-gray-400 flex-shrink-0 mt-0.5" />
@@ -1527,6 +1685,15 @@ const DispatcherDesktop = () => {
                         <p className="text-sm text-indigo-900">
                           This was already delivered as part of Saturday ({formatDate(selectedDeliveryDetail.combinedIntoSaturday.scheduledTime)}) — it won't appear in Sunday's lists separately.
                         </p>
+                      </div>
+                    </div>
+                  )}
+                  {selectedDeliveryDetail.matterSubscriptionId && (
+                    <div className="flex items-start gap-2">
+                      <Route className="w-4 h-4 text-gray-400 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-xs text-gray-500">Matter Subscription ID</p>
+                        <p className="font-semibold text-gray-900">#{selectedDeliveryDetail.matterSubscriptionId}</p>
                       </div>
                     </div>
                   )}

@@ -66,7 +66,7 @@ const weeklyMenuSchema = new mongoose.Schema({
     date: Date,
     mealType: {
       type: String,
-      enum: ['breakfast', 'lunch', 'dinner', 'snack']
+      enum: ['breakfast', 'main', 'snack']
     },
     items: [{
       type: mongoose.Schema.Types.ObjectId,

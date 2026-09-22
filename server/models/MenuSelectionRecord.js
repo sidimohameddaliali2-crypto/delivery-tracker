@@ -38,12 +38,17 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   firstName: String,
   lastName: String,
   mealExclusion: String,
+  // The Matter subscription this selection was submitted against — captured
+  // from meal-profile's response at sign-in time and logged here on save,
+  // since the customer-facing flow now resolves identity/plan data directly
+  // from Matter (by exact email) rather than via internal Customer matching.
+  matterSubscriptionId: String,
 
   selectedMeals: [{
     date: Date,
     mealType: {
       type: String,
-      enum: ['breakfast', 'lunch', 'dinner', 'snack']
+      enum: ['breakfast', 'main', 'snack']
     },
     menuItemId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -88,7 +93,41 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     isAutoAssigned: {
       type: Boolean,
       default: false
+    },
+    // A sauce/garnish exclusion match is never shown to the customer or
+    // blocked — the meal is added normally, and this flag (plus the matched
+    // terms) is surfaced only in the Kitchen List so staff know to swap that
+    // component before it goes out.
+    needsSauceChange: {
+      type: Boolean,
+      default: false
+    },
+    needsGarnishChange: {
+      type: Boolean,
+      default: false
+    },
+    sauceConflict: [String],
+    garnishConflict: [String],
+    // Free-text note manually flagged via Kitchen List's "Upload Meal
+    // Remarks" bulk upload (matched by customer + date + meal name) —
+    // kitchen staff mark a specific meal for any correction (e.g. "carb",
+    // "veg", "extra spicy" — whatever the source sheet says), shown next to
+    // that meal both in Kitchen List and on the Day Kitchen Paper PDF as
+    // "Change {remark}". An empty remark clears it, same convention as dayNotes.
+    remark: {
+      type: String,
+      default: ''
     }
+  }],
+
+  // Kitchen-only notes for this customer on a specific delivery day (e.g.
+  // "leave at the gate", "double-check exclusions with the customer") —
+  // never shown to the customer, surfaced in Kitchen List and printed on the
+  // Day Kitchen Paper for that date. One entry per date; an empty note for a
+  // date removes that entry rather than storing a blank string.
+  dayNotes: [{
+    date: { type: String, required: true }, // "YYYY-MM-DD"
+    note: { type: String, required: true }
   }],
 
   // Days the customer chose to skip in the menu-selection link. Each entry

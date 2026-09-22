@@ -4,7 +4,7 @@ const partnerMenuItemSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   mealType: {
     type: String,
-    enum: ['breakfast', 'lunch', 'dinner', 'snack'],
+    enum: ['breakfast', 'main', 'snack'],
     required: true
   },
   description: { type: String, default: '' },

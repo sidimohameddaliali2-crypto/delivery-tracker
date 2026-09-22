@@ -28,6 +28,17 @@ const TYPE_STYLES = {
 
 const EARLY_THRESHOLD_MINUTES = 180;
 
+// Matter's own `emirate` field (addressDetails.city, populated by the
+// Matter delivery import) sometimes carries a sub-area suffix ("Abu Dhabi -
+// Al Dana", "Abu Dhabi - Khalifa City") and inconsistent casing ("DUBAI" vs
+// "Dubai") — collapse to the real emirate name so the filter has one clean
+// entry per emirate instead of a dozen near-duplicates.
+const normalizeEmirateLabel = (city) => {
+  if (!city) return '';
+  const base = city.split(' - ')[0].trim();
+  return base.replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+};
+
 const formatDuration = (minutes = 0) => {
   const value = Math.abs(Math.round(minutes));
   if (value < 60) return `${value}min`;
@@ -89,6 +100,7 @@ const Deliveries = () => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
   const [areaFilter, setAreaFilter] = useState('all');
+  const [emirateFilter, setEmirateFilter] = useState('all');
   const [timingFilter, setTimingFilter] = useState('all');
   const [driverFilter, setDriverFilter] = useState(() => searchParams.get('driver') || 'all');
   const [isLoading, setIsLoading] = useState(true);
@@ -165,6 +177,22 @@ const Deliveries = () => {
     if (areaFilter !== 'all' && !areaOptions.includes(areaFilter)) setAreaFilter('all');
   }, [areaOptions, areaFilter]);
 
+  // Only Matter-imported deliveries have addressDetails.city populated
+  // today, so this list is empty (and the filter hidden) until at least one
+  // such delivery is on the selected date.
+  const emirateOptions = useMemo(() => {
+    const emirates = new Set();
+    deliveries.forEach((d) => {
+      const emirate = normalizeEmirateLabel(d.addressDetails?.city);
+      if (emirate) emirates.add(emirate);
+    });
+    return Array.from(emirates).sort((a, b) => a.localeCompare(b));
+  }, [deliveries]);
+
+  useEffect(() => {
+    if (emirateFilter !== 'all' && !emirateOptions.includes(emirateFilter)) setEmirateFilter('all');
+  }, [emirateOptions, emirateFilter]);
+
   const driverOptions = useMemo(() => {
     const map = new Map();
     deliveries.forEach((d) => { if (d.driver?._id) map.set(d.driver._id, getDriverDisplayName(d.driver)); });
@@ -188,12 +216,13 @@ const Deliveries = () => {
     if (statusFilter !== 'all') filtered = filtered.filter((d) => d.status === statusFilter);
     if (typeFilter !== 'all') filtered = filtered.filter((d) => d.type === typeFilter);
     if (areaFilter !== 'all') filtered = filtered.filter((d) => d.zone?.trim() === areaFilter);
+    if (emirateFilter !== 'all') filtered = filtered.filter((d) => normalizeEmirateLabel(d.addressDetails?.city) === emirateFilter);
     if (driverFilter !== 'all') filtered = filtered.filter((d) => d.driver?._id === driverFilter);
     if (timingFilter === 'late') filtered = filtered.filter((d) => d.lateMinutes > 0);
     else if (timingFilter === 'early') filtered = filtered.filter((d) => d.earlyMinutes > 0);
 
     setFilteredDeliveries(filtered);
-  }, [deliveries, searchTerm, statusFilter, typeFilter, areaFilter, driverFilter, timingFilter]);
+  }, [deliveries, searchTerm, statusFilter, typeFilter, areaFilter, emirateFilter, driverFilter, timingFilter]);
 
   const stats = useMemo(() => ({
     total: deliveries.length,
@@ -230,6 +259,7 @@ const Deliveries = () => {
     setStatusFilter('all');
     setTypeFilter('all');
     setAreaFilter('all');
+    setEmirateFilter('all');
     setDriverFilter('all');
     setTimingFilter('all');
   };
@@ -392,6 +422,12 @@ const Deliveries = () => {
           <select value={areaFilter} onChange={(e) => setAreaFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
             <option value="all">Area: All</option>
             {areaOptions.map((area) => <option key={area} value={area}>{area}</option>)}
+          </select>
+        )}
+        {emirateOptions.length > 0 && (
+          <select value={emirateFilter} onChange={(e) => setEmirateFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
+            <option value="all">Emirate: All</option>
+            {emirateOptions.map((emirate) => <option key={emirate} value={emirate}>{emirate}</option>)}
           </select>
         )}
         <select value={timingFilter} onChange={(e) => setTimingFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">

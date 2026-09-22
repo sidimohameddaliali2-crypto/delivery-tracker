@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
-import { groupExclusions } from '../../constants/exclusionList';
+import { groupExclusions, exclusionMatchesAny } from '../../constants/exclusionList';
+import { toSentenceCase } from '../../utils/textFormat';
 import MatterLogo from './MatterLogo';
 import {
   DEMO_ACCOUNTS,
@@ -19,13 +20,11 @@ const DAYS = DEMO_DAYS;
 const MONTHS = DEMO_MONTHS;
 const COURSES = [
   { key: 'breakfast', label: 'Breakfast' },
-  { key: 'lunch', label: 'Lunch' },
-  { key: 'dinner', label: 'Dinner' },
+  { key: 'main', label: 'Main Meal' },
 ];
 const BAG = {
   breakfast: { bg: 'var(--color-accent-2-200)', fg: 'var(--color-accent-2-900)' },
-  lunch: { bg: 'var(--color-accent-200)', fg: 'var(--color-accent-800)' },
-  dinner: { bg: 'var(--color-neutral-200)', fg: 'var(--color-neutral-800)' },
+  main: { bg: 'var(--color-accent-200)', fg: 'var(--color-accent-800)' },
 };
 
 const toDateKey = (value) => {
@@ -101,6 +100,21 @@ const tokens = (value) =>
     .map((t) => t.trim().toLowerCase())
     .filter(Boolean);
 
+// portion/carb/vegIngredients are tagged [{name, visible}] lists — every
+// ingredient is checked here regardless of its visible flag, since hiding
+// an ingredient from the customer must never hide it from an allergy check.
+const tagTokens = (list) =>
+  (Array.isArray(list) ? list : []).map((t) => String(t?.name || '').trim().toLowerCase()).filter(Boolean);
+
+// Display counterpart to tagTokens — only ingredients marked visible, in
+// their original casing, for what's actually shown to the customer.
+const visibleIngredientNames = (list) =>
+  (Array.isArray(list) ? list : [])
+    .filter((t) => t?.visible !== false)
+    .map((t) => t?.name)
+    .filter(Boolean)
+    .join(', ');
+
 const titleCase = (s) => String(s || '').replace(/\b\w/g, (c) => c.toUpperCase());
 const initialsOf = (name) =>
   String(name || '')
@@ -158,30 +172,45 @@ function buildRealModel(weeklyMenu, profile) {
   rows.forEach((row) => {
     const dayKey = toDateKey(row?.date);
     if (!dayIndexByKey.has(dayKey)) return;
-    const type = String(row?.mealType || '').toLowerCase();
+    // 'lunch'/'dinner' were merged into 'main' — normalize here so menus
+    // saved before the migration still render instead of silently dropping.
+    const rawType = String(row?.mealType || '').toLowerCase();
+    const type = (rawType === 'lunch' || rawType === 'dinner') ? 'main' : rawType;
     if (!COURSES.some((c) => c.key === type)) return;
     (row?.items || []).forEach((item) => {
       if (!item) return;
       const itemId = String(item._id || item);
 
-      // Dietary tokens live on the MenuItem's intolerances / carbs / veg
-      // (comma/semicolon/pipe separated), matched by exact token — same fields
-      // and matching the live MenuSelection.jsx uses.
+      // Dietary tokens live on the MenuItem's intolerances / proteinSource /
+      // carbs / veg / sauce (comma/semicolon/pipe separated), matched by
+      // exact token — same fields and matching the live MenuSelection.jsx
+      // uses (its allergenBlockedIds also now checks proteinSource + sauce).
+      // proteinSource/carbs/veg/sauce hold the searched recipe's own name;
+      // portion/carb/veg/sauceIngredients hold that recipe's actual
+      // ingredients — both get scanned so matching stays precise even though
+      // only the name is shown to the customer.
       const intoleranceTokens = tokens(item.intolerances);
-      const carbTokens = tokens(item.carbs);
-      const vegTokens = tokens(item.veg);
+      const proteinTokens = [...tokens(item.proteinSource), ...tagTokens(item.portionIngredients)];
+      const carbTokens = [...tokens(item.carbs), ...tagTokens(item.carbIngredients)];
+      const vegTokens = [...tokens(item.veg), ...tagTokens(item.vegIngredients)];
+      const sauceTokens = [...tokens(item.sauce), ...tagTokens(item.sauceIngredients)];
+      const garnishTokens = tokens(item.garnish);
       const declaredAllergens = Array.isArray(item.allergens)
         ? item.allergens.map((a) => String(a).trim().toLowerCase()).filter(Boolean)
         : tokens(item.allergens);
 
-      // Hard-block set (vs the customer's allergies): allergens + intolerances +
-      // carbs + veg, as in the live component's allergenBlockedIds.
+      // Hard-block set (vs the customer's allergies): every component,
+      // sauce/garnish included — a real allergy must always block, no matter
+      // which component it's hiding in.
       const allergenMatchTokens = Array.from(
-        new Set([...declaredAllergens, ...intoleranceTokens, ...carbTokens, ...vegTokens])
+        new Set([...declaredAllergens, ...intoleranceTokens, ...proteinTokens, ...carbTokens, ...vegTokens, ...sauceTokens, ...garnishTokens])
       );
-      // Soft-warn set (vs the customer's exclusion phrases).
+      // Soft-warn set (vs the customer's exclusion phrases) — portion/carb/veg
+      // only. A sauce or garnish exclusion match is never shown to the
+      // customer here (this component has no per-field modal like
+      // MenuSelection.jsx's change-carb/change-veg flow to route it through).
       const exclMatchTokens = Array.from(
-        new Set([...intoleranceTokens, ...carbTokens, ...vegTokens])
+        new Set([...proteinTokens, ...carbTokens, ...vegTokens])
       );
 
       const allergensDisplay = Array.from(
@@ -201,8 +230,10 @@ function buildRealModel(weeklyMenu, profile) {
         type,
         name: item.mealName || 'Meal',
         sub: subParts.join(' · '),
-        carbText: String(item.carbs || '').trim(),
-        vegText: String(item.veg || '').trim(),
+        proteinText: [String(item.proteinSource || '').trim(), visibleIngredientNames(item.portionIngredients)].filter(Boolean).join(' — '),
+        carbText: [String(item.carbs || '').trim(), visibleIngredientNames(item.carbIngredients)].filter(Boolean).join(' — '),
+        vegText: [String(item.veg || '').trim(), visibleIngredientNames(item.vegIngredients)].filter(Boolean).join(' — '),
+        sauceText: [String(item.sauce || '').trim(), visibleIngredientNames(item.sauceIngredients)].filter(Boolean).join(' — '),
         allergens: allergensDisplay,
         allergenMatchTokens,
         exclMatchTokens,
@@ -334,12 +365,12 @@ const MenuSelectionLink = ({ token }) => {
 
     try {
       setEmailError('');
-      // No menuId param on purpose: the server only serves this from its 30-min
-      // cache when menuId is present. Without it the profile (plan, meals/day,
-      // exclusions, allergies) is always read fresh from the DB, so a change
-      // made in Customer Management shows up on the link immediately.
+      // Resolves identity/plan data straight from Matter by exact email —
+      // not internal Customer Management matching — so a typed email either
+      // matches a real subscription or gets a clear "contact customer
+      // service" error, never a guessed/fuzzy match to someone else's data.
       const res = await api.get(
-        `/menus/customers/${encodeURIComponent(v)}/meal-profile?email=${encodeURIComponent(v)}`
+        `/menus/customers/${encodeURIComponent(v)}/subscription-profile?email=${encodeURIComponent(v)}`
       );
       const profile = res.data?.data;
       if (!profile) throw new Error('not found');
@@ -355,11 +386,16 @@ const MenuSelectionLink = ({ token }) => {
         email: profile.email || v,
         plan: profile.mealPlan || 'Meal plan',
         perDay: Number(profile.mealPerDay) || 1,
+        // Menu-selection Partner members (Customer.unlimitedMeals) have no daily cap.
+        unlimitedMeals: !!profile.unlimitedMeals,
         allergensDisplay,
         allergensLc: allergensDisplay.map((x) => x.toLowerCase()),
         exclusionsDisplay: exclusionPhrases,
         exclusionPhrases,
         exclusionsLc: exclusionPhrases.map((x) => x.toLowerCase()),
+        // The exact Matter subscription this profile was resolved from —
+        // sent back with the submission so it's logged on the selection record.
+        subscriptionId: profile.subscriptionId || null,
       });
       setModel(built);
 
@@ -383,10 +419,15 @@ const MenuSelectionLink = ({ token }) => {
       setDay(firstAvailableDayIndex(built.dayKeys, rawMenu?.selectionDeadlines));
       setStep('menu');
     } catch (err) {
+      // Prefer the server's own message (e.g. "We could not find an account
+      // under this email. Kindly contact customer service.") over a generic
+      // client-side fallback, since meal-profile no longer guesses at a
+      // possible match — a 404 here means exactly what it says.
       setEmailError(
-        err.response?.status === 404 || err.response?.data?.success === false
-          ? 'No subscription found for this address. Contact support if this is wrong.'
-          : err.response?.data?.message || 'Could not load your plan. Please try again.'
+        err.response?.data?.message
+        || (err.response?.status === 404
+          ? 'We could not find an account under this email. Kindly contact customer service.'
+          : 'Could not load your plan. Please try again.')
       );
     }
   }, [email, preview, rawMenu]);
@@ -394,7 +435,9 @@ const MenuSelectionLink = ({ token }) => {
   /* -- selection helpers -- */
   const dayKeys = model?.dayKeys || [];
   const lastDay = Math.max(0, dayKeys.length - 1);
-  const target = account?.perDay || 3;
+  // Menu-selection Partner members (account.unlimitedMeals) have no daily cap —
+  // Infinity means addWithCap below never blocks another meal being added.
+  const target = account?.unlimitedMeals ? Infinity : (account?.perDay || 3);
 
   const dayCount = useCallback(
     (i) =>
@@ -426,13 +469,14 @@ const MenuSelectionLink = ({ token }) => {
         .filter((a) => account.allergensLc.includes(a));
       if (al.length) return { kind: 'allergen', items: Array.from(new Set(al.map(titleCase))) };
 
-      // soft warn — customer's exclusions found among the meal's dietary tokens
+      // soft warn — customer's exclusions found among the meal's dietary tokens.
+      // exclusionMatchesAny covers umbrella phrases like "All Nuts"/"All Fish"
+      // (see constants/exclusionList.js) as well as an exact match.
       let ex;
       if (preview) {
         ex = (m.dietTags || []).filter((t) => account.exclusionsLc.includes(String(t).toLowerCase()));
       } else {
-        const set = new Set(m.exclMatchTokens || []);
-        ex = (account.exclusionPhrases || []).filter((p) => set.has(String(p).toLowerCase()));
+        ex = (account.exclusionPhrases || []).filter((p) => exclusionMatchesAny(p, m.exclMatchTokens || []));
       }
       if (ex.length) return { kind: 'exclusion', items: Array.from(new Set(ex)) };
       return null;
@@ -544,6 +588,7 @@ const MenuSelectionLink = ({ token }) => {
         weeklyMenuId: rawMenu._id,
         selections,
         skippedDates,
+        subscriptionId: account.subscriptionId || undefined,
       });
       if (res.data?.success) {
         setLockedSkipDays(skipped);
@@ -566,7 +611,8 @@ const MenuSelectionLink = ({ token }) => {
     // customer to fix, so it shouldn't block them from moving on.
     const isSkipped = !!skipped[day];
     const chosen = dayCount(day);
-    if (!isSkipped && !deadlineLockedToday && chosen < target) {
+    // Unlimited customers have no required minimum either — any count (including 0) submits.
+    if (!isSkipped && !deadlineLockedToday && !account?.unlimitedMeals && chosen < target) {
       flash(
         chosen === 0
           ? `Please select ${target} meal${target === 1 ? '' : 's'} for this day, or skip it.`
@@ -579,7 +625,7 @@ const MenuSelectionLink = ({ token }) => {
       return;
     }
     doSubmit();
-  }, [day, dayCount, deadlineLockedToday, doSubmit, flash, lastDay, skipped, target]);
+  }, [account, day, dayCount, deadlineLockedToday, doSubmit, flash, lastDay, skipped, target]);
 
   const resetAll = useCallback(() => {
     setStep('signin');
@@ -638,8 +684,10 @@ const MenuSelectionLink = ({ token }) => {
             m,
             name: m.name,
             sub: m.sub,
+            proteinText: m.proteinText,
             carbText: m.carbText,
             vegText: m.vegText,
+            sauceText: m.sauceText,
             typeLabel: c.label,
             bagBg: blocked ? '#FEE2E2' : bag.bg,
             bagFg: blocked ? '#991B1B' : bag.fg,
@@ -692,7 +740,7 @@ const MenuSelectionLink = ({ token }) => {
         const on = i === day;
         const isSkip = !!skipped[i];
         const n = dayCount(i);
-        const isComplete = !isSkip && target > 0 && n >= target;
+        const isComplete = !isSkip && (account?.unlimitedMeals ? n > 0 : target > 0 && n >= target);
         const isPastDeadline = isDayDeadlineLocked(k);
 
         // Status color always shows — skipped days are amber, fully-picked
@@ -730,7 +778,7 @@ const MenuSelectionLink = ({ token }) => {
           onClick: () => setDay(i),
         };
       }),
-    [day, dayCount, dayKeys, isDayDeadlineLocked, skipped, target]
+    [account, day, dayCount, dayKeys, isDayDeadlineLocked, skipped, target]
   );
 
   const summary = useMemo(
@@ -754,7 +802,7 @@ const MenuSelectionLink = ({ token }) => {
         email: account.email,
         initials: initialsOf(account.name),
         plan: account.plan,
-        perDay: `${account.perDay} meal${account.perDay === 1 ? '' : 's'}`,
+        perDay: account.unlimitedMeals ? 'Unlimited' : `${account.perDay} meal${account.perDay === 1 ? '' : 's'}`,
         flags: [
           ...account.allergensDisplay.map((x) => ({
             label: `${x} allergy`,
@@ -813,7 +861,7 @@ const MenuSelectionLink = ({ token }) => {
   const renderSignIn = () => (
     <div style={{ minHeight: preview ? 844 : '100vh', display: 'flex', flexDirection: 'column', padding: '54px 26px 32px' }}>
       <MatterLogo height={28} style={{ alignSelf: 'flex-start', marginBottom: 40 }} />
-      <h2 style={{ margin: '0 0 30px' }}>{menuName}</h2>
+      <h2 style={{ margin: '0 0 30px' }}>{toSentenceCase(menuName)}</h2>
       <p style={{ margin: '0 0 24px', fontSize: 15, lineHeight: 1.6 }}>
         Enter the email your subscription is registered to. We&apos;ll load your plan and this week&apos;s meals.
       </p>
@@ -912,7 +960,11 @@ const MenuSelectionLink = ({ token }) => {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
           <h5 style={{ margin: 0 }}>{dayHeading}</h5>
           <span className="text-muted" style={{ fontSize: 12 }}>
-            {skippedToday ? 'Skipped' : dayFull ? `${target} of ${target} chosen · full` : `${selectedToday} of ${target} chosen`}
+            {skippedToday
+              ? 'Skipped'
+              : account?.unlimitedMeals
+                ? `${selectedToday} chosen`
+                : dayFull ? `${target} of ${target} chosen · full` : `${selectedToday} of ${target} chosen`}
           </span>
         </div>
         <div style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 8 }}>
@@ -1033,8 +1085,14 @@ const MenuSelectionLink = ({ token }) => {
                               ))}
                             </div>
                           ) : null}
-                          {(mc.carbText || mc.vegText) ? (
+                          {(mc.proteinText || mc.carbText || mc.vegText || mc.sauceText) ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: 14 }}>
+                              {mc.proteinText ? (
+                                <div style={{ fontSize: 12, lineHeight: 1.45 }}>
+                                  <span style={{ color: 'var(--color-neutral-600)', fontWeight: 600 }}>Portion: </span>
+                                  <span className="text-muted">{mc.proteinText}</span>
+                                </div>
+                              ) : null}
                               {mc.carbText ? (
                                 <div style={{ fontSize: 12, lineHeight: 1.45 }}>
                                   <span style={{ color: 'var(--color-neutral-600)', fontWeight: 600 }}>Carb: </span>
@@ -1045,6 +1103,12 @@ const MenuSelectionLink = ({ token }) => {
                                 <div style={{ fontSize: 12, lineHeight: 1.45 }}>
                                   <span style={{ color: 'var(--color-neutral-600)', fontWeight: 600 }}>Veg: </span>
                                   <span className="text-muted">{mc.vegText}</span>
+                                </div>
+                              ) : null}
+                              {mc.sauceText ? (
+                                <div style={{ fontSize: 12, lineHeight: 1.45 }}>
+                                  <span style={{ color: 'var(--color-neutral-600)', fontWeight: 600 }}>Sauce: </span>
+                                  <span className="text-muted">{mc.sauceText}</span>
                                 </div>
                               ) : null}
                             </div>
@@ -1085,7 +1149,7 @@ const MenuSelectionLink = ({ token }) => {
             {skippedToday ? 'This day is skipped' : `Selected for ${dayKeys[day] ? DAYS[dateFromKey(dayKeys[day]).getDay()] : ''}`}
           </span>
           <span style={{ fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-            {skippedToday ? '–' : `${selectedToday}/${target}`}
+            {skippedToday ? '–' : account?.unlimitedMeals ? selectedToday : `${selectedToday}/${target}`}
           </span>
         </div>
         <button className="btn btn-primary btn-block" onClick={onSubmitButton} disabled={submitting} style={{ padding: 14 }}>

@@ -1,5 +1,10 @@
 import express from 'express';
 import mongoose from 'mongoose';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
+import { getS3Client } from '../config/spaces.js';
 import Partner from '../models/Partner.js';
 import PartnerMenuItem from '../models/PartnerMenuItem.js';
 import SpaceMenu from '../models/SpaceMenu.js';
@@ -442,6 +447,101 @@ router.get('/reports/space/:spaceId', async (req, res) => {
   }
 });
 
+// ── Partner profile picture upload ──────────────────────────────────────────
+// Not scoped to :id — the picture can be chosen while still filling in the
+// "Add Space" form, before the partner exists. The client uploads first and
+// attaches the returned URL to the create/update payload as `profilePicture`.
+//
+// Uses the raw S3 client + an explicit public-read ACL (same as
+// /api/upload/delivery-photo) rather than config/spaces.js's getUploadToSpaces
+// (multer-s3), which never sets an ACL — objects it uploads land private, so
+// the public CDN URL 403s and the picture never displays.
+const partnerPicturesDir = path.join(process.cwd(), 'uploads', 'partners');
+const ensurePartnerPicturesDir = () => {
+  if (!fs.existsSync(partnerPicturesDir)) fs.mkdirSync(partnerPicturesDir, { recursive: true });
+};
+const localPartnerPictureUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => { ensurePartnerPicturesDir(); cb(null, partnerPicturesDir); },
+    filename: (req, file, cb) => {
+      const ext = (path.extname(file.originalname) || '.jpg').toLowerCase();
+      cb(null, `partner-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+    }
+  }),
+  limits: { fileSize: 3 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) return cb(null, true);
+    return cb(new Error('Only image files are allowed!'), false);
+  }
+});
+const memoryPartnerPictureUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 3 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) return cb(null, true);
+    return cb(new Error('Only image files are allowed!'), false);
+  }
+});
+
+router.post('/upload-picture', admin, (req, res, next) => {
+  const useSpaces = Boolean(process.env.SPACES_KEY && process.env.SPACES_SECRET && process.env.SPACES_BUCKET);
+  const upload = useSpaces ? memoryPartnerPictureUpload : localPartnerPictureUpload;
+
+  upload.single('image')(req, res, (err) => {
+    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ success: false, message: 'Image is too large. Maximum size is 3MB.' });
+    }
+    if (err) return res.status(400).json({ success: false, message: err.message });
+    next();
+  });
+}, async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
+
+    const useSpaces = Boolean(process.env.SPACES_KEY && process.env.SPACES_SECRET && process.env.SPACES_BUCKET);
+    if (!useSpaces) {
+      return res.json({ success: true, url: `${req.protocol}://${req.get('host')}/uploads/partners/${req.file.filename}` });
+    }
+
+    const s3 = getS3Client();
+    if (!s3) {
+      return res.status(503).json({ success: false, message: 'DigitalOcean Spaces is not configured.' });
+    }
+
+    const ext = (path.extname(req.file.originalname || '') || '.jpg').toLowerCase();
+    const key = `partners/partner-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    const uploadParams = {
+      Bucket: process.env.SPACES_BUCKET,
+      Key: key,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype || 'image/jpeg',
+    };
+
+    try {
+      await s3.send(new PutObjectCommand({ ...uploadParams, ACL: 'public-read' }));
+    } catch (aclErr) {
+      const code = aclErr?.Code || aclErr?.code || aclErr?.$metadata?.httpStatusCode;
+      const isAclError = ['AccessControlListNotSupported', 'AccessDenied', 'InvalidArgument'].includes(String(code))
+        || String(aclErr.message).toLowerCase().includes('acl');
+      if (isAclError) {
+        console.warn('⚠️  ACL upload failed for partner picture, retrying without ACL:', aclErr.message);
+        await s3.send(new PutObjectCommand(uploadParams));
+      } else {
+        throw aclErr;
+      }
+    }
+
+    const cdnBase = process.env.SPACES_CDN_URL?.replace(/\/$/, '');
+    const endpoint = process.env.SPACES_ENDPOINT?.replace(/^https?:\/\//, '');
+    const url = cdnBase ? `${cdnBase}/${key}` : `https://${process.env.SPACES_BUCKET}.${endpoint}/${key}`;
+
+    res.json({ success: true, url });
+  } catch (err) {
+    console.error('Partner picture upload error:', err);
+    res.status(500).json({ success: false, message: 'Upload failed. Please try again.' });
+  }
+});
+
 // ════════════════════════════════════════════════════════════════════════
 // PARTNERS (Spaces) — literal routes above, parameterized below
 // ════════════════════════════════════════════════════════════════════════
@@ -461,13 +561,19 @@ router.get('/', async (req, res) => {
 
 router.post('/', admin, async (req, res) => {
   try {
-    const { email, password, businessName, businessType, contactName, phone, address } = req.body;
+    const { email, password, businessName, businessType, contactName, phone, address, menuSelectionEnabled, presetMacros, profilePicture } = req.body;
     if (!email || !password || !businessName || !businessType || !contactName) {
       return res.status(400).json({ success: false, message: 'email, password, businessName, businessType and contactName are required' });
     }
     const exists = await Partner.findOne({ email: email.toLowerCase().trim() });
     if (exists) return res.status(400).json({ success: false, message: 'A partner with this email already exists' });
-    const partner = await Partner.create({ email: email.toLowerCase().trim(), password, businessName, businessType, contactName, phone: phone || '', address: address || '', createdBy: req.user._id });
+    const partner = await Partner.create({
+      email: email.toLowerCase().trim(), password, businessName, businessType, contactName,
+      phone: phone || '', address: address || '', createdBy: req.user._id,
+      menuSelectionEnabled: !!menuSelectionEnabled,
+      presetMacros: presetMacros || undefined,
+      profilePicture: profilePicture || ''
+    });
     partner.password = undefined;
     res.status(201).json({ success: true, data: partner });
   } catch (err) {
@@ -488,7 +594,7 @@ router.get('/:id', async (req, res) => {
 
 router.patch('/:id', admin, async (req, res) => {
   try {
-    const allowed = ['businessName', 'businessType', 'contactName', 'phone', 'address', 'isActive', 'minimumOrder'];
+    const allowed = ['businessName', 'businessType', 'contactName', 'phone', 'address', 'isActive', 'minimumOrder', 'menuSelectionEnabled', 'presetMacros', 'profilePicture'];
     const updates = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
     const partner = await Partner.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true, runValidators: true });

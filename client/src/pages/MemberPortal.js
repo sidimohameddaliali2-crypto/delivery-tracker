@@ -45,12 +45,11 @@ const weekTabs = () => {
   });
 };
 
-const COURSE_ORDER = ['breakfast', 'lunch', 'dinner', 'snack'];
-const COURSE_LABEL = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner', snack: 'Snacks' };
+const COURSE_ORDER = ['breakfast', 'main', 'snack'];
+const COURSE_LABEL = { breakfast: 'Breakfast', main: 'Main Meal', snack: 'Snacks' };
 const BAG = {
   breakfast: { bg: '#eafbd0', fg: '#2a3f13' },
-  lunch: { bg: '#d9eaff', fg: '#143f7a' },
-  dinner: { bg: '#eef2f9', fg: '#1e3260' },
+  main: { bg: '#d9eaff', fg: '#143f7a' },
   snack: { bg: '#eef2f9', fg: '#1e3260' },
 };
 
@@ -173,9 +172,17 @@ const MemberPortal = () => {
   const orderList = ordersView === 'up' ? upcoming : past;
   const existingCount = ordersByDate[sel]?.length || 0;
 
+  // 'lunch'/'dinner' were merged into 'main' — normalize here so menu items
+  // saved before the migration still group under Main Meal instead of
+  // disappearing from every course.
+  const normalizeCourseKey = (mealType) => {
+    const t = String(mealType || '').toLowerCase();
+    return (t === 'lunch' || t === 'dinner') ? 'main' : (t || 'main');
+  };
+
   const courses = useMemo(() => {
     return COURSE_ORDER
-      .map((key) => ({ key, label: COURSE_LABEL[key], meals: menu.filter((m) => (m.mealType || 'lunch') === key) }))
+      .map((key) => ({ key, label: COURSE_LABEL[key], meals: menu.filter((m) => normalizeCourseKey(m.mealType) === key) }))
       .filter((c) => c.meals.length > 0);
   }, [menu]);
 
@@ -425,7 +432,7 @@ const MemberPortal = () => {
                         const qty = dayCart[m._id] || 0;
                         const conflict = conflictOf(m);
                         const warned = conflict.length > 0 && !acknowledged[m._id];
-                        const bag = BAG[m.mealType] || BAG.lunch;
+                        const bag = BAG[normalizeCourseKey(m.mealType)] || BAG.main;
                         return (
                           <div key={m._id} className="rounded-3xl border overflow-hidden"
                             style={{ borderColor: qty ? '#4d9eff' : '#dde4f0' }}>

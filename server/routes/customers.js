@@ -1,6 +1,7 @@
 import express from 'express';
 import Customer from '../models/Customer.js';
 import Delivery from '../models/Delivery.js';
+import Partner from '../models/Partner.js';
 import { resolveCustomerMatch, resolveCustomerMatchBulk } from '../services/customerMatchService.js';
 
 const router = express.Router();
@@ -566,6 +567,9 @@ router.patch('/:customerId', async (req, res) => {
       'planStartDate', 'cycleDuration', 'amountPaid', 'discount',
       // Identity / contact details editable from the customer detail page
       'firstName', 'lastName', 'phone', 'company', 'address', 'email',
+      // Links this customer to a B2B Partner whose members order via the
+      // regular Menu Selection flow — see Partner.menuSelectionEnabled.
+      'partner', 'unlimitedMeals', 'macros',
     ];
     const updates = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
@@ -573,6 +577,23 @@ router.patch('/:customerId', async (req, res) => {
     // Never write an empty-string email: it would collide on the unique sparse
     // index with every other customer that has no email.
     if (updates.email === '' || updates.email === null) delete updates.email;
+
+    // Unlinking clears the partner ref cleanly (empty string from a <select>
+    // means "no partner"); linking to a menu-selection partner auto-applies
+    // its preset macros and lifts the daily meal cap unless the caller sent
+    // an explicit override in the same request.
+    if (updates.partner === '' || updates.partner === null) {
+      updates.partner = null;
+    } else if (updates.partner) {
+      const linkedPartner = await Partner.findById(updates.partner).select('menuSelectionEnabled presetMacros');
+      if (!linkedPartner) {
+        return res.status(400).json({ success: false, message: 'Partner not found' });
+      }
+      if (linkedPartner.menuSelectionEnabled) {
+        if (req.body.unlimitedMeals === undefined) updates.unlimitedMeals = true;
+        if (req.body.macros === undefined) updates.macros = linkedPartner.presetMacros;
+      }
+    }
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, message: 'No valid fields to update' });

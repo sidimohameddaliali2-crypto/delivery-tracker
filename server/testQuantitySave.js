@@ -25,7 +25,7 @@ const testSave = async () => {
     // Create a test selection with quantity: 3
     const testSelection = {
       date: new Date('2026-03-02'),
-      mealType: 'lunch',
+      mealType: 'main',
       menuItemId: new mongoose.Types.ObjectId('699d6b56d1cd8fadc0d1dc10'),
       mealName: 'TEST MEAL WITH QUANTITY',
       quantity: 3

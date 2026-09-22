@@ -4,6 +4,13 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Grid } from 'react-window';
 import { Phone, Star } from 'lucide-react';
+import jsPDF from 'jspdf';
+// jspdf-autotable v5 no longer auto-patches jsPDF.prototype.autoTable on
+// import inside a bundler (its side-effect patch only fires if it finds a
+// `window.jsPDF` global, which doesn't exist in a CRA/webpack build) — call
+// the functional API (autoTable(doc, options)) instead of doc.autoTable(...).
+import autoTable from 'jspdf-autotable';
+import XLSX from 'xlsx-js-style';
 import { fetchDrivers, toggleDriverStatus } from '../store/slices/driverSlice';
 import UserAvatar from '../components/users/UserAvatar';
 
@@ -19,6 +26,13 @@ const VEHICLE_TYPE_META = {
   bike: { label: 'Bike', icon: 'two_wheeler' },
   van: { label: 'Van', icon: 'airport_shuttle' },
   car: { label: 'Car', icon: 'directions_car' },
+};
+
+// Matches the category options in components/drivers/LogDeductionModal.js.
+const DEDUCTION_CATEGORY_LABELS = {
+  fine: 'Traffic Fine',
+  damage: 'Equipment / Vehicle Damage',
+  other: 'Other',
 };
 
 const getKpiColor = (score) => {
@@ -121,6 +135,261 @@ const Drivers = () => {
     return [...base].sort((a, b) => Number(isActiveDriver(b)) - Number(isActiveDriver(a)));
   }, [driversArray, search]);
 
+  // "Active" here means employed/enabled (isActive !== false) — deliberately
+  // NOT the stricter available/busy/offline "Active" badge shown on cards
+  // (isActiveDriver above). A driver who's busy or offline right now is
+  // still an active employee and still owed a salary slip.
+  const isEnabledDriver = (d) => d?.isActive !== false;
+
+  // Shared by both the PDF and Excel salary exports so they can never
+  // disagree — same current-pay-period deduction filter and net-salary
+  // formula the driver's own detail page uses (currentMonthDeductions /
+  // netSalary in DriverDetail.js). Returns raw values; each export formats
+  // them for its own medium (display strings for the PDF, real numbers for
+  // the spreadsheet).
+  const getDriverSalaryInfo = (driver, now) => {
+    const firstName = driver?.profile?.firstName || '';
+    const lastName = driver?.profile?.lastName || '';
+    const fullName = `${firstName} ${lastName}`.trim() || 'Unnamed Driver';
+    const baseSalary = driver?.profile?.baseSalary;
+    const hasSalary = typeof baseSalary === 'number' && !Number.isNaN(baseSalary);
+
+    const currentMonthDeductions = (driver?.profile?.deductions || []).filter((d) => {
+      const dt = new Date(d.date);
+      return dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear();
+    });
+    const totalDeductions = currentMonthDeductions.reduce((sum, d) => sum + (Number(d.amount) || 0), 0);
+    const netSalary = hasSalary ? baseSalary - totalDeductions : null;
+
+    return { fullName, baseSalary, hasSalary, currentMonthDeductions, totalDeductions, netSalary };
+  };
+
+  const handleDownloadSalarySlips = useCallback(() => {
+    const activeDrivers = driversArray.filter(isEnabledDriver);
+    if (activeDrivers.length === 0) {
+      alert('No active drivers to generate salary slips for.');
+      return;
+    }
+
+    const now = new Date();
+    const periodLabel = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    const fileStamp = now.toLocaleDateString('en-US', { month: '2-digit', year: 'numeric' }).replace('/', '-');
+
+    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const pageWidth = 210;
+    const margin = 15;
+
+    activeDrivers.forEach((driver, index) => {
+      if (index > 0) pdf.addPage();
+
+      const { fullName, baseSalary, hasSalary, currentMonthDeductions, totalDeductions, netSalary } =
+        getDriverSalaryInfo(driver, now);
+      const salaryDisplay = hasSalary
+        ? baseSalary.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : 'Not set';
+      const netSalaryDisplay = hasSalary
+        ? netSalary.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        : 'Not set';
+
+      let y = margin;
+
+      // Header
+      pdf.setFontSize(20);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setTextColor(5, 23, 71);
+      pdf.text('MATTER', margin, y);
+      pdf.setFontSize(11);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setTextColor(100, 116, 139);
+      pdf.text('Salary Slip', pageWidth - margin, y, { align: 'right' });
+      y += 6;
+      pdf.setDrawColor(226, 232, 240);
+      pdf.line(margin, y, pageWidth - margin, y);
+      y += 10;
+
+      pdf.setFontSize(14);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setTextColor(15, 23, 42);
+      pdf.text(fullName, margin, y);
+      y += 6;
+      pdf.setFontSize(10);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setTextColor(100, 116, 139);
+      pdf.text(`Pay period: ${periodLabel}`, margin, y);
+      y += 8;
+
+      // Employee details
+      autoTable(pdf, {
+        startY: y,
+        theme: 'plain',
+        styles: { fontSize: 10, cellPadding: 1.3 },
+        columnStyles: { 0: { fontStyle: 'bold', cellWidth: 45, textColor: [71, 85, 105] } },
+        margin: { left: margin, right: margin },
+        body: [
+          ['Employee ID', String(driver._id || '').slice(-8).toUpperCase()],
+          ['Email', driver?.email || '—'],
+          ['Phone', driver?.profile?.phone || '—'],
+          ['Position', driver?.profile?.position || 'Driver'],
+          ['Vehicle Type', VEHICLE_TYPE_META[driver?.profile?.vehicleType]?.label || '—'],
+          ['Contract Type', driver?.profile?.contractType ? driver.profile.contractType.replace('_', ' ') : '—'],
+          [
+            'Joining Date',
+            driver?.profile?.joiningDate
+              ? new Date(driver.profile.joiningDate).toLocaleDateString('en-GB')
+              : '—',
+          ],
+        ],
+      });
+      y = pdf.lastAutoTable.finalY + 8;
+
+      // Earnings
+      pdf.setFontSize(11);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setTextColor(15, 23, 42);
+      pdf.text('Earnings', margin, y);
+      y += 3;
+      autoTable(pdf, {
+        startY: y,
+        margin: { left: margin, right: margin },
+        head: [['Description', 'Amount (AED)']],
+        body: [['Base Salary', salaryDisplay]],
+        headStyles: { fillColor: [5, 23, 71] },
+        styles: { fontSize: 10 },
+        columnStyles: { 1: { halign: 'right' } },
+      });
+      y = pdf.lastAutoTable.finalY + 8;
+
+      // Deductions — traffic fines, equipment/vehicle damage, or other
+      // logged deductions for this pay period only. Only rendered when
+      // there's actually something to show, per the driver's own logged
+      // deductions (LogDeductionModal / profile.deductions) — never invented.
+      if (currentMonthDeductions.length > 0) {
+        pdf.setFontSize(11);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setTextColor(15, 23, 42);
+        pdf.text('Deductions', margin, y);
+        y += 3;
+        autoTable(pdf, {
+          startY: y,
+          margin: { left: margin, right: margin },
+          head: [['Date', 'Category', 'Reason', 'Amount (AED)']],
+          body: currentMonthDeductions.map((d) => [
+            d.date ? new Date(d.date).toLocaleDateString('en-GB') : '—',
+            DEDUCTION_CATEGORY_LABELS[d.category] || 'Other',
+            d.reason || '—',
+            (Number(d.amount) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+          ]),
+          foot: [['', '', 'Total Deductions', totalDeductions.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })]],
+          headStyles: { fillColor: [153, 27, 27] },
+          footStyles: { fontStyle: 'bold', fillColor: [254, 226, 226], textColor: [127, 29, 29] },
+          styles: { fontSize: 9.5 },
+          columnStyles: { 3: { halign: 'right' } },
+        });
+        y = pdf.lastAutoTable.finalY + 8;
+      }
+
+      // Net salary — base salary minus this period's deductions (0 when
+      // there are none), same formula the driver detail page uses.
+      autoTable(pdf, {
+        startY: y,
+        theme: 'plain',
+        margin: { left: margin, right: margin },
+        styles: { fontSize: 11, cellPadding: 2.5 },
+        columnStyles: { 0: { fontStyle: 'bold' }, 1: { halign: 'right', fontStyle: 'bold' } },
+        body: [['Net Salary', netSalaryDisplay]],
+      });
+      y = pdf.lastAutoTable.finalY + 6;
+
+      // Performance — informational context only, doesn't affect the amount above.
+      pdf.setFontSize(11);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setTextColor(15, 23, 42);
+      pdf.text(`Performance — ${periodLabel} (month-to-date)`, margin, y);
+      y += 3;
+      autoTable(pdf, {
+        startY: y,
+        theme: 'plain',
+        styles: { fontSize: 10, cellPadding: 1.3 },
+        columnStyles: { 0: { fontStyle: 'bold', cellWidth: 60, textColor: [71, 85, 105] } },
+        margin: { left: margin, right: margin },
+        body: [
+          ['KPI Score', `${driver?.kpi?.score ?? 0} / 100`],
+          ['On-Time Delivery Rate', `${driver?.kpi?.accuracyRate ?? 0}%`],
+          ['Total Deliveries', `${driver?.kpi?.totalDeliveries ?? 0}`],
+        ],
+      });
+
+      pdf.setFontSize(8);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setTextColor(148, 163, 184);
+      pdf.text(
+        `Generated on ${new Date().toLocaleDateString('en-GB')} — system-generated document, no signature required.`,
+        margin,
+        285
+      );
+    });
+
+    pdf.save(`salary-slips-${fileStamp}.pdf`);
+  }, [driversArray]);
+
+  const handleDownloadSalaryExcel = useCallback(() => {
+    const activeDrivers = driversArray.filter(isEnabledDriver);
+    if (activeDrivers.length === 0) {
+      alert('No active drivers to generate salary slips for.');
+      return;
+    }
+
+    const now = new Date();
+    const periodLabel = now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    const fileStamp = now.toLocaleDateString('en-US', { month: '2-digit', year: 'numeric' }).replace('/', '-');
+
+    const header = ['Driver Name', 'Current Salary (AED)', 'Fine (AED)', 'Net Salary (AED)', 'Fine Description'];
+    const rows = [header];
+
+    activeDrivers.forEach((driver) => {
+      const { fullName, baseSalary, hasSalary, currentMonthDeductions, totalDeductions, netSalary } =
+        getDriverSalaryInfo(driver, now);
+
+      // One combined description per driver — e.g. "Traffic Fine: Speeding
+      // (12/09/2026); Other: Lost bag (18/09/2026)" — so multiple fines in
+      // the same period still fit the one-row-per-driver table.
+      const fineDescription = currentMonthDeductions
+        .map((d) => {
+          const label = DEDUCTION_CATEGORY_LABELS[d.category] || 'Other';
+          const dateStr = d.date ? ` (${new Date(d.date).toLocaleDateString('en-GB')})` : '';
+          return `${label}: ${d.reason || 'No reason given'}${dateStr}`;
+        })
+        .join('; ');
+
+      rows.push([
+        fullName,
+        hasSalary ? baseSalary : 'Not set',
+        totalDeductions,
+        hasSalary ? netSalary : 'Not set',
+        fineDescription || '—',
+      ]);
+    });
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{ wch: 24 }, { wch: 18 }, { wch: 12 }, { wch: 18 }, { wch: 55 }];
+
+    header.forEach((_, c) => {
+      const addr = XLSX.utils.encode_cell({ r: 0, c });
+      if (ws[addr]) {
+        ws[addr].s = {
+          font: { bold: true, color: { rgb: 'FFFFFF' } },
+          fill: { fgColor: { rgb: '051747' } },
+          alignment: { horizontal: 'center', vertical: 'center' },
+        };
+      }
+    });
+
+    const wb = XLSX.utils.book_new();
+    const sheetName = periodLabel.replace(/[^a-z0-9 ]/gi, '').slice(0, 31) || 'Salary';
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(wb, `salary-slips-${fileStamp}.xlsx`);
+  }, [driversArray]);
+
   const handleToggleStatus = useCallback((driverId, currentStatus) => {
     const isActive = !currentStatus;
     const action = isActive ? 'enable' : 'disable';
@@ -146,13 +415,33 @@ const Drivers = () => {
       {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold text-gray-900">Fleet Management</h1>
-        <Link
-          to="/drivers/create"
-          className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
-        >
-          <span className="material-symbols-outlined text-[18px]">add</span>
-          Create Driver
-        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleDownloadSalarySlips}
+            className="flex items-center gap-2 px-4 py-1.5 bg-white border border-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+            title="Download a salary slip PDF for every active driver"
+          >
+            <span className="material-symbols-outlined text-[18px]">receipt_long</span>
+            Download Salary Slips
+          </button>
+          <button
+            type="button"
+            onClick={handleDownloadSalaryExcel}
+            className="flex items-center gap-2 px-4 py-1.5 bg-white border border-gray-200 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+            title="Download a salary Excel sheet (name, salary, fines, net salary) for every active driver"
+          >
+            <span className="material-symbols-outlined text-[18px]">table_view</span>
+            Salary Excel
+          </button>
+          <Link
+            to="/drivers/create"
+            className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
+          >
+            <span className="material-symbols-outlined text-[18px]">add</span>
+            Create Driver
+          </Link>
+        </div>
       </div>
 
       {/* Search + Total Active Drivers */}

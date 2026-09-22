@@ -1,6 +1,15 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
+import { cacheGet, cacheSet } from '../config/cache.js';
+
+// A customer's macro/plan config on Matter changes on the order of days or
+// weeks (subscription edits, pause/resume), not mid-shift — caching these
+// lookups server-side (shared across every kitchen browser tab/staff member,
+// unlike the client's per-tab cache) is safe at this TTL and is the single
+// biggest lever on repeated-reload cost, since every uncached customer costs
+// 1-2 live Matter API round trips.
+const NUTRITION_CACHE_TTL_SECONDS = 15 * 60;
 
 dotenv.config();
 
@@ -25,6 +34,32 @@ const formatAddress = (addr) => {
     .filter(Boolean)
     .join(', ');
 };
+
+// A customer can have more than one saved address. Matter marks exactly one
+// with `current_delivery_address: true` per subscription (verified live,
+// 2026-09-22, across every multi-address subscription sampled) — that's the
+// authoritative answer to "which address is this customer actually
+// delivered to," so it's checked first. The completeness-based fallback
+// below (found the same day via Maripet Cabauatan: two addresses, both type
+// "secondary", one nearly empty besides emirate) only matters if a
+// subscription somehow has no address flagged current — none seen in
+// practice, but the fallback keeps this from ever returning nothing useful.
+const ADDRESS_COMPLETENESS_FIELDS = ['area', 'building', 'street', 'unit', 'floor'];
+const addressCompleteness = (addr) => ADDRESS_COMPLETENESS_FIELDS.filter((f) => addr?.[f]).length;
+
+export function selectBestAddress(addresses) {
+  const list = Array.isArray(addresses) ? addresses : [];
+  if (list.length === 0) return null;
+
+  const current = list.find((a) => a.current_delivery_address === true);
+  if (current) return current;
+
+  const active = list.filter((a) => a.status === 'active');
+  const pool = active.length > 0 ? active : list;
+  const primary = pool.find((a) => a.type === 'primary' && addressCompleteness(a) > 0);
+  if (primary) return primary;
+  return pool.reduce((best, a) => (addressCompleteness(a) > addressCompleteness(best) ? a : best), pool[0]);
+}
 
 class MatterApiService {
   constructor() {
@@ -76,6 +111,11 @@ class MatterApiService {
    * id first, then fetches the full record.
    */
   async getSubscriptionNutritionByEmail(email) {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const cacheKey = `matter:nutrition:email:${normalizedEmail}`;
+    const cached = normalizedEmail ? await cacheGet(cacheKey) : null;
+    if (cached) return cached;
+
     const list = await this.listSubscriptions({ email, pageSize: 1 });
     const match = list?.data?.[0];
     if (!match) return null;
@@ -84,12 +124,16 @@ class MatterApiService {
     const subscription = detail?.data;
     if (!subscription) return null;
 
-    return {
+    const result = {
       subscription_id: subscription.subscription_id,
       macros: subscription.macros || null,
       total_calories: subscription.total_calories ?? null,
       snacks_per_day: subscription.snacks_per_day ?? null,
       plan_name: subscription.plan?.name ?? null,
+      // Per-day meal count — total_meals on the subscription is for the
+      // whole cycle, not a daily figure (see WebsiteSubscription.js).
+      meal_frequency: subscription.plan?.meal_frequency ?? null,
+      breakfast_included: !!subscription.breakfast_included,
       customer_addresses: subscription.customer_addresses || [],
       delivery_window: subscription.delivery_window || null,
       // Dietary restrictions — same field findSubscriptionsWithDeliveryInRange
@@ -102,6 +146,9 @@ class MatterApiService {
       customer_name: subscription.name || null,
       phone: subscription.phone || null
     };
+
+    if (normalizedEmail) await cacheSet(cacheKey, result, NUTRITION_CACHE_TTL_SECONDS);
+    return result;
   }
 
   /**
@@ -114,11 +161,15 @@ class MatterApiService {
    */
   async getSubscriptionNutritionBySubscriptionId(subscriptionId) {
     if (!subscriptionId) return null;
+    const cacheKey = `matter:nutrition:sub:${subscriptionId}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return cached;
+
     const detail = await this.getSubscription(subscriptionId);
     const subscription = detail?.data;
     if (!subscription) return null;
 
-    return {
+    const result = {
       subscription_id: subscription.subscription_id,
       macros: subscription.macros || null,
       total_calories: subscription.total_calories ?? null,
@@ -128,6 +179,9 @@ class MatterApiService {
       delivery_window: subscription.delivery_window || null,
       exclusions: (subscription.exclusions || []).map((ex) => ex.title).filter(Boolean)
     };
+
+    await cacheSet(cacheKey, result, NUTRITION_CACHE_TTL_SECONDS);
+    return result;
   }
 
   /**
@@ -173,23 +227,28 @@ class MatterApiService {
   }
 
   /**
-   * Find non-cycle-ended subscriptions (active or subscription-level paused)
-   * whose delivery_schedule has an active entry somewhere in [startDateKey,
-   * endDateKey] (inclusive, both "YYYY-MM-DD"). A subscription-level
-   * "paused" status doesn't necessarily mean every day is skipped, so those
-   * are checked too — the per-day delivery_schedule status is the real
-   * source of truth. One row per (subscription, delivery date) match.
-   * Checking delivery_schedule requires a full-detail fetch per subscription
-   * (the list endpoint doesn't include it), so this is expensive — hundreds
-   * of calls for a full customer base — and is meant to be triggered on
-   * demand, not on every page load. Widening the date range doesn't add
-   * extra calls: each subscription's full delivery_schedule is already
-   * fetched in one shot and just gets checked against every date in range.
+   * Find non-cycle-ended subscriptions (active, subscription-level paused,
+   * or cancelled-but-still-within-their-paid-cycle) whose delivery_schedule
+   * has an active entry somewhere in [startDateKey, endDateKey] (inclusive,
+   * both "YYYY-MM-DD"). A subscription-level "paused" status doesn't
+   * necessarily mean every day is skipped, so those are checked too — the
+   * per-day delivery_schedule status is the real source of truth. "cancelled"
+   * means the customer won't renew, not that service stops immediately —
+   * they're still owed deliveries through cycle_end_date, so a cancelled
+   * subscription is included on exactly the same cycle_end_date condition as
+   * active/paused, never excluded outright. One row per (subscription,
+   * delivery date) match. Checking delivery_schedule requires a full-detail
+   * fetch per subscription (the list endpoint doesn't include it), so this is
+   * expensive — hundreds of calls for a full customer base — and is meant to
+   * be triggered on demand, not on every page load. Widening the date range
+   * doesn't add extra calls: each subscription's full delivery_schedule is
+   * already fetched in one shot and just gets checked against every date in
+   * range.
    */
   async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey) {
     const all = await this.listAllSubscriptions();
     const candidates = all.filter((sub) =>
-      (sub.subscription_status === 'active' || sub.subscription_status === 'paused')
+      ['active', 'paused', 'cancelled'].includes(sub.subscription_status)
       && String(sub.cycle_end_date || '').slice(0, 10) >= startDateKey
     );
 
@@ -213,10 +272,27 @@ class MatterApiService {
           return deliveryDates.map((deliveryDate) => ({
             subscription_id: sub.subscription_id,
             customer_id: sub.customer_id,
-            name: sub.name,
-            email: sub.email,
+            // The list/summary endpoint's `name` can be sparser than the
+            // full detail record (same reason `phone`/`address` below are
+            // sourced from `detail.data`, not `sub`) — falling back to the
+            // list row only if detail genuinely has nothing, so bulk name
+            // matching (customerMatchService) doesn't silently miss a real
+            // customer just because the summary row omitted their name.
+            name: detail.data.name || sub.name,
+            // Same reasoning as `name` above — email is the highest-
+            // confidence matcher in customerMatchService, so it shouldn't be
+            // more likely to be missing than the lower-confidence fallbacks.
+            email: detail.data.email || sub.email,
             phone: detail.data.phone || '',
-            address: formatAddress(detail.data.customer_addresses?.[0]),
+            address: formatAddress(selectBestAddress(detail.data.customer_addresses)),
+            // Raw best-match address (building/floor/unit/coordinates) and
+            // the delivery time window — detail is already fetched above for
+            // every candidate, so surfacing these costs nothing extra. Added
+            // for the Delivery-import job (matterDeliveryImportService.js),
+            // which needs real coordinates/address parts and a wall-clock
+            // time, not just the flattened display string.
+            address_detail: selectBestAddress(detail.data.customer_addresses),
+            delivery_window: detail.data.delivery_window || null,
             meal_frequency: detail.data.plan?.meal_frequency ?? 1,
             exclusions: (detail.data.exclusions || []).map((ex) => ex.title).filter(Boolean),
             subscription_status: sub.subscription_status,
@@ -282,7 +358,7 @@ class MatterApiService {
       name: subscription.name || sub.name,
       email: subscription.email || sub.email,
       phone: subscription.phone || '',
-      address: formatAddress(subscription.customer_addresses?.[0])
+      address: formatAddress(selectBestAddress(subscription.customer_addresses))
     }));
   }
 
@@ -315,8 +391,7 @@ class MatterApiService {
     const activeSubs = all.filter((sub) => sub.subscription_status === 'active');
 
     return this.#fetchDetailsConcurrently(activeSubs, (sub, subscription) => {
-      const addresses = subscription.customer_addresses || [];
-      const activeAddress = addresses.find((a) => a.status === 'active') || addresses[0];
+      const activeAddress = selectBestAddress(subscription.customer_addresses);
       return {
         subscription_id: sub.subscription_id,
         plan_name: subscription.plan?.name || sub.plan?.name || null,

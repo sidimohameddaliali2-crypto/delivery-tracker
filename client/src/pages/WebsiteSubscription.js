@@ -860,6 +860,14 @@ function CustomerProfilePanel({ subscriptionId }) {
                             {addr.label || addr.type || 'Address'}
                           </span>
                           <div className="flex items-center gap-1.5 flex-shrink-0">
+                            {addr.current_delivery_address && (
+                              <span
+                                className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-amber-400 text-amber-950 whitespace-nowrap"
+                                title="Matter's own current_delivery_address flag — this is the address the customer is actually delivered to"
+                              >
+                                Current
+                              </span>
+                            )}
                             {addr.emirate && (
                               <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-matter-sky/50 text-matter-navy whitespace-nowrap">
                                 {addr.emirate}

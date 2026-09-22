@@ -21,8 +21,22 @@ const partnerSchema = new mongoose.Schema({
   address: { type: String, default: '' },
   minimumOrder: { type: Number, default: 0, min: 0 },
   defaultDeliveryTime: { type: String, default: null },
+  // Logo / profile picture URL (DigitalOcean Spaces, or local /uploads when
+  // Spaces isn't configured) — uploaded via POST /api/admin/partners/upload-picture.
+  profilePicture: { type: String, default: '' },
   // Stable opaque token for the member self-registration link / QR. Generated lazily.
   memberInviteToken: { type: String, unique: true, index: true, sparse: true },
+  // When true, this partner's members order through the regular customer
+  // Menu Selection flow (weekly menu) rather than — or in addition to —
+  // the à-la-carte partner ordering. Customers linked via Customer.partner
+  // get an unlimited daily meal count and this preset macro target instead
+  // of picking their own macros. See Customer.js `partner` / `unlimitedMeals`.
+  menuSelectionEnabled: { type: Boolean, default: false },
+  presetMacros: {
+    C: { type: Number, default: 0 },
+    P: { type: Number, default: 0 },
+    F: { type: Number, default: 0 }
+  },
   isActive: { type: Boolean, default: true },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   lastLogin: Date

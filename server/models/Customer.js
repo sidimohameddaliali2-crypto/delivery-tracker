@@ -60,7 +60,26 @@ const customerSchema = new mongoose.Schema({
     P: { type: Number, default: 0 },
     F: { type: Number, default: 0 }
   },
-  
+
+  // Links this customer to a B2B Partner (gym/cafe/etc) whose members order
+  // through the regular Menu Selection flow instead of — or alongside — the
+  // Partner's à-la-carte ordering. Set from Customer Management or when a
+  // customer record is provisioned for a Partner's member. See Partner.js
+  // `menuSelectionEnabled` / `presetMacros`.
+  partner: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Partner',
+    default: null,
+    index: true
+  },
+  // Bypasses the mealPerDay cap in the customer-facing menu-selection UI.
+  // Typically set alongside `partner` for a menuSelectionEnabled Partner —
+  // their members select freely with no daily meal limit.
+  unlimitedMeals: {
+    type: Boolean,
+    default: false
+  },
+
   // Meal preferences from Athleat
   mealPerDay: {
     type: Number,
@@ -108,7 +127,7 @@ const customerSchema = new mongoose.Schema({
     date: Date,
     mealType: {
       type: String,
-      enum: ['breakfast', 'lunch', 'dinner', 'snack']
+      enum: ['breakfast', 'main', 'snack']
     },
     menuItemId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -135,7 +154,21 @@ const customerSchema = new mongoose.Schema({
       type: String,
       enum: ['kept', 'replace']
     },
-    carbVegConflict: [String]
+    carbVegConflict: [String],
+    carbConflict: [String],
+    vegConflict: [String],
+    // See MenuSelectionRecord.js for the fuller comment — never shown to the
+    // customer, surfaced only in the Kitchen List.
+    needsSauceChange: {
+      type: Boolean,
+      default: false
+    },
+    needsGarnishChange: {
+      type: Boolean,
+      default: false
+    },
+    sauceConflict: [String],
+    garnishConflict: [String]
   }],
   
   // Current week info

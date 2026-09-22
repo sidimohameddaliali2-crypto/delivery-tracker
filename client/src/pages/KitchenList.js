@@ -1,10 +1,8 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText } from 'lucide-react';
-import * as XLSX from 'xlsx';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
 import api from '../utils/api';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
+import { toSentenceCase } from '../utils/textFormat';
 import {
   emptyBreakfast,
   normalizeBreakfastKey,
@@ -19,6 +17,29 @@ import {
   deriveDateKeys
 } from '../lib/kitchenData';
 
+// xlsx/jspdf/jspdf-autotable are sizable libraries only ever needed once a
+// staff member clicks an export/upload button — loading them at module top
+// level shipped them in the app's shared bundle for every page/route.
+// Loaded on first use and memoized (module-level, not per-call) so repeated
+// exports in the same session don't re-fetch the chunk.
+let xlsxModulePromise = null;
+const loadXLSX = () => {
+  if (!xlsxModulePromise) xlsxModulePromise = import('xlsx');
+  return xlsxModulePromise;
+};
+
+let jsPDFModulePromise = null;
+const loadJsPDF = () => {
+  if (!jsPDFModulePromise) jsPDFModulePromise = import('jspdf');
+  return jsPDFModulePromise;
+};
+
+let autoTableModulePromise = null;
+const loadAutoTable = () => {
+  if (!autoTableModulePromise) autoTableModulePromise = import('jspdf-autotable');
+  return autoTableModulePromise;
+};
+
 const getMealLabel = (meal) => {
   const mealType = String(meal?.mealType || meal?.menuItemMealType || meal?.menuItemId?.mealType || '').trim().toLowerCase();
   const mealName = String(meal?.mealName || meal?.menuItemName || meal?.menuItemId?.mealName || '').trim();
@@ -30,6 +51,13 @@ const getMealLabel = (meal) => {
 };
 
 const detectProteinType = (meal) => {
+  // menuItemId.portionType is an explicit tag set in the meal editor for
+  // Supy-linked meals — trust it before falling back to keyword-sniffing.
+  const tagged = String(meal?.menuItemId?.portionType || '').toLowerCase();
+  if (tagged === 'chicken') return 'Chicken';
+  if (tagged === 'beef') return 'Beef';
+  if (tagged === 'fish') return 'Fish';
+
   const text = String(
     meal?.proteinChoice
     || meal?.mealName
@@ -95,7 +123,7 @@ const attachStableMealKeys = (entry) => {
 // can crash the tab. Any upload on this page is realistically dozens of
 // rows, so cap it generously and skip fully-blank rows outright.
 const MAX_UPLOAD_ROWS = 5000;
-const readSheetRowsSafely = (sheet) => {
+const readSheetRowsSafely = (XLSX, sheet) => {
   const range = sheet['!ref'] ? XLSX.utils.decode_range(sheet['!ref']) : null;
   if (range && (range.e.r - range.s.r) > MAX_UPLOAD_ROWS) {
     range.e.r = range.s.r + MAX_UPLOAD_ROWS;
@@ -154,6 +182,15 @@ const normalizeSelectionForSave = (meal) => ({
   carbVegConflict: meal?.carbVegConflict,
   carbConflict: meal?.carbConflict,
   vegConflict: meal?.vegConflict,
+  needsSauceChange: !!meal?.needsSauceChange,
+  needsGarnishChange: !!meal?.needsGarnishChange,
+  sauceConflict: meal?.sauceConflict,
+  garnishConflict: meal?.garnishConflict,
+  // Whitelisted here for the same reason isAutoAssigned is — this object is
+  // what gets sent back on a protein-type override save (PUT .../selections/:email,
+  // a wholesale selectedMeals replace on the server), so any field left out
+  // here is silently wiped the next time kitchen staff change a protein type.
+  remark: String(meal?.remark || '').trim(),
   isAutoAssigned: !!meal?.isAutoAssigned
 });
 
@@ -181,6 +218,10 @@ const KitchenList = () => {
   const [importName, setImportName] = useState('');
   const [mealTypeOverrides, setMealTypeOverrides] = useState({});
   const [savingOverrideKey, setSavingOverrideKey] = useState('');
+  // Kitchen-only note per (customer email, date) — draft text while typing,
+  // keyed by `${email}::${dateKey}`, saved to the server on blur.
+  const [dayNoteDrafts, setDayNoteDrafts] = useState({});
+  const [savingDayNoteKey, setSavingDayNoteKey] = useState('');
   const [snackOptionsByDate, setSnackOptionsByDate] = useState({});
   const [pdfDate, setPdfDate] = useState('');
   const [generatingPdf, setGeneratingPdf] = useState(false);
@@ -198,6 +239,8 @@ const KitchenList = () => {
   const [uploadingWeeklyMenu, setUploadingWeeklyMenu] = useState(false);
   const [weeklyMenuUploadName, setWeeklyMenuUploadName] = useState('');
   const [weeklyMenuUploadResult, setWeeklyMenuUploadResult] = useState(null);
+  const [uploadingMealRemarks, setUploadingMealRemarks] = useState(false);
+  const [mealRemarksUploadResult, setMealRemarksUploadResult] = useState(null);
   // Caches each customer's Matter website nutrition lookup for the life of
   // the page, so switching menus, re-running auto-assign, or reloading
   // selections doesn't re-fire a network call for every customer again —
@@ -261,22 +304,29 @@ const KitchenList = () => {
         // submitted one themselves, before the server returns this list — so
         // Kitchen List/Counting never miss them without a manual "Check
         // Missing Selections" click.
-        const response = await api.get(`/menus/${selectedMenuId}/selections`, {
-          params: { autoPopulateDate: missingCheckDate }
-        });
+        //
+        // These three calls are independent of each other (presets don't
+        // depend on selections, and vice versa), so they run concurrently
+        // instead of stacked — cuts this portion of load time to roughly the
+        // slowest single call instead of the sum of all three. Each keeps
+        // its own failure handling: a snack-preset failure still falls back
+        // silently (matches prior behavior), while a `/selections` failure
+        // still throws to the outer catch below.
+        const [response, breakfastState, snackState] = await Promise.all([
+          api.get(`/menus/${selectedMenuId}/selections`, {
+            params: { autoPopulateDate: missingCheckDate }
+          }),
+          fetchBreakfastPresets(api, selectedMenuId),
+          fetchSnackPresets(api).catch(() => ({ presetsByName: {} }))
+        ]);
 
-        const breakfastState = await fetchBreakfastPresets(api, selectedMenuId);
         setBreakfastPreset(breakfastState);
         if (Object.keys(breakfastState.presetsByName || {}).length > 0) {
           saveBreakfastPresetToStorage(breakfastState);
         }
         setImportName(Object.keys(breakfastState.presetsByName || {}).length > 0 ? 'Loaded from server' : '');
 
-        try {
-          setSnackPreset(await fetchSnackPresets(api));
-        } catch (err) {
-          setSnackPreset({ presetsByName: {} });
-        }
+        setSnackPreset(snackState);
 
         if (response.data?.success) {
           const rawSelections = response.data.data || [];
@@ -535,7 +585,8 @@ const KitchenList = () => {
   // also updates the shared global breakfast preset used for weight calc).
   // Reuses the existing single-date PUT endpoints, one date at a time
   // (sequential, so concurrent saves to the same menu document's Map fields never race).
-  const downloadWeeklyMenuTemplate = () => {
+  const downloadWeeklyMenuTemplate = async () => {
+    const XLSX = await loadXLSX();
     const sampleDate = menuDateKeys[0] || getDateKey(new Date());
     const rows = [
       { Date: sampleDate, Slot: 'main', MealName: 'Grilled Chicken Breast', Type: 'chicken', Exclusions: '', C: '', P: '', F: '', V: '', LargeBreakfast: '' },
@@ -567,6 +618,7 @@ const KitchenList = () => {
       setError('');
       setWeeklyMenuUploadResult(null);
 
+      const XLSX = await loadXLSX();
       const buffer = await file.arrayBuffer();
       // Deliberately NOT using cellDates: true. It sounds like the right fix
       // (real Date objects instead of raw serial numbers) but SheetJS builds
@@ -581,7 +633,7 @@ const KitchenList = () => {
       // verified correct regardless of the machine's local timezone.
       const workbook = XLSX.read(buffer, { type: 'array' });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rows = readSheetRowsSafely(sheet);
+      const rows = readSheetRowsSafely(XLSX, sheet);
 
       const mainByDate = {};
       const snackByDate = {};
@@ -904,7 +956,16 @@ const KitchenList = () => {
     saveSnackOptionsForDate(missingCheckDate, updatedFirst, updatedSecond);
   };
 
-  const customerRows = useMemo(() => {
+  // The expensive part — calculateKitchenListEntry's full weight/macro/
+  // escalation math plus groupMealsByDay, run once per customer — depends
+  // only on the underlying selection/preset data, never on search text or
+  // the "show only missing" toggle. Keeping those two out of this memo's
+  // dependencies means typing in the search box (or flipping that toggle)
+  // no longer re-runs the heavy calculation for every customer on every
+  // keystroke — it used to, and for a large customer base that repeated
+  // multi-second recomputation was exactly what tripped the browser's
+  // "page unresponsive" detector while the kitchen was just trying to search.
+  const allComputedRows = useMemo(() => {
     // A customer can have selections for some dates but still be missing one
     // for the specific date "Check Missing Selections" was run for — that
     // customer then shows up in BOTH menuSelections (their real entry, with
@@ -934,10 +995,7 @@ const KitchenList = () => {
     });
 
     const combinedEntries = Array.from(byKey.values());
-    return combinedEntries
-      .filter((entry) => `${getCustomerName(entry)} ${entry.email || ''}`.toLowerCase().includes(search.toLowerCase()))
-      .filter((entry) => !showOnlyMissing || entry._missingSelection)
-      .map((entry) => {
+    return combinedEntries.map((entry) => {
         const enrichedMeals = (entry.selectedMeals || []).map((meal, index) => {
           const key = meal?._overrideKey || buildMealOverrideKey(entry, meal, index);
           const override = mealTypeOverrides[key];
@@ -977,10 +1035,20 @@ const KitchenList = () => {
         return {
           ...calculated,
           mealsByDay: groupMealsByDay(calculated.selectedMeals),
-          showMissingPlaceholder: calculated.missingSelection && hasNoMealsAtAll
+          showMissingPlaceholder: calculated.missingSelection && hasNoMealsAtAll,
+          // Kitchen-only per-day notes — not part of calculateKitchenListEntry's
+          // return shape, carried through separately from the raw selection record.
+          dayNotes: entry.dayNotes || []
         };
       });
-  }, [menuSelections, missingSelectionEntries, search, showOnlyMissing, breakfastPreset, snackPreset, mealTypeOverrides]);
+  }, [menuSelections, missingSelectionEntries, breakfastPreset, snackPreset, mealTypeOverrides]);
+
+  // Cheap: just filters the already-computed rows above. This is the only
+  // part that re-runs while typing in the search box.
+  const customerRows = useMemo(() => allComputedRows
+    .filter((entry) => `${entry.customerName || ''} ${entry.email || ''}`.toLowerCase().includes(search.toLowerCase()))
+    .filter((entry) => !showOnlyMissing || entry.missingSelection),
+  [allComputedRows, search, showOnlyMissing]);
 
   const persistMealTypeOverride = async ({ entry, meal, index, value }) => {
     const key = meal?._overrideKey || buildMealOverrideKey(entry, meal, index);
@@ -1017,6 +1085,182 @@ const KitchenList = () => {
     }
   };
 
+  // Saves a kitchen-only note for one customer on one specific delivery day.
+  // An empty note removes that date's entry server-side. Updates
+  // menuSelections locally on success so the note persists in the UI
+  // without needing a full reload.
+  const saveDayNote = async (entry, dateKey, note) => {
+    const email = entry?.email;
+    if (!email || !selectedMenuId || !dateKey) return;
+
+    const draftKey = `${email}::${dateKey}`;
+    const trimmed = String(note || '').trim();
+    const existing = (entry.dayNotes || []).find((n) => n.date === dateKey)?.note || '';
+    if (trimmed === existing) return;
+
+    setSavingDayNoteKey(draftKey);
+    try {
+      const res = await api.patch(
+        `/menus/${selectedMenuId}/selections/${encodeURIComponent(email)}/day-notes`,
+        { date: dateKey, note: trimmed }
+      );
+      if (res.data?.success) {
+        const nextDayNotes = res.data.data?.dayNotes || [];
+        setMenuSelections((prev) => prev.map((row) => {
+          const sameEmail = String(row?.email || '').trim().toLowerCase() === String(email).trim().toLowerCase();
+          return sameEmail ? { ...row, dayNotes: nextDayNotes } : row;
+        }));
+      }
+    } catch (saveError) {
+      setError(saveError.response?.data?.message || 'Failed to save note');
+    } finally {
+      setSavingDayNoteKey('');
+    }
+  };
+
+  const downloadMealRemarksTemplate = async () => {
+    const XLSX = await loadXLSX();
+    const sampleDate = menuDateKeys[0] || getDateKey(new Date());
+    const rows = [
+      { Name: 'Jane Doe', Email: '', Date: sampleDate, Meal: 'Grilled Chicken Breast', Remark: 'carb' },
+      { Name: 'John Smith', Email: 'john@example.com', Date: sampleDate, Meal: 'Beef Stir Fry', Remark: 'veg' }
+    ];
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Meal Remarks');
+    XLSX.writeFile(workbook, 'meal-remarks-upload-template.xlsx');
+  };
+
+  // Bulk-sets a free-text remark on specific meals, from an uploaded Excel
+  // file (Name, optional Email, Date, Meal, Remark) — any text in Remark is
+  // accepted verbatim (not limited to a fixed keyword list), shown next to
+  // that meal in Kitchen List and on the Day Kitchen Paper as "Change
+  // {remark}". Matched against the customers already loaded in customerRows
+  // for this menu — Email is used when given (the one collision-safe key
+  // everywhere else in this app); Name-only matching is supported since
+  // that's what the kitchen's source sheets tend to have, but is inherently
+  // riskier (two customers can share a name) — an ambiguous or unmatched
+  // name is skipped and counted, never guessed. Batched into one PATCH per
+  // customer (covering every row the upload had for them), not one request
+  // per meal.
+  const handleMealRemarksUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!selectedMenuId) {
+      setError('Select a menu first');
+      event.target.value = '';
+      return;
+    }
+
+    try {
+      setUploadingMealRemarks(true);
+      setError('');
+      setMealRemarksUploadResult(null);
+
+      const XLSX = await loadXLSX();
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: 'array' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = readSheetRowsSafely(XLSX, sheet);
+
+      const byEmail = new Map(
+        customerRows.map((entry) => [String(entry.email || '').trim().toLowerCase(), entry])
+      );
+      const byName = new Map();
+      customerRows.forEach((entry) => {
+        const nameKey = String(entry.customerName || '').trim().toLowerCase();
+        if (!nameKey) return;
+        if (!byName.has(nameKey)) byName.set(nameKey, []);
+        byName.get(nameKey).push(entry);
+      });
+
+      const entriesByEmail = new Map(); // email -> [{date, mealName, remark}]
+      let skippedNoCustomer = 0;
+      let skippedAmbiguousName = 0;
+      let skippedInvalidRow = 0;
+
+      rows.forEach((row) => {
+        const dateKey = getDateKey(row.Date ?? row.date);
+        const mealName = String(row.Meal ?? row.MealName ?? row.meal ?? row.mealName ?? '').trim();
+        const remarkRaw = String(row.Remark ?? row.remark ?? '').trim();
+        const emailRaw = String(row.Email ?? row.email ?? '').trim();
+        const nameRaw = String(row.Name ?? row.name ?? row['Customer Name'] ?? '').trim();
+
+        if (!dateKey || dateKey === 'unknown-date' || !mealName || !remarkRaw || (!emailRaw && !nameRaw)) {
+          skippedInvalidRow += 1;
+          return;
+        }
+
+        let matchedEntry = null;
+        if (emailRaw) {
+          matchedEntry = byEmail.get(emailRaw.toLowerCase()) || null;
+          if (!matchedEntry) {
+            skippedNoCustomer += 1;
+            return;
+          }
+        } else {
+          const candidates = byName.get(nameRaw.toLowerCase()) || [];
+          if (candidates.length === 0) {
+            skippedNoCustomer += 1;
+            return;
+          }
+          if (candidates.length > 1) {
+            skippedAmbiguousName += 1;
+            return;
+          }
+          matchedEntry = candidates[0];
+        }
+
+        const email = String(matchedEntry.email || '').trim().toLowerCase();
+        if (!email) {
+          skippedNoCustomer += 1;
+          return;
+        }
+        if (!entriesByEmail.has(email)) entriesByEmail.set(email, []);
+        entriesByEmail.get(email).push({ date: dateKey, mealName, remark: remarkRaw });
+      });
+
+      let updated = 0;
+      let unmatchedMeals = 0;
+      let failedCustomers = 0;
+
+      for (const [email, entries] of entriesByEmail.entries()) {
+        try {
+          const res = await api.patch(
+            `/menus/${selectedMenuId}/selections/${encodeURIComponent(email)}/meal-remarks`,
+            { entries }
+          );
+          if (res.data?.success) {
+            updated += res.data.data?.updated || 0;
+            unmatchedMeals += (res.data.data?.unmatched || []).length;
+          } else {
+            failedCustomers += 1;
+          }
+        } catch {
+          failedCustomers += 1;
+        }
+      }
+
+      setMealRemarksUploadResult({
+        customersUpdated: entriesByEmail.size - failedCustomers,
+        mealsUpdated: updated,
+        unmatchedMeals,
+        failedCustomers,
+        skippedNoCustomer,
+        skippedAmbiguousName,
+        skippedInvalidRow
+      });
+
+      await loadSelections();
+    } catch (err) {
+      setError(err.response?.data?.message || 'Failed to upload meal remarks');
+    } finally {
+      setUploadingMealRemarks(false);
+      event.target.value = '';
+    }
+  };
+
   const formatAddress = (addr) => {
     if (!addr) return 'No address on file';
     const parts = [
@@ -1027,6 +1271,23 @@ const KitchenList = () => {
       addr.emirate
     ].filter(Boolean);
     return parts.join(', ') || 'No address on file';
+  };
+
+  // Matter's own `emirate` field isn't consistently just the emirate name —
+  // it sometimes carries the zone baked in too (e.g. "Abu Dhabi - Al
+  // Rowdah" alongside a plain "Abu Dhabi" for other customers), and casing
+  // varies ("DUBAI" vs "Dubai"). The Day Kitchen Paper groups by emirate
+  // ONLY, never by zone, so this collapses any such variant down to one of
+  // the 7 canonical UAE emirate names before grouping — otherwise "Abu
+  // Dhabi" and "Abu Dhabi - Al Rowdah" become two separate papers instead
+  // of one.
+  const UAE_EMIRATES = ['Abu Dhabi', 'Dubai', 'Sharjah', 'Ajman', 'Umm Al Quwain', 'Ras Al Khaimah', 'Fujairah'];
+  const canonicalizeEmirate = (raw) => {
+    const cleaned = String(raw || '').trim();
+    if (!cleaned) return 'No Emirate';
+    const lower = cleaned.toLowerCase();
+    const match = UAE_EMIRATES.find((e) => lower.includes(e.toLowerCase()));
+    return match || cleaned;
   };
 
   // Extracts a sortable 24h hour from labels like "By 6 AM" / "By 12:30 PM".
@@ -1066,10 +1327,74 @@ const KitchenList = () => {
   // target macros, and NOT the physical prep weight Kitchen Counting exports).
   // A customer with no cpf on file exports blank, not "null" — cpf is
   // sparse/optional on Customer.
-  const exportCustomerMacrosToExcel = () => {
-    if (customerRows.length === 0) return;
-    const rows = customerRows.flatMap((entry) =>
-      (entry.selectedMeals || []).map((meal) => ({
+  // Reproduces the exact customer ordering downloadDayKitchenPaper uses for a
+  // date, so the two never drift apart: regular (non-partner) customers
+  // grouped by delivery emirate (A→Z), then by delivery-window hour
+  // (earliest→latest) within each emirate, then by customer name (A→Z)
+  // within each window — followed by Partner customers grouped by partner
+  // name (A→Z), then by customer name (A→Z) within each partner. A
+  // customer's own meals stay in their original selectedMeals order (just
+  // filtered to this date), matching each row of their table on the PDF.
+  const buildKitchenPaperOrder = (dateKey) => {
+    const entriesWithMeals = customerRows
+      .map((entry) => ({
+        entry,
+        dayMeals: (entry.selectedMeals || []).filter((meal) => getDateKey(meal?.date) === dateKey)
+      }))
+      .filter((row) => row.dayMeals.length > 0);
+
+    const partnerEntries = entriesWithMeals.filter((row) => !!row.entry.partner);
+    const regularEntries = entriesWithMeals.filter((row) => !row.entry.partner);
+
+    const emirateOf = (row) => canonicalizeEmirate(row.entry.deliveryAddress?.emirate);
+    const emirateGroups = new Map();
+    regularEntries.forEach((row) => {
+      const emirate = emirateOf(row);
+      if (!emirateGroups.has(emirate)) emirateGroups.set(emirate, []);
+      emirateGroups.get(emirate).push(row);
+    });
+    const sortedEmirates = Array.from(emirateGroups.keys()).sort((a, b) => a.localeCompare(b));
+
+    const ordered = [];
+    for (const emirate of sortedEmirates) {
+      const windowGroups = new Map();
+      emirateGroups.get(emirate).forEach((row) => {
+        const hourKey = parseDeliveryHour(row.entry.deliveryWindow?.label);
+        if (!windowGroups.has(hourKey)) windowGroups.set(hourKey, []);
+        windowGroups.get(hourKey).push(row);
+      });
+      const sortedWindows = Array.from(windowGroups.entries()).sort((a, b) => a[0] - b[0]);
+      sortedWindows.forEach(([, rows]) => {
+        rows.sort((a, b) => (a.entry.customerName || a.entry.email || '')
+          .localeCompare(b.entry.customerName || b.entry.email || ''));
+        ordered.push(...rows);
+      });
+    }
+
+    const partnerGroups = new Map();
+    partnerEntries.forEach((row) => {
+      const name = row.entry.partner?.businessName || 'Partner';
+      if (!partnerGroups.has(name)) partnerGroups.set(name, []);
+      partnerGroups.get(name).push(row);
+    });
+    const sortedPartners = Array.from(partnerGroups.keys()).sort((a, b) => a.localeCompare(b));
+    for (const partnerName of sortedPartners) {
+      const rows = partnerGroups.get(partnerName);
+      rows.sort((a, b) => (a.entry.customerName || a.entry.email || '')
+        .localeCompare(b.entry.customerName || b.entry.email || ''));
+      ordered.push(...rows);
+    }
+
+    return ordered;
+  };
+
+  const exportCustomerMacrosToExcel = async (dateKey) => {
+    if (!dateKey) return;
+    const orderedEntries = buildKitchenPaperOrder(dateKey);
+    if (orderedEntries.length === 0) return;
+    const XLSX = await loadXLSX();
+    const rows = orderedEntries.flatMap(({ entry, dayMeals }) =>
+      dayMeals.map((meal) => ({
         'Customer ID': entry.customerId || '',
         Name: entry.customerName || entry.email || 'Unknown',
         CPF: entry.cpf || '',
@@ -1084,7 +1409,7 @@ const KitchenList = () => {
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Customer Macros');
-    XLSX.writeFile(workbook, `kitchen-list-customer-macros-${selectedMenuId || 'export'}.xlsx`);
+    XLSX.writeFile(workbook, `kitchen-list-customer-macros-${dateKey}.xlsx`);
   };
 
   // Builds one jsPDF table per customer synchronously — for a date with
@@ -1104,6 +1429,10 @@ const KitchenList = () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     try {
+      const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
+        loadJsPDF(),
+        loadAutoTable()
+      ]);
       const dayLabel = formatDateLabel(dateKey);
       const doc = new jsPDF();
       const pageHeight = doc.internal.pageSize.getHeight();
@@ -1127,6 +1456,89 @@ const KitchenList = () => {
       // below) — that's fine, it's still all the same paper/section; what
       // must never happen is a DIFFERENT window or emirate starting partway
       // down an existing page.
+      // Renders one customer's name/address line + meal table + macro total,
+      // starting at `startY` (paginating first if there isn't room) and
+      // returning the cursorY to continue from. Shared by the regular
+      // emirate/window sections and the Partners section below so both stay
+      // in lockstep with any future formatting change.
+      const renderCustomerBlock = (entry, dayMeals, startY, subLine) => {
+        let y = startY;
+        if (y > pageHeight - 50) {
+          doc.addPage();
+          y = 20;
+        }
+
+        doc.setFontSize(12);
+        doc.setFont(undefined, 'bold');
+        doc.text(entry.customerName || entry.email || 'Unknown customer', 14, y);
+        doc.setFont(undefined, 'normal');
+        y += 6;
+
+        doc.setFontSize(9);
+        doc.text(subLine, 14, y, { maxWidth: pageWidth - 28 });
+        y += 5;
+
+        // Kitchen-only note for this specific delivery day, if one was
+        // added on Kitchen List — printed right under the address so it's
+        // impossible to miss, never shown to the customer anywhere else.
+        const dayNote = (entry.dayNotes || []).find((n) => n.date === dateKey)?.note;
+        if (dayNote) {
+          doc.setFont(undefined, 'bold');
+          doc.setTextColor(180, 83, 9);
+          doc.text(`Note: ${dayNote}`, 14, y, { maxWidth: pageWidth - 28 });
+          doc.setTextColor(0);
+          doc.setFont(undefined, 'normal');
+          y += 5;
+        }
+
+        const tableRows = dayMeals.map((meal) => {
+          const label = getMealLabel(meal);
+          return [
+            label.mealType,
+            label.mealName,
+            meal.remark ? `Change ${meal.remark}` : '',
+            `${meal.proteinWeight || 0}g`,
+            `${meal.carbWeight || 0}g`,
+            `${meal.vegWeight || 0}g`
+          ];
+        });
+
+        autoTable(doc, {
+          startY: y,
+          head: [['Type', 'Meal', 'Remark', 'P', 'C', 'V']],
+          body: tableRows,
+          theme: 'grid',
+          styles: { fontSize: 9 },
+          headStyles: { fillColor: [30, 41, 59] },
+          // The Remark column only has content some of the time — call it
+          // out in orange (matching the Kitchen List badge) so a flagged
+          // meal is impossible to miss on a busy prep sheet.
+          didParseCell: (data) => {
+            if (data.section === 'body' && data.column.index === 2 && data.cell.raw) {
+              data.cell.styles.textColor = [194, 65, 12];
+              data.cell.styles.fontStyle = 'bold';
+            }
+          },
+          margin: { left: 14, right: 14 }
+        });
+
+        y = doc.lastAutoTable.finalY + 6;
+        if (y > pageHeight - 20) {
+          doc.addPage();
+          y = 20;
+        }
+
+        doc.setFontSize(10);
+        doc.setFont(undefined, 'bold');
+        doc.text(
+          `Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}`,
+          14,
+          y
+        );
+        doc.setFont(undefined, 'normal');
+        return y + 10;
+      };
+
       const entriesWithMeals = customerRows
         .map((entry) => ({
           entry,
@@ -1134,10 +1546,16 @@ const KitchenList = () => {
         }))
         .filter((row) => row.dayMeals.length > 0);
 
-      const emirateOf = (row) => String(row.entry.deliveryAddress?.emirate || '').trim() || 'No Emirate';
+      // Members of a menu-selection Partner (Customer.partner set) get their
+      // own "Partners" section below, grouped by partner instead of delivery
+      // emirate/window — they don't have an individual home delivery address.
+      const partnerEntries = entriesWithMeals.filter((row) => !!row.entry.partner);
+      const regularEntries = entriesWithMeals.filter((row) => !row.entry.partner);
+
+      const emirateOf = (row) => canonicalizeEmirate(row.entry.deliveryAddress?.emirate);
 
       const emirateGroups = new Map();
-      entriesWithMeals.forEach((row) => {
+      regularEntries.forEach((row) => {
         const emirate = emirateOf(row);
         if (!emirateGroups.has(emirate)) emirateGroups.set(emirate, []);
         emirateGroups.get(emirate).push(row);
@@ -1186,61 +1604,56 @@ const KitchenList = () => {
           cursorY += 10;
 
           for (const { entry, dayMeals } of rows) {
-            if (cursorY > pageHeight - 50) {
-              doc.addPage();
-              cursorY = 20;
-            }
-
-            doc.setFontSize(12);
-            doc.setFont(undefined, 'bold');
-            doc.text(entry.customerName || entry.email || 'Unknown customer', 14, cursorY);
-            doc.setFont(undefined, 'normal');
-            cursorY += 6;
-
-            doc.setFontSize(9);
-            doc.text(`Address: ${formatAddress(entry.deliveryAddress)}`, 14, cursorY, { maxWidth: pageWidth - 28 });
-            cursorY += 5;
-
-            const tableRows = dayMeals.map((meal) => {
-              const label = getMealLabel(meal);
-              return [
-                label.mealType,
-                label.mealName,
-                `${meal.proteinWeight || 0}g`,
-                `${meal.carbWeight || 0}g`,
-                `${meal.vegWeight || 0}g`
-              ];
-            });
-
-            autoTable(doc, {
-              startY: cursorY,
-              head: [['Type', 'Meal', 'P', 'C', 'V']],
-              body: tableRows,
-              theme: 'grid',
-              styles: { fontSize: 9 },
-              headStyles: { fillColor: [30, 41, 59] },
-              margin: { left: 14, right: 14 }
-            });
-
-            cursorY = doc.lastAutoTable.finalY + 6;
-            if (cursorY > pageHeight - 20) {
-              doc.addPage();
-              cursorY = 20;
-            }
-
-            doc.setFontSize(10);
-            doc.setFont(undefined, 'bold');
-            doc.text(
-              `Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}`,
-              14,
-              cursorY
-            );
-            doc.setFont(undefined, 'normal');
-            cursorY += 10;
+            cursorY = renderCustomerBlock(entry, dayMeals, cursorY, `Address: ${formatAddress(entry.deliveryAddress)}`);
           }
 
           // Yield between delivery-window/emirate sections so a busy day
           // (many customers) never blocks the main thread in one unbroken stretch.
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      }
+
+      // ── Partners section — one fresh page per partner, never sharing a
+      // page with the regular emirate/window sections above or another
+      // partner, same "each section is its own paper" rule as above.
+      if (partnerEntries.length > 0) {
+        const partnerGroups = new Map();
+        partnerEntries.forEach((row) => {
+          const name = row.entry.partner?.businessName || 'Partner';
+          if (!partnerGroups.has(name)) partnerGroups.set(name, []);
+          partnerGroups.get(name).push(row);
+        });
+        const sortedPartners = Array.from(partnerGroups.keys()).sort((a, b) => a.localeCompare(b));
+
+        for (const partnerName of sortedPartners) {
+          const rows = partnerGroups.get(partnerName);
+          rows.sort((a, b) => (a.entry.customerName || a.entry.email || '')
+            .localeCompare(b.entry.customerName || b.entry.email || ''));
+
+          if (!isFirstSection) {
+            doc.addPage();
+            cursorY = 20;
+          }
+          isFirstSection = false;
+
+          doc.setFontSize(10);
+          doc.setTextColor(120);
+          doc.text(`${dayLabel} — Partners`, 14, cursorY);
+          doc.setTextColor(0);
+          cursorY += 8;
+
+          doc.setFontSize(13);
+          doc.setFont(undefined, 'bold');
+          doc.setFillColor(241, 245, 249);
+          doc.rect(14, cursorY - 5, pageWidth - 28, 8, 'F');
+          doc.text(partnerName, 16, cursorY);
+          doc.setFont(undefined, 'normal');
+          cursorY += 10;
+
+          for (const { entry, dayMeals } of rows) {
+            cursorY = renderCustomerBlock(entry, dayMeals, cursorY, `Partner: ${partnerName}`);
+          }
+
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
       }
@@ -1297,14 +1710,43 @@ const KitchenList = () => {
               </button>
               <button
                 type="button"
-                onClick={exportCustomerMacrosToExcel}
-                disabled={customerRows.length === 0}
-                title="Export customer ID, name, CPF, and macros (C/P/F) for every customer currently loaded"
+                onClick={() => exportCustomerMacrosToExcel(pdfDate)}
+                disabled={!pdfDate}
+                title="Export customer ID, name, CPF, meal name, and that meal's C/P/F/calories — one row per meal, in the same customer/meal order as the Day PDF above"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
                 <Download size={16} /> Export Customer List (Excel)
               </button>
+              <button
+                type="button"
+                onClick={downloadMealRemarksTemplate}
+                className="inline-flex items-center gap-2 rounded-2xl border border-white/20 bg-white/10 px-4 py-2.5 text-sm font-medium hover:bg-white/20"
+              >
+                <Download size={16} /> Remarks Template
+              </button>
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20">
+                <Upload size={16} className={uploadingMealRemarks ? 'animate-pulse' : ''} />
+                {uploadingMealRemarks ? 'Uploading...' : 'Upload Meal Remarks'}
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  onChange={handleMealRemarksUpload}
+                  disabled={uploadingMealRemarks || !selectedMenuId}
+                  className="hidden"
+                />
+              </label>
             </div>
+          )}
+
+          {mealRemarksUploadResult && (
+            <p className="mt-3 text-xs text-slate-300 border-t border-white/10 pt-3">
+              Meal remarks: flagged {mealRemarksUploadResult.mealsUpdated} meal(s) across {mealRemarksUploadResult.customersUpdated} customer(s).
+              {mealRemarksUploadResult.unmatchedMeals > 0 && ` ${mealRemarksUploadResult.unmatchedMeals} row(s) matched a customer but no meal on that date/name.`}
+              {mealRemarksUploadResult.skippedNoCustomer > 0 && ` ${mealRemarksUploadResult.skippedNoCustomer} row(s) skipped — customer not found (by email or name).`}
+              {mealRemarksUploadResult.skippedAmbiguousName > 0 && ` ${mealRemarksUploadResult.skippedAmbiguousName} row(s) skipped — multiple customers share that name; add an Email column to disambiguate.`}
+              {mealRemarksUploadResult.skippedInvalidRow > 0 && ` ${mealRemarksUploadResult.skippedInvalidRow} row(s) skipped — missing Date, Meal, Remark, or a Name/Email.`}
+              {mealRemarksUploadResult.failedCustomers > 0 && ` ${mealRemarksUploadResult.failedCustomers} customer(s) failed to save — try again.`}
+            </p>
           )}
         </div>
 
@@ -1315,7 +1757,7 @@ const KitchenList = () => {
               <select value={selectedMenuId} onChange={(e) => setSelectedMenuId(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm focus:border-slate-900 focus:outline-none">
                 <option value="">Select a menu...</option>
                 {menus.map((menu) => (
-                  <option key={menu._id} value={menu._id}>{menu.title || menu.name || 'Untitled menu'}</option>
+                  <option key={menu._id} value={menu._id}>{toSentenceCase(menu.title || menu.name) || 'Untitled menu'}</option>
                 ))}
               </select>
               <button
@@ -1796,10 +2238,26 @@ const KitchenList = () => {
                     Also has a delivery scheduled on {formatDateLabel(entry.missingSelectionDate)} with no meal selected yet.
                   </p>
                 )}
-                {(entry.mealsByDay || []).map((dayGroup) => (
+                {(entry.mealsByDay || []).map((dayGroup) => {
+                  const noteDraftKey = `${entry.email}::${dayGroup.dateKey}`;
+                  const savedNote = (entry.dayNotes || []).find((n) => n.date === dayGroup.dateKey)?.note || '';
+                  const noteValue = dayNoteDrafts[noteDraftKey] ?? savedNote;
+                  return (
                   <div key={`${entry.email || entry.customerId}-${dayGroup.dateKey}`} className="space-y-3">
-                    <div className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
-                      {dayGroup.dateLabel}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
+                        {dayGroup.dateLabel}
+                      </div>
+                      <input
+                        type="text"
+                        value={noteValue}
+                        onChange={(e) => setDayNoteDrafts((prev) => ({ ...prev, [noteDraftKey]: e.target.value }))}
+                        onBlur={(e) => saveDayNote(entry, dayGroup.dateKey, e.target.value)}
+                        placeholder="Add a note for this day (kitchen only)..."
+                        disabled={savingDayNoteKey === noteDraftKey}
+                        title="Visible only in Kitchen List and printed on the Day Kitchen Paper — never shown to the customer"
+                        className="min-w-[220px] flex-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 focus:border-slate-400 focus:outline-none disabled:opacity-50"
+                      />
                     </div>
                     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                       {dayGroup.meals.map((meal, index) => (
@@ -1835,6 +2293,30 @@ const KitchenList = () => {
                                 className="flex-shrink-0 rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700"
                               >
                                 Large
+                              </span>
+                            )}
+                            {meal?.needsSauceChange && (
+                              <span
+                                title={`Sauce hits a customer exclusion (${(meal.sauceConflict || []).join(', ') || 'unspecified'}) — never shown to the customer, swap it before this goes out`}
+                                className="flex-shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
+                              >
+                                Change sauce
+                              </span>
+                            )}
+                            {meal?.needsGarnishChange && (
+                              <span
+                                title={`Garnish hits a customer exclusion (${(meal.garnishConflict || []).join(', ') || 'unspecified'}) — never shown to the customer, swap it before this goes out`}
+                                className="flex-shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
+                              >
+                                Change garnish
+                              </span>
+                            )}
+                            {meal?.remark && (
+                              <span
+                                title="Manually flagged via Kitchen List's Upload Meal Remarks — swap this before it goes out"
+                                className="flex-shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
+                              >
+                                Change {meal.remark}
                               </span>
                             )}
                           </div>
@@ -1886,7 +2368,8 @@ const KitchenList = () => {
                       ))}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
               )}
             </div>

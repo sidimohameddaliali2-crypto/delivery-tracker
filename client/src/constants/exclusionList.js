@@ -239,3 +239,39 @@ export const groupExclusions = (rawString) => {
 
   return result;
 };
+
+/**
+ * Umbrella exclusion phrases that should catch more than just their own
+ * literal name — a customer excluding "All Nuts" needs to be blocked from a
+ * meal whose ingredient is named "almond" or "cashew", not just one
+ * literally named "nuts". Keys are lowercased canonical phrases (matching
+ * what groupExclusions/EXCLUSION_LIST produce); values are the specific
+ * ingredient names, also lowercased.
+ *
+ * NOTE: the nut list below reads "peanut, walnut, cashew, pistachio,
+ * almond" — "Cashew" fills a gap the original request typo'd as "Cajun"
+ * (not a nut); flag if that substitution is wrong.
+ */
+export const EXCLUSION_GROUPS = {
+  'all nuts': ['peanut', 'peanuts', 'walnut', 'cashew', 'pistachio', 'almond'],
+  'all fish': ['cream dory', 'nile perch', 'shrimp', 'salmon', 'squid', 'tuna', 'scallop'],
+};
+
+/**
+ * True if `term` (a meal ingredient name) should be treated as excluded by
+ * `exclusionPhrase` (one of the customer's canonical exclusion phrases) —
+ * either an exact match, or `term` is a member of the umbrella group
+ * `exclusionPhrase` names (see EXCLUSION_GROUPS above).
+ */
+export const exclusionMatchesTerm = (exclusionPhrase, term) => {
+  const ex = String(exclusionPhrase || '').trim().toLowerCase();
+  const t = String(term || '').trim().toLowerCase();
+  if (!ex || !t) return false;
+  if (ex === t) return true;
+  const group = EXCLUSION_GROUPS[ex];
+  return group ? group.includes(t) : false;
+};
+
+/** True if `exclusionPhrase` matches any term in `terms` — see exclusionMatchesTerm. */
+export const exclusionMatchesAny = (exclusionPhrase, terms) =>
+  (terms || []).some((t) => exclusionMatchesTerm(exclusionPhrase, t));

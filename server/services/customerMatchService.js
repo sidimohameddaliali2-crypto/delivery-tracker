@@ -21,7 +21,13 @@ export const buildEmailRegex = (email) => {
 };
 const normalizePhoneDigits = (value) => String(value || '').replace(/\D/g, '');
 const phoneSuffix = (value, len = 9) => normalizePhoneDigits(value).slice(-len);
-const normalizeName = (first, last) => [first, last].filter(Boolean).join(' ').trim().toLowerCase();
+// Collapses internal whitespace too, not just leading/trailing — a Matter
+// subscription's `name` field arriving with a double space or stray tab
+// (e.g. "Charles  Thompson") would otherwise silently fail to match a
+// customer whose name normalizes to a single space, creating a duplicate
+// customer instead of linking the existing one.
+const collapseWhitespace = (value) => String(value || '').trim().replace(/\s+/g, ' ');
+const normalizeName = (first, last) => collapseWhitespace([first, last].filter(Boolean).join(' ')).toLowerCase();
 
 export const MATCH_PROJECTION = 'customerId email firstName lastName phone company planStartDate cycleDuration amountPaid discount mealExclusion matterSubscriptionId';
 
@@ -99,8 +105,17 @@ export function resolveCustomerMatchBulk(customers, subscriptions) {
 
   const results = new Map();
   for (const sub of subscriptions) {
-    if (!sub || sub.subscriptionId == null) continue;
-    const subId = String(sub.subscriptionId);
+    // Two different callers hand this two different shapes: the /match/bulk
+    // REST endpoint's client payload uses `subscriptionId` (camelCase), the
+    // Kitchen auto-populate job passes matterApiService's raw output, which
+    // uses `subscription_id` (snake_case, Matter's own field name). Missing
+    // either one meant every subscription from that caller silently matched
+    // nothing — no manual link, no email, no phone, no name — and got a
+    // brand-new duplicate customer created every time, regardless of
+    // whether a real linked account already existed.
+    const rawSubId = sub?.subscriptionId ?? sub?.subscription_id;
+    if (!sub || rawSubId == null) continue;
+    const subId = String(rawSubId);
 
     let customer = byManualLink.get(subId) || null;
     let matchedBy = customer ? 'manual' : null;
@@ -119,7 +134,7 @@ export function resolveCustomerMatchBulk(customers, subscriptions) {
     }
 
     if (!customer && sub.name) {
-      customer = byName.get(String(sub.name).trim().toLowerCase()) || null;
+      customer = byName.get(collapseWhitespace(sub.name).toLowerCase()) || null;
       if (customer) matchedBy = 'name';
     }
 

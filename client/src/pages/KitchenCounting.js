@@ -1,8 +1,16 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { ChefHat, Download, Loader, RefreshCw } from 'lucide-react';
-import * as XLSX from 'xlsx';
+// xlsx is only needed once a staff member clicks an export button — loaded
+// on first use and memoized instead of shipping it in the app's shared
+// bundle for every page/route (see KitchenList.js for the same pattern).
+let xlsxModulePromise = null;
+const loadXLSX = () => {
+  if (!xlsxModulePromise) xlsxModulePromise = import('xlsx');
+  return xlsxModulePromise;
+};
 import api from '../utils/api';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
+import { toSentenceCase } from '../utils/textFormat';
 import {
   getDateKey,
   formatDateLabel,
@@ -220,7 +228,47 @@ const KitchenCounting = () => {
     .filter((r) => r.category === 'meal')
     .reduce((sum, r) => sum + r.count, 0);
 
-  const exportToExcel = () => {
+  // Per-meal drill-down: every customer who has THIS specific meal (same
+  // category + name) on the selected date, with their own portion weight —
+  // a customer who picked the same dish twice (quantity: 2) gets two rows
+  // here, one per portion, not one row with a quantity column, so the
+  // kitchen can tick off physical portions one by one.
+  const downloadMealCustomerList = async (category, mealName) => {
+    const rows = [];
+    customerEntries.forEach((entry) => {
+      (entry.selectedMeals || [])
+        .filter((meal) => getDateKey(meal?.date) === selectedDate)
+        .filter((meal) => (meal.category || 'meal') === category && (meal.mealName || meal.menuItemName || 'Unnamed meal') === mealName)
+        .forEach((meal) => {
+          const qty = Number(meal.quantity) || 1;
+          for (let i = 0; i < qty; i += 1) {
+            rows.push({
+              'Customer ID': entry.customerId || '',
+              Name: getCustomerName(entry),
+              Email: entry.email || '',
+              'Protein Weight (g)': Math.round(Number(meal.proteinWeight) || 0),
+              'Carb Weight (g)': Math.round(Number(meal.carbWeight) || 0),
+              'Veg Weight (g)': Math.round(Number(meal.vegWeight) || 0),
+              'Total Weight (g)': Math.round(Number(meal.weight) || 0),
+              C: Math.round(Number(meal.macros?.C) || 0),
+              P: Math.round(Number(meal.macros?.P) || 0),
+              F: Math.round(Number(meal.macros?.F) || 0)
+            });
+          }
+        });
+    });
+
+    if (rows.length === 0) return;
+
+    const XLSX = await loadXLSX();
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Customers');
+    const safeName = mealName.replace(/[^a-z0-9]+/gi, '-').toLowerCase().replace(/^-+|-+$/g, '');
+    XLSX.writeFile(workbook, `kitchen-counting-${safeName}-${selectedDate}.xlsx`);
+  };
+
+  const exportToExcel = async () => {
     if (countRows.length === 0) return;
     const rows = countRows.map((r) => ({
       Category: CATEGORY_LABEL[r.category] || r.category,
@@ -230,6 +278,7 @@ const KitchenCounting = () => {
       'Total Carb Weight (g)': Math.round(r.totalCarbWeight),
       'Total Veg Weight (g)': Math.round(r.totalVegWeight)
     }));
+    const XLSX = await loadXLSX();
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
@@ -263,7 +312,7 @@ const KitchenCounting = () => {
             >
               <option value="">Select a menu...</option>
               {menus.map((menu) => (
-                <option key={menu._id} value={menu._id}>{menu.title || menu.name || 'Untitled menu'}</option>
+                <option key={menu._id} value={menu._id}>{toSentenceCase(menu.title || menu.name) || 'Untitled menu'}</option>
               ))}
             </select>
           </div>
@@ -338,7 +387,8 @@ const KitchenCounting = () => {
                       <th className="py-2 pr-3 text-right">Count</th>
                       <th className="py-2 pr-3 text-right">Total Protein (g)</th>
                       <th className="py-2 pr-3 text-right">Total Carb (g)</th>
-                      <th className="py-2 text-right">Total Veg (g)</th>
+                      <th className="py-2 pr-3 text-right">Total Veg (g)</th>
+                      <th className="py-2 text-right">Customers</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -353,7 +403,17 @@ const KitchenCounting = () => {
                         <td className="py-2 pr-3 text-right font-semibold text-slate-900">{row.count}</td>
                         <td className="py-2 pr-3 text-right text-slate-600">{Math.round(row.totalProteinWeight)}</td>
                         <td className="py-2 pr-3 text-right text-slate-600">{Math.round(row.totalCarbWeight)}</td>
-                        <td className="py-2 text-right text-slate-600">{Math.round(row.totalVegWeight)}</td>
+                        <td className="py-2 pr-3 text-right text-slate-600">{Math.round(row.totalVegWeight)}</td>
+                        <td className="py-2 text-right">
+                          <button
+                            type="button"
+                            onClick={() => downloadMealCustomerList(row.category, row.mealName)}
+                            title={`Download every customer who has ${row.mealName}, with their portion weight`}
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                          >
+                            <Download size={12} />
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>

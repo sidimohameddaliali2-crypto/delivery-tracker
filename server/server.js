@@ -31,6 +31,7 @@ import { initializeSpaces } from './config/spaces.js';
 import { startFlaggedNotifier } from './jobs/flaggedCustomerNotifier.js';
 import { startMoveUncollectedCollectionsJob } from './jobs/moveUncollectedCollections.js';
 import { startRecalculateDriverKpisJob } from './jobs/recalculateDriverKpis.js';
+import { startImportMatterDeliveriesJob } from './jobs/importMatterDeliveries.js';
 
 // Initialize Spaces after dotenv loads
 initializeSpaces();
@@ -160,6 +161,7 @@ import alertsRoutes from './routes/alerts.js';
 import communicationRoutes from './routes/communications.js';
 import handoffRoutes from './routes/handoffs.js';
 import menuRoutes from './routes/menus.js';
+import supyService from './services/supyService.js';
 import customerRoutes from './routes/customers.js';
 import incidentRoutes from './routes/incidents.js';
 import storeKeeperScansRoutes from './routes/storeKeeperScans.js';
@@ -393,6 +395,11 @@ server.listen(PORT, () => {
 startFlaggedNotifier();
 startMoveUncollectedCollectionsJob();
 startRecalculateDriverKpisJob();
+startImportMatterDeliveriesJob();
+
+// Warm the Supy recipe search cache so the first meal-editor search of the
+// day isn't the one waiting on a ~2500-recipe cold fetch.
+supyService.warmCache();
 
 // Start background notifier if enabled (runs immediately and then at configured interval)
 if (process.env.ENABLE_FLAGGED_ALERTS === '1') {

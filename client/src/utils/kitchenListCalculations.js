@@ -92,6 +92,42 @@ const getDefaultBreakfastPreset = (preset = {}) => {
   };
 };
 
+// Per-meal breakfast-preset matching falls back to up to 3 scans over the
+// whole preset table (simplified-name, compact-name, substring) whenever
+// there's no exact key hit — called once per meal, per customer, on every
+// recompute. Indexing the simplified/compact scans as Maps (built once per
+// distinct `presetsByName` object, cached by object identity) turns that
+// into O(1) lookups; only the inherently-O(n) substring fallback still
+// scans, but with its candidate keys precomputed instead of re-normalized
+// per meal. `presetsByName` is a freshly-built object on every real preset
+// reload (never mutated in place), so WeakMap identity caching invalidates
+// correctly and automatically.
+const breakfastPresetIndexCache = new WeakMap();
+const getBreakfastPresetIndex = (map) => {
+  let index = breakfastPresetIndexCache.get(map);
+  if (index) return index;
+
+  const bySimplifiedKey = new Map();
+  const byCompactKey = new Map();
+  const entries = [];
+  Object.entries(map || {}).forEach(([rawKey, rawValue]) => {
+    const candidateName = rawValue?.breakfastName || rawKey;
+    const simplifiedCandidateKey = simplifyBreakfastName(candidateName);
+    const compactCandidateKey = compactBreakfastName(candidateName);
+    if (simplifiedCandidateKey && !bySimplifiedKey.has(simplifiedCandidateKey)) {
+      bySimplifiedKey.set(simplifiedCandidateKey, rawValue);
+    }
+    if (compactCandidateKey && !byCompactKey.has(compactCandidateKey)) {
+      byCompactKey.set(compactCandidateKey, rawValue);
+    }
+    entries.push({ simplifiedCandidateKey, compactCandidateKey, value: rawValue });
+  });
+
+  index = { bySimplifiedKey, byCompactKey, entries };
+  breakfastPresetIndexCache.set(map, index);
+  return index;
+};
+
 const resolveBreakfastPresetForMeal = (meal, preset = {}) => {
   const defaultPreset = getDefaultBreakfastPreset(preset);
   const map = preset?.presetsByName || {};
@@ -109,31 +145,16 @@ const resolveBreakfastPresetForMeal = (meal, preset = {}) => {
   let match = exactKey ? map[exactKey] : null;
 
   if (!match && simplifiedMealKey) {
-    const mapEntries = Object.entries(map || {});
+    const index = getBreakfastPresetIndex(map);
 
-    const exactSimplifiedEntry = mapEntries.find(([rawKey, rawValue]) => {
-      const candidateName = rawValue?.breakfastName || rawKey;
-      return simplifyBreakfastName(candidateName) === simplifiedMealKey;
-    });
-    if (exactSimplifiedEntry) {
-      match = exactSimplifiedEntry[1];
-    }
+    match = index.bySimplifiedKey.get(simplifiedMealKey) || null;
 
     if (!match && compactMealKey) {
-      const compactEntry = mapEntries.find(([rawKey, rawValue]) => {
-        const candidateName = rawValue?.breakfastName || rawKey;
-        return compactBreakfastName(candidateName) === compactMealKey;
-      });
-      if (compactEntry) {
-        match = compactEntry[1];
-      }
+      match = index.byCompactKey.get(compactMealKey) || null;
     }
 
     if (!match) {
-      const partialEntry = mapEntries.find(([rawKey, rawValue]) => {
-        const candidateName = rawValue?.breakfastName || rawKey;
-        const simplifiedCandidateKey = simplifyBreakfastName(candidateName);
-        const compactCandidateKey = compactBreakfastName(candidateName);
+      const partialEntry = index.entries.find(({ simplifiedCandidateKey, compactCandidateKey }) => {
         if (!simplifiedCandidateKey) return false;
         return (
           simplifiedMealKey.includes(simplifiedCandidateKey)
@@ -145,7 +166,7 @@ const resolveBreakfastPresetForMeal = (meal, preset = {}) => {
         );
       });
       if (partialEntry) {
-        match = partialEntry[1];
+        match = partialEntry.value;
       }
     }
   }
@@ -169,6 +190,31 @@ const resolveBreakfastPresetForMeal = (meal, preset = {}) => {
 // already stored on the meal (meal.snackMacros — the per-date option's own
 // value, divided by snacksPerDay at assignment time), so nothing regresses
 // for snacks the kitchen hasn't added to this table yet.
+// Same identity-cached-index approach as resolveBreakfastPresetForMeal above.
+const snackPresetIndexCache = new WeakMap();
+const getSnackPresetIndex = (map) => {
+  let index = snackPresetIndexCache.get(map);
+  if (index) return index;
+
+  const bySimplifiedKey = new Map();
+  const byCompactKey = new Map();
+  Object.entries(map || {}).forEach(([rawKey, rawValue]) => {
+    const candidateName = rawValue?.snackName || rawKey;
+    const simplifiedCandidateKey = simplifyBreakfastName(candidateName);
+    const compactCandidateKey = compactBreakfastName(candidateName);
+    if (simplifiedCandidateKey && !bySimplifiedKey.has(simplifiedCandidateKey)) {
+      bySimplifiedKey.set(simplifiedCandidateKey, rawValue);
+    }
+    if (compactCandidateKey && !byCompactKey.has(compactCandidateKey)) {
+      byCompactKey.set(compactCandidateKey, rawValue);
+    }
+  });
+
+  index = { bySimplifiedKey, byCompactKey };
+  snackPresetIndexCache.set(map, index);
+  return index;
+};
+
 const resolveSnackPresetForMeal = (meal, snackPresetsByName = {}) => {
   const mealSnackName = String(meal?.mealName || meal?.menuItemName || meal?.menuItemId?.mealName || '').trim();
   if (!mealSnackName) return null;
@@ -180,20 +226,12 @@ const resolveSnackPresetForMeal = (meal, snackPresetsByName = {}) => {
   let match = exactKey ? snackPresetsByName[exactKey] : null;
 
   if (!match && simplifiedMealKey) {
-    const mapEntries = Object.entries(snackPresetsByName || {});
+    const index = getSnackPresetIndex(snackPresetsByName);
 
-    const exactSimplifiedEntry = mapEntries.find(([rawKey, rawValue]) => {
-      const candidateName = rawValue?.snackName || rawKey;
-      return simplifyBreakfastName(candidateName) === simplifiedMealKey;
-    });
-    if (exactSimplifiedEntry) match = exactSimplifiedEntry[1];
+    match = index.bySimplifiedKey.get(simplifiedMealKey) || null;
 
     if (!match && compactMealKey) {
-      const compactEntry = mapEntries.find(([rawKey, rawValue]) => {
-        const candidateName = rawValue?.snackName || rawKey;
-        return compactBreakfastName(candidateName) === compactMealKey;
-      });
-      if (compactEntry) match = compactEntry[1];
+      match = index.byCompactKey.get(compactMealKey) || null;
     }
   }
 
@@ -235,7 +273,13 @@ const getMacroAdjustment = (deliveryNumber) => {
 };
 
 const resolveProteinType = (meal) => {
-  const manualProteinType = normalizeText(meal?.manualProteinType || meal?.proteinType || meal?.proteinSourceType);
+  // manualProteinType is a kitchen staffer's explicit override (highest
+  // priority); menuItemId.portionType is the type set on the meal itself in
+  // the meal editor (Supy-linked meals) — both are explicit tags, checked
+  // before falling back to keyword-sniffing the meal name below.
+  const manualProteinType = normalizeText(
+    meal?.manualProteinType || meal?.proteinType || meal?.proteinSourceType || meal?.menuItemId?.portionType
+  );
   if (manualProteinType === 'chicken' || manualProteinType === 'beef' || manualProteinType === 'fish') {
     return manualProteinType;
   }
@@ -501,9 +545,26 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
       F: Number(defaultPreset.F) || 0
     };
 
+    // The escalated profile is a FIXED 200g carb / 150g protein allocation —
+    // fine for a customer whose daily target comfortably exceeds that, but
+    // for a customer whose entire day's budget is smaller than the fixed
+    // escalation itself (e.g. a 1-meal-per-day plan with 180g carbs / 120g
+    // protein total), "escalating" would consume more than their whole day,
+    // clamping every other meal to 0 — worse than the over-cap problem it's
+    // meant to solve. Only escalate when it can't backfire this way.
+    const escalationWouldFitBudget = normalizedMacros.C > LARGE_BREAKFAST_FIXED_MACROS.C
+      && normalizedMacros.P > LARGE_BREAKFAST_FIXED_MACROS.P;
+
     if (dayWouldExceedCap(dayKey, dayMeta, defaultBreakfastMacros)) {
-      dayUsesLargeBreakfast.add(dayKey);
-      if (dayWouldExceedCap(dayKey, dayMeta, LARGE_BREAKFAST_FIXED_MACROS)) {
+      if (escalationWouldFitBudget) {
+        dayUsesLargeBreakfast.add(dayKey);
+        if (dayWouldExceedCap(dayKey, dayMeta, LARGE_BREAKFAST_FIXED_MACROS)) {
+          dayHasMacroShortfall.add(dayKey);
+        }
+      } else {
+        // Can't safely escalate — accept the over-cap meal(s) with the
+        // default breakfast instead (still capped per-meal below), same
+        // visibility flag as the "still over even after escalating" case.
         dayHasMacroShortfall.add(dayKey);
       }
     }
@@ -749,6 +810,11 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
     macros: normalizedMacros,
     snacksPerDay: customer?.snacksPerDay ?? null,
     planName: customer?.planName ?? null,
+    // Set when this customer is a B2B Partner's member ordering through Menu
+    // Selection (Partner.menuSelectionEnabled) — the kitchen paper groups
+    // these under a "Partners" section instead of by delivery emirate/window.
+    partner: customer?.partner ?? null,
+    unlimitedMeals: !!customer?.unlimitedMeals,
     deliveryAddress: customer?.deliveryAddress ?? null,
     deliveryWindow: customer?.deliveryWindow ?? null,
     // Dietary restrictions from the Matter website subscription (resolved via

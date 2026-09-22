@@ -2,7 +2,18 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Mail, ChevronRight, ChevronLeft, Check, AlertCircle, Loader, X, UtensilsCrossed, Eye, EyeOff, Pencil, Copy } from 'lucide-react';
 import api from '../utils/api';
 import { calculateCalories, distributeMacros, lookupProteinWeight, lookupCarbWeight } from '../utils/nutrition';
-import { groupExclusions } from '../constants/exclusionList';
+import { groupExclusions, exclusionMatchesTerm } from '../constants/exclusionList';
+
+// portion/carb/vegIngredients are tagged [{name, visible}] lists set in the
+// meal editor — only ingredients marked visible are ever shown here; hidden
+// ones still feed allergen/exclusion matching (see allergenBlockedIds) but
+// never reach this display.
+const visibleIngredientNames = (list) =>
+  (Array.isArray(list) ? list : [])
+    .filter((t) => t?.visible !== false)
+    .map((t) => t?.name)
+    .filter(Boolean)
+    .join(', ');
 
 const MenuSelection = ({ token }) => {
   const [step, setStep] = useState('email'); // email, loading, meals, complete
@@ -281,7 +292,8 @@ const MenuSelection = ({ token }) => {
 
   useEffect(() => {
     if (!inlineLimitError) return;
-    const maxPerDay = Number(customerProfile?.mealPerDay) || 1;
+    // Menu-selection Partner members (Customer.unlimitedMeals) have no daily cap.
+    const maxPerDay = customerProfile?.unlimitedMeals ? Infinity : (Number(customerProfile?.mealPerDay) || 1);
     const errorDate = inlineLimitError.dateKey;
     if (!errorDate) return;
 
@@ -403,7 +415,9 @@ const MenuSelection = ({ token }) => {
   };
 
   const handleMealSelect = (mealItemId, mealEntry) => {
-    // Allergen hard-block is highest priority — check before anything else
+    // Allergen hard-block (customer's real allergy list) is separate from all
+    // of this, checked first, and unaffected by any of the exclusion routing
+    // below — see allergenBlockedIds.
     const _blockCheck = String(mealItemId || '');
     if (allergenBlockedIds.has(_blockCheck)) return;
     if (showExclusionModal || showRemainingModal || showBreakfastModal || showCarbVegModal || showKeepOrReplaceModal) return;
@@ -416,62 +430,57 @@ const MenuSelection = ({ token }) => {
       .split(/[,;|\n\r]/)
       .map((item) => item.trim())
       .filter(Boolean);
+    // portion/carb/vegIngredients are tagged [{name, visible}] lists — every
+    // ingredient is checked here regardless of its visible flag.
+    const getTagNames = (list) => (Array.isArray(list) ? list : []).map((t) => t?.name).filter(Boolean);
 
     const normalizeToken = (value) => String(value || '').trim().toLowerCase();
+    // exclusionMatchesTerm covers both an exact match and umbrella groups
+    // like "All Nuts"/"All Fish" (see constants/exclusionList.js) — a
+    // customer excluding "All Nuts" is caught by an ingredient named
+    // "almond", not just one literally named "nuts".
+    const matchAgainstExclusions = (rawTerms, exclusions) => rawTerms.filter((term) =>
+      exclusions.some((ex) => exclusionMatchesTerm(ex, term))
+    );
 
     const selectedItem = currentMeal?.items?.find(item => String(item._id) === String(mealItemId));
     const exclusionsRaw = groupExclusions(customerProfile?.mealExclusion);
-    const allergensRaw = getTokens(selectedItem?.intolerances);
-    const carbsRaw = getTokens(selectedItem?.carbs);
-    const vegRaw = getTokens(selectedItem?.veg);
     const exclusions = exclusionsRaw.map(normalizeToken);
-    const allergens = allergensRaw.map(normalizeToken);
-    const carbs = carbsRaw.map(normalizeToken);
-    const veg = vegRaw.map(normalizeToken);
-    const allMealTokens = [...allergens, ...carbs, ...veg];
-    const allMealTokensRaw = [...allergensRaw, ...carbsRaw, ...vegRaw];
 
     const selectionKeyDate = getDateKey(currentMeal.date);
     const existingSelection = selectedMeals.find(
       (m) => m.date === selectionKeyDate && m.menuItemId === mealItemId
     );
 
-    let matchedExclusions = [];
-    let matchedAllergens = [];
+    // Component-specific exclusion routing:
+    //  - portion match  -> full "Exclusion Alert" modal (customer sees it)
+    //  - carb/veg match -> "change carb"/"change veg" modal (customer sees it)
+    //  - sauce/garnish match -> no customer-facing message at all; just a
+    //    backend flag (needsSauceChange/needsGarnishChange) for Kitchen List.
+    let matchedPortion = [];
     let hasConflict = false;
     let matchedCarbItems = [];
     let matchedVegItems = [];
     let hasCarbVegConflict = false;
-    if (!existingSelection && exclusions.length > 0 && allMealTokens.length > 0) {
-      // Check allergen/intolerance conflict first
-      const allergenMatchedExclusions = exclusionsRaw.filter((ex) => {
-        const exNorm = normalizeToken(ex);
-        return allergens.some((token) => token === exNorm);
-      });
-      if (allergenMatchedExclusions.length > 0) {
-        // Allergen path — use existing alert
-        matchedExclusions = exclusionsRaw.filter((ex) => {
-          const exNorm = normalizeToken(ex);
-          return allMealTokens.some((token) => token === exNorm);
-        });
-        matchedAllergens = allMealTokensRaw.filter((token) => {
-          const tokenNorm = normalizeToken(token);
-          return exclusions.some((ex) => tokenNorm === ex);
-        });
-        hasConflict = matchedExclusions.length > 0 && matchedAllergens.length > 0;
-      } else {
-        // No allergen conflict — check carb/veg only
-        matchedCarbItems = carbsRaw.filter((carbToken) => {
-          const carbNorm = normalizeToken(carbToken);
-          return exclusions.some((ex) => carbNorm === ex);
-        });
-        matchedVegItems = vegRaw.filter((vegToken) => {
-          const vegNorm = normalizeToken(vegToken);
-          return exclusions.some((ex) => vegNorm === ex);
-        });
-        hasCarbVegConflict = matchedCarbItems.length > 0 || matchedVegItems.length > 0;
-      }
+    let matchedSauce = [];
+    let matchedGarnish = [];
+    if (!existingSelection && exclusions.length > 0) {
+      matchedPortion = matchAgainstExclusions(getTagNames(selectedItem?.portionIngredients), exclusions);
+      hasConflict = matchedPortion.length > 0;
+
+      matchedCarbItems = matchAgainstExclusions(getTagNames(selectedItem?.carbIngredients), exclusions);
+      matchedVegItems = matchAgainstExclusions(getTagNames(selectedItem?.vegIngredients), exclusions);
+      hasCarbVegConflict = matchedCarbItems.length > 0 || matchedVegItems.length > 0;
+
+      matchedSauce = matchAgainstExclusions(getTagNames(selectedItem?.sauceIngredients), exclusions);
+      matchedGarnish = matchAgainstExclusions(getTokens(selectedItem?.garnish), exclusions);
     }
+    const sauceGarnishFlags = {
+      needsSauceChange: matchedSauce.length > 0,
+      needsGarnishChange: matchedGarnish.length > 0,
+      sauceConflict: matchedSauce,
+      garnishConflict: matchedGarnish
+    };
 
     const isBreakfast = String(currentMeal.mealType || '').toLowerCase() === 'breakfast';
     if (
@@ -484,12 +493,12 @@ const MenuSelection = ({ token }) => {
         mealItemId,
         currentMeal,
         selectedItem,
-        exclusions: matchedExclusions,
-        allergens: matchedAllergens,
+        exclusions: matchedPortion,
         hasConflict,
         hasCarbVegConflict,
         matchedCarbItems,
-        matchedVegItems
+        matchedVegItems,
+        ...sauceGarnishFlags
       });
       setAcknowledgeBreakfast(false);
       setShowBreakfastModal(true);
@@ -501,8 +510,8 @@ const MenuSelection = ({ token }) => {
         mealItemId,
         currentMeal,
         selectedItem,
-        exclusions: matchedExclusions,
-        allergens: matchedAllergens
+        exclusions: matchedPortion,
+        ...sauceGarnishFlags
       });
       setAcknowledgeExclusion(false);
       setShowExclusionModal(true);
@@ -515,7 +524,8 @@ const MenuSelection = ({ token }) => {
         currentMeal,
         selectedItem,
         matchedCarbItems,
-        matchedVegItems
+        matchedVegItems,
+        ...sauceGarnishFlags
       });
       setAcknowledgeExclusion(false);
       setShowCarbVegModal(true);
@@ -525,7 +535,8 @@ const MenuSelection = ({ token }) => {
     proceedWithSelection({
       currentMeal,
       mealItemId,
-      selectedItem
+      selectedItem,
+      ...sauceGarnishFlags
     });
   };
 
@@ -556,7 +567,11 @@ const MenuSelection = ({ token }) => {
 
   const handleBreakfastConfirm = (payload) => {
     if (!payload) return;
-    const { mealItemId, currentMeal, selectedItem, exclusions, allergens, hasConflict, hasCarbVegConflict, matchedCarbItems, matchedVegItems } = payload;
+    const {
+      mealItemId, currentMeal, selectedItem, exclusions, hasConflict, hasCarbVegConflict, matchedCarbItems, matchedVegItems,
+      needsSauceChange, needsGarnishChange, sauceConflict, garnishConflict
+    } = payload;
+    const sauceGarnishFlags = { needsSauceChange, needsGarnishChange, sauceConflict, garnishConflict };
 
     setShowBreakfastModal(false);
     setPendingBreakfastSelection(null);
@@ -564,14 +579,14 @@ const MenuSelection = ({ token }) => {
     setBreakfastDisclaimerShown(true);
 
     if (hasConflict) {
-      setPendingSelection({ mealItemId, currentMeal, selectedItem, exclusions, allergens });
+      setPendingSelection({ mealItemId, currentMeal, selectedItem, exclusions, ...sauceGarnishFlags });
       setAcknowledgeExclusion(false);
       setShowExclusionModal(true);
       return;
     }
 
     if (hasCarbVegConflict) {
-      setPendingCarbVegPayload({ mealItemId, currentMeal, selectedItem, matchedCarbItems, matchedVegItems });
+      setPendingCarbVegPayload({ mealItemId, currentMeal, selectedItem, matchedCarbItems, matchedVegItems, ...sauceGarnishFlags });
       setAcknowledgeExclusion(false);
       setShowCarbVegModal(true);
       return;
@@ -585,7 +600,8 @@ const MenuSelection = ({ token }) => {
     const mealItemId = payload?.mealItemId;
     if (!currentMeal?.date || !mealItemId) return;
 
-    const maxPerDay = Number(customerProfile?.mealPerDay) || 1;
+    // Menu-selection Partner members (Customer.unlimitedMeals) have no daily cap.
+    const maxPerDay = customerProfile?.unlimitedMeals ? Infinity : (Number(customerProfile?.mealPerDay) || 1);
     const selectionKeyDate = getDateKey(currentMeal.date);
     const isBreakfast = String(currentMeal.mealType || '').toLowerCase() === 'breakfast';
 
@@ -633,6 +649,15 @@ const MenuSelection = ({ token }) => {
             carbVegConflict: [...(payload.matchedCarbItems || []), ...(payload.matchedVegItems || [])],
             carbConflict: payload.matchedCarbItems || [],
             vegConflict: payload.matchedVegItems || []
+          } : {}),
+          // Sauce/garnish exclusion matches never block or prompt the
+          // customer — the meal is added normally either way, this just
+          // carries the flag through to Kitchen List for staff.
+          ...(payload.needsSauceChange || payload.needsGarnishChange ? {
+            needsSauceChange: !!payload.needsSauceChange,
+            needsGarnishChange: !!payload.needsGarnishChange,
+            sauceConflict: payload.sauceConflict || [],
+            garnishConflict: payload.garnishConflict || []
           } : {})
         }
       ];
@@ -642,6 +667,8 @@ const MenuSelection = ({ token }) => {
   };
 
   const getRemainingForDate = (dateValue) => {
+    // Unlimited customers never get nagged to "pick N more" — there's no quota to hit.
+    if (customerProfile?.unlimitedMeals) return 0;
     const maxPerDay = Number(customerProfile?.mealPerDay) || 1;
     const selectedForDate = selectedMeals.filter((m) => m.date === getDateKey(dateValue));
     const countedMeals = selectedForDate
@@ -844,6 +871,12 @@ const MenuSelection = ({ token }) => {
         .split(/[,;|\n\r]/)
         .map((t) => t.trim().toLowerCase())
         .filter(Boolean);
+    // portion/carb/vegIngredients are tagged [{name, visible}] lists — every
+    // ingredient is checked here regardless of its visible flag, since
+    // hiding an ingredient from the customer must never hide it from an
+    // allergy check.
+    const tagTokens = (list) =>
+      (Array.isArray(list) ? list : []).map((t) => String(t?.name || '').trim().toLowerCase()).filter(Boolean);
 
     weeklyMenu.meals.forEach((meal) => {
       (meal.items || []).forEach((item) => {
@@ -855,9 +888,15 @@ const MenuSelection = ({ token }) => {
         // Also scan intolerances so allergen hard-block wins even when
         // content was entered in the intolerances (soft-warning) field.
         const intoleranceTokens = splitTokens(item.intolerances);
-        const carbTokens = splitTokens(item.carbs);
-        const vegTokens = splitTokens(item.veg);
-        const allTokens = [...allergenTokens, ...intoleranceTokens, ...carbTokens, ...vegTokens];
+        // proteinSource/carbs/veg/sauce hold the searched recipe's own name
+        // (what the customer sees) — the portion/carb/veg/sauceIngredients
+        // fields hold that recipe's actual ingredient names, which is what
+        // actually needs checking against a customer's allergies.
+        const proteinTokens = [...splitTokens(item.proteinSource), ...tagTokens(item.portionIngredients)];
+        const carbTokens = [...splitTokens(item.carbs), ...tagTokens(item.carbIngredients)];
+        const vegTokens = [...splitTokens(item.veg), ...tagTokens(item.vegIngredients)];
+        const sauceTokens = [...splitTokens(item.sauce), ...tagTokens(item.sauceIngredients)];
+        const allTokens = [...allergenTokens, ...intoleranceTokens, ...proteinTokens, ...carbTokens, ...vegTokens, ...sauceTokens];
         const matched = allTokens.filter((token) => customerAllergies.includes(token));
         if (matched.length > 0) {
           blocked.set(itemId, matched);
@@ -980,7 +1019,7 @@ const MenuSelection = ({ token }) => {
         ...withoutSlot,
         {
           date: dateKey,
-          mealType: 'lunch',
+          mealType: 'main',
           menuItemId: fallbackItemId ? String(fallbackItemId) : undefined,
           mealName,
           quantity: 1,
@@ -1185,7 +1224,7 @@ const MenuSelection = ({ token }) => {
                 <div className="mt-4 space-y-2 text-sm">
                   <p>
                     <span className="font-semibold">Meals/Day:</span>{' '}
-                    {customerProfile.mealPerDay}
+                    {customerProfile.unlimitedMeals ? 'Unlimited' : customerProfile.mealPerDay}
                   </p>
                   <p>
                     <span className="font-semibold">Plan:</span> {customerProfile.mealPlan}
@@ -1332,7 +1371,10 @@ const MenuSelection = ({ token }) => {
                   {isBodybuilderFlow ? (
                     <div className="space-y-4">
                       <p className="text-sm text-gray-600">Tap a meal box to select Protein, Vegetables, and Carbs.</p>
-                      {Array.from({ length: Number(customerProfile?.mealPerDay) || 1 }, (_, idx) => idx + 1).map((slotNumber) => {
+                      {/* Unlimited (menu-selection Partner) customers aren't capped at
+                          mealPerDay — give the fixed-slot Bodybuilder grid some headroom
+                          instead of the usual 1-5 slots. */}
+                      {Array.from({ length: customerProfile?.unlimitedMeals ? 12 : (Number(customerProfile?.mealPerDay) || 1) }, (_, idx) => idx + 1).map((slotNumber) => {
                         const selectedSlot = selectedMeals.find(
                           (m) => m.date === getDateKey(currentDateGroup?.date) && Number(m.slotNumber) === slotNumber
                         );
@@ -1435,14 +1477,28 @@ const MenuSelection = ({ token }) => {
                                   </div>
                                 )}
                                 <h4 className={`font-black text-base uppercase tracking-wide mb-3 break-words leading-snug ${isAllergenBlocked ? 'text-red-800' : 'text-gray-900'}`}>{item.mealName}</h4>
+                                {item.proteinSource && (
+                                  <p className="text-sm text-gray-700 mb-1 break-words lowercase">
+                                    <span className="font-bold text-gray-500">Portion:</span> {item.proteinSource}
+                                    {visibleIngredientNames(item.portionIngredients) && ` — ${visibleIngredientNames(item.portionIngredients)}`}
+                                  </p>
+                                )}
                                 {item.carbs && (
                                   <p className="text-sm text-gray-700 mb-1 break-words lowercase">
                                     <span className="font-bold text-gray-500">Carb:</span> {item.carbs}
+                                    {visibleIngredientNames(item.carbIngredients) && ` — ${visibleIngredientNames(item.carbIngredients)}`}
                                   </p>
                                 )}
                                 {item.veg && (
                                   <p className="text-sm text-gray-700 mb-1 break-words lowercase">
                                     <span className="font-bold text-gray-500">Vegetables:</span> {item.veg}
+                                    {visibleIngredientNames(item.vegIngredients) && ` — ${visibleIngredientNames(item.vegIngredients)}`}
+                                  </p>
+                                )}
+                                {item.sauce && (
+                                  <p className="text-sm text-gray-700 mb-1 break-words lowercase">
+                                    <span className="font-bold text-gray-500">Sauce:</span> {item.sauce}
+                                    {visibleIngredientNames(item.sauceIngredients) && ` — ${visibleIngredientNames(item.sauceIngredients)}`}
                                   </p>
                                 )}
                                 {item.intolerances && (
@@ -1485,10 +1541,10 @@ const MenuSelection = ({ token }) => {
                                   <div className="absolute left-0 right-0 top-0 rounded-2xl border border-rose-200 bg-rose-50/95 p-5 text-sm text-gray-800 shadow-xl z-50 flex flex-col gap-3 pb-6">
                                     <div className="flex items-center gap-2 text-base">
                                       <AlertCircle size={16} className="text-rose-600" />
-                                      <span className="text-rose-700 font-bold">Allergen Alert</span>
+                                      <span className="text-rose-700 font-bold">Exclusion Alert</span>
                                     </div>
                                     <p className="text-gray-800 text-base font-semibold">
-                                      This meal includes items in your exclusions. Would you like to keep it?
+                                      This meal's portion includes items in your exclusions. Would you like to keep it?
                                     </p>
                                     <div className="bg-white border border-rose-200 rounded-lg px-3 py-2">
                                       <span className="font-semibold text-rose-700">Matched exclusions:</span>
@@ -1536,7 +1592,7 @@ const MenuSelection = ({ token }) => {
                                         className="mt-1 h-4 w-4"
                                       />
                                       <span className="text-sm font-semibold">
-                                        You are aware that you selected something that is in your exclusions or allergens.
+                                        You are aware that you selected something that is in your exclusions.
                                       </span>
                                     </label>
                                   </div>
@@ -1817,14 +1873,28 @@ const MenuSelection = ({ token }) => {
                                   </div>
                                 )}
                                 <h4 className={`font-black text-base uppercase tracking-wide mb-3 break-words leading-snug ${isAllergenBlocked ? 'text-red-800' : 'text-gray-900'}`}>{item.mealName}</h4>
+                                {item.proteinSource && (
+                                  <p className="text-sm text-gray-700 mb-1 break-words lowercase">
+                                    <span className="font-bold text-gray-500">Portion:</span> {item.proteinSource}
+                                    {visibleIngredientNames(item.portionIngredients) && ` — ${visibleIngredientNames(item.portionIngredients)}`}
+                                  </p>
+                                )}
                                 {item.carbs && (
                                   <p className="text-sm text-gray-700 mb-1 break-words lowercase">
                                     <span className="font-bold text-gray-500">Carb:</span> {item.carbs}
+                                    {visibleIngredientNames(item.carbIngredients) && ` — ${visibleIngredientNames(item.carbIngredients)}`}
                                   </p>
                                 )}
                                 {item.veg && (
                                   <p className="text-sm text-gray-700 mb-1 break-words lowercase">
                                     <span className="font-bold text-gray-500">Vegetables:</span> {item.veg}
+                                    {visibleIngredientNames(item.vegIngredients) && ` — ${visibleIngredientNames(item.vegIngredients)}`}
+                                  </p>
+                                )}
+                                {item.sauce && (
+                                  <p className="text-sm text-gray-700 mb-1 break-words lowercase">
+                                    <span className="font-bold text-gray-500">Sauce:</span> {item.sauce}
+                                    {visibleIngredientNames(item.sauceIngredients) && ` — ${visibleIngredientNames(item.sauceIngredients)}`}
                                   </p>
                                 )}
                                 {item.intolerances && (
@@ -1867,10 +1937,10 @@ const MenuSelection = ({ token }) => {
                                   <div className="absolute left-0 right-0 top-0 rounded-2xl border border-rose-200 bg-rose-50/95 p-5 text-sm text-gray-800 shadow-xl z-50 flex flex-col gap-3 pb-6">
                                     <div className="flex items-center gap-2 text-base">
                                       <AlertCircle size={16} className="text-rose-600" />
-                                      <span className="text-rose-700 font-bold">Allergen Alert</span>
+                                      <span className="text-rose-700 font-bold">Exclusion Alert</span>
                                     </div>
                                     <p className="text-gray-800 text-base font-semibold">
-                                      This meal includes items in your exclusions. Would you like to keep it?
+                                      This meal's portion includes items in your exclusions. Would you like to keep it?
                                     </p>
                                     <div className="bg-white border border-rose-200 rounded-lg px-3 py-2">
                                       <span className="font-semibold text-rose-700">Matched exclusions:</span>
@@ -1911,7 +1981,7 @@ const MenuSelection = ({ token }) => {
                                         className="mt-1 h-4 w-4"
                                       />
                                       <span className="text-sm font-semibold">
-                                        You are aware that you selected something that is in your exclusions or allergens.
+                                        You are aware that you selected something that is in your exclusions.
                                       </span>
                                     </label>
                                   </div>
@@ -2469,7 +2539,7 @@ const MenuSelection = ({ token }) => {
             </div>
             <div className="space-y-2 text-sm text-gray-700">
               <p className="text-center">
-                <span className="font-semibold">Meals/Day:</span> {customerProfile.mealPerDay}
+                <span className="font-semibold">Meals/Day:</span> {customerProfile.unlimitedMeals ? 'Unlimited' : customerProfile.mealPerDay}
               </p>
               <p className="text-center">
                 <span className="font-semibold">Plan:</span> {customerProfile.mealPlan}
@@ -2540,7 +2610,7 @@ const MenuSelection = ({ token }) => {
                               )}
                               <div className="mt-1 flex items-center gap-2 flex-wrap">
                                 <span className="inline-block bg-green-600 text-white text-xs px-2 py-1 rounded font-medium capitalize">
-                                  {meal.mealType?.toLowerCase() === 'lunch' ? 'meal' : meal.mealType}
+                                  {['main', 'lunch', 'dinner'].includes(meal.mealType?.toLowerCase()) ? 'meal' : meal.mealType}
                                 </span>
                                 {meal.quantity > 1 && (
                                   <span className="inline-block bg-indigo-600 text-white text-xs px-2 py-1 rounded font-medium">

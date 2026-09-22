@@ -12,7 +12,6 @@ import {
   Download,
   Coffee,
   Sandwich,
-  Pizza,
   Cookie,
   X,
   Image as ImageIcon,
@@ -42,6 +41,9 @@ const FIXED_SELECTION_DEADLINES = [
 ];
 import api from '../utils/api';
 import { lookupProteinWeight, lookupCarbWeight } from '../utils/nutrition';
+import SupyRecipeSearch from '../components/SupyRecipeSearch';
+import IngredientTagEditor from '../components/IngredientTagEditor';
+import { toSentenceCase } from '../utils/textFormat';
 import XLSX from 'xlsx-js-style';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
@@ -121,6 +123,7 @@ const MenuManagement = () => {
   const [isUploadingMenu, setIsUploadingMenu] = useState(false);
   const [editingMenuId, setEditingMenuId] = useState(null);
   const [editingSlot, setEditingSlot] = useState(null); // { dayIndex, itemIndex } | null — the meal open in the slide-in editor
+  const [copyDayMenuFor, setCopyDayMenuFor] = useState(null); // dayIndex | null — which day's "Copy from…" dropdown is open
   const [selectedCustomerDetail, setSelectedCustomerDetail] = useState(null);
   const [isDownloadingImage, setIsDownloadingImage] = useState(false);
   const [isDownloadingPDF, setIsDownloadingPDF] = useState(false);
@@ -324,7 +327,7 @@ const MenuManagement = () => {
       updated[dayIndex].items = [
         ...updated[dayIndex].items,
         {
-          mealType: 'lunch',
+          mealType: 'main',
           mealName: '',
           ingredients: '',
           proteinSource: '',
@@ -335,6 +338,13 @@ const MenuManagement = () => {
           carbs: '',
           veg: '',
           sauce: '',
+          portionIngredients: [],
+          carbIngredients: [],
+          vegIngredients: [],
+          sauceIngredients: [],
+          portionType: '',
+          rotationCategory: '',
+          usedForCorePlan: false,
           price: 0
         }
       ];
@@ -368,6 +378,38 @@ const MenuManagement = () => {
     setEditingSlot({ dayIndex, itemIndex: newIndex });
   };
 
+  // Copies every meal (breakfast, main, snack — whatever that day has) from
+  // one day onto another, e.g. "make Sunday the same as Saturday". Appends
+  // to whatever's already on the target day rather than replacing it, so
+  // duplicating twice — or onto a day that already has something planned —
+  // never silently deletes existing meals.
+  const handleDuplicateDay = (sourceDayIndex, targetDayIndex) => {
+    setWeeklyItems((prev) => {
+      const source = prev[sourceDayIndex];
+      if (!source || source.items.length === 0) return prev;
+      const updated = [...prev];
+      updated[targetDayIndex] = {
+        ...updated[targetDayIndex],
+        items: [...updated[targetDayIndex].items, ...source.items.map((item) => ({ ...item }))]
+      };
+      return updated;
+    });
+    setCopyDayMenuFor(null);
+  };
+
+  // 'lunch'/'dinner' were merged into a single 'main' meal type — old CSV
+  // templates, saved menus, and pasted data may still carry either literal,
+  // so every mealType read normalizes them here rather than trusting the enum.
+  const normalizeMealType = (value) => {
+    const t = String(value || '').trim().toLowerCase();
+    if (t === 'lunch' || t === 'dinner') return 'main';
+    if (t === 'breakfast' || t === 'snack') return t;
+    return 'main';
+  };
+
+  const MEAL_TYPE_LABELS = { main: 'Main Meal', breakfast: 'Breakfast', snack: 'Snack' };
+  const mealTypeLabel = (value) => MEAL_TYPE_LABELS[normalizeMealType(value)];
+
   const normalizeHeader = (value) => String(value || '')
     .trim()
     .toUpperCase()
@@ -385,8 +427,8 @@ const MenuManagement = () => {
   const handleDownloadMenuTemplate = () => {
     const rows = [
       ['MEAL TYPE', 'INTOLERANCES', 'DAY', 'MEAL NAME', 'CARB', 'VEG'],
-      ['lunch', 'nuts, dairy', 1, 'Chicken Bowl', 'rice', 'broccoli'],
-      ['dinner', 'gluten', 2, 'Salad Plate', 'quinoa', 'spinach']
+      ['main', 'nuts, dairy', 1, 'Chicken Bowl', 'rice', 'broccoli'],
+      ['main', 'gluten', 2, 'Salad Plate', 'quinoa', 'spinach']
     ];
 
     const wb = XLSX.utils.book_new();
@@ -467,7 +509,7 @@ const MenuManagement = () => {
         }
 
         dayMap.get(dateKey).items.push({
-          mealType: String(mealType || 'lunch').trim().toLowerCase(),
+          mealType: normalizeMealType(mealType),
           mealName: String(mealName).trim(),
           ingredients: '',
           intolerances: String(intolerances || '').trim(),
@@ -573,7 +615,7 @@ const MenuManagement = () => {
       items.forEach((item) => {
         if (!item) return;
         dayMap.get(dateKey).items.push({
-          mealType: meal.mealType || item.mealType || 'lunch',
+          mealType: normalizeMealType(meal.mealType || item.mealType),
           mealName: item.mealName || '',
           ingredients: item.ingredients || '',
           proteinSource: item.proteinSource || '',
@@ -583,7 +625,14 @@ const MenuManagement = () => {
           garnish: item.garnish || '',
           carbs: item.carbs || '',
           veg: item.veg || '',
-          sauce: item.sauce || ''
+          sauce: item.sauce || '',
+          portionIngredients: Array.isArray(item.portionIngredients) ? item.portionIngredients : [],
+          carbIngredients: Array.isArray(item.carbIngredients) ? item.carbIngredients : [],
+          vegIngredients: Array.isArray(item.vegIngredients) ? item.vegIngredients : [],
+          sauceIngredients: Array.isArray(item.sauceIngredients) ? item.sauceIngredients : [],
+          portionType: item.portionType || '',
+          rotationCategory: item.rotationCategory || '',
+          usedForCorePlan: !!item.usedForCorePlan
         });
       });
     });
@@ -1244,11 +1293,10 @@ const MenuManagement = () => {
 
     const resolveMealTypeOrder = (mealType) => {
       const normalized = String(mealType || '').toLowerCase();
-      if (normalized === 'lunch') return 0;
-      if (normalized === 'dinner') return 1;
-      if (normalized === 'snack') return 2;
-      if (normalized === 'breakfast') return 3;
-      return 2;
+      if (normalized === 'main') return 0;
+      if (normalized === 'snack') return 1;
+      if (normalized === 'breakfast') return 2;
+      return 1;
     };
 
     const menuDateList = menu?.startDate && menu?.endDate
@@ -1529,7 +1577,7 @@ const MenuManagement = () => {
               ← Back to menus
             </button>
             <h1 className="font-heading-menu text-3xl font-bold text-matter-navy mb-2">
-              {editingMenuId ? (formData.title || 'Edit weekly menu') : 'New weekly menu'}
+              {editingMenuId ? (toSentenceCase(formData.title) || 'Edit weekly menu') : 'New weekly menu'}
             </h1>
             <p className="text-matter-neutral-700 text-base max-w-[52ch] mb-6">
               Seven days, one link. Add the meals for each day, then publish when it's ready.
@@ -1659,6 +1707,52 @@ const MenuManagement = () => {
                   if (!editingSlot) return;
                   handleWeeklyItemChange(editingSlot.dayIndex, editingSlot.itemIndex, field, value);
                 };
+                const isSingleRecipeMeal = ['breakfast', 'snack'].includes(editingItem?.mealType);
+
+                // Each component keeps two separate fields: the search field
+                // itself holds the recipe's own name (what staff searched for,
+                // and what the customer sees on their selection page), while a
+                // second, dedicated ingredients field holds that recipe's
+                // ingredients as a tagged list — each ingredient defaults to
+                // visible:true (shown to the customer) and can be toggled to
+                // backend-only in the IngredientTagEditor.
+                const RECIPE_FIELD_BY_COMPONENT = { portion: 'proteinSource', carb: 'carbs', veg: 'veg', sauce: 'sauce' };
+                const INGREDIENTS_FIELD_BY_COMPONENT = { portion: 'portionIngredients', carb: 'carbIngredients', veg: 'vegIngredients', sauce: 'sauceIngredients' };
+                const TAGGED_COMPONENTS = ['portion', 'carb', 'veg', 'sauce'];
+                const ingredientNames = (list) => (list || []).map((ing) => ing.name).filter(Boolean).join(', ');
+                const ingredientTags = (list) => (list || []).map((ing) => ({ name: ing.name, visible: true })).filter((t) => t.name);
+                // Same chicken/beef/fish keyword sniff the kitchen list's own
+                // fallback uses — only ever suggests, never overwrites a
+                // portionType the meal already has set.
+                const guessPortionType = (text) => {
+                  const t = String(text || '').toLowerCase();
+                  if (t.includes('chicken')) return 'chicken';
+                  if (t.includes('beef')) return 'beef';
+                  if (t.includes('fish') || t.includes('shrimp') || t.includes('salmon') || t.includes('seafood')) return 'fish';
+                  return '';
+                };
+                const applyRecipeSelection = (component, recipe) => {
+                  if (!editingSlot || !recipe) return;
+                  const nextItem = component === 'main'
+                    ? { ...editingItem, mealName: recipe.name, ingredients: ingredientNames(recipe.ingredients) }
+                    : {
+                        ...editingItem,
+                        [RECIPE_FIELD_BY_COMPONENT[component]]: recipe.name,
+                        [INGREDIENTS_FIELD_BY_COMPONENT[component]]: TAGGED_COMPONENTS.includes(component)
+                          ? ingredientTags(recipe.ingredients)
+                          : ingredientNames(recipe.ingredients),
+                        ...(component === 'portion' && !editingItem.portionType
+                          ? { portionType: guessPortionType(recipe.name) }
+                          : {})
+                      };
+                  setWeeklyItems((prev) => {
+                    const updated = [...prev];
+                    updated[editingSlot.dayIndex] = { ...updated[editingSlot.dayIndex] };
+                    updated[editingSlot.dayIndex].items = [...updated[editingSlot.dayIndex].items];
+                    updated[editingSlot.dayIndex].items[editingSlot.itemIndex] = nextItem;
+                    return updated;
+                  });
+                };
                 const editingAllergens = (editingItem?.allergens || '').split(',').map((s) => s.trim()).filter(Boolean);
                 const toggleAllergen = (label) => {
                   const next = editingAllergens.includes(label)
@@ -1690,11 +1784,43 @@ const MenuManagement = () => {
                         {weeklyItems.map((day, dayIndex) => {
                           const { weekday, date } = dayLabel(day.date);
                           return (
-                            <div key={day.date} className={`flex flex-col gap-2 rounded-2xl p-2.5 ${day.items.length ? 'bg-matter-neutral-100' : 'bg-transparent'}`}>
-                              <div className="px-1 pb-1">
-                                <div className="font-heading-menu text-sm text-matter-navy">{weekday}</div>
-                                <div className="text-[11px] text-matter-neutral-600 mt-0.5">{date}</div>
+                            <div key={day.date} className={`relative flex flex-col gap-2 rounded-2xl p-2.5 ${day.items.length ? 'bg-matter-neutral-100' : 'bg-transparent'}`}>
+                              <div className="px-1 pb-1 flex items-start justify-between gap-1">
+                                <div>
+                                  <div className="font-heading-menu text-sm text-matter-navy">{weekday}</div>
+                                  <div className="text-[11px] text-matter-neutral-600 mt-0.5">{date}</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setCopyDayMenuFor(copyDayMenuFor === dayIndex ? null : dayIndex)}
+                                  title="Duplicate another day's meals onto this day"
+                                  className="text-matter-neutral-500 hover:text-matter-accent-700 mt-0.5"
+                                >
+                                  <span className="material-symbols-outlined text-[16px]">content_copy</span>
+                                </button>
                               </div>
+
+                              {copyDayMenuFor === dayIndex && (
+                                <div className="absolute top-9 right-2 z-10 w-40 bg-white border border-matter-neutral-300 rounded-lg shadow-lg py-1">
+                                  <div className="px-3 py-1.5 text-[10.5px] font-semibold text-matter-neutral-500 uppercase tracking-wide">Copy from…</div>
+                                  {weeklyItems.map((otherDay, otherIndex) => {
+                                    if (otherIndex === dayIndex) return null;
+                                    const otherLabel = dayLabel(otherDay.date);
+                                    return (
+                                      <button
+                                        key={otherDay.date}
+                                        type="button"
+                                        disabled={otherDay.items.length === 0}
+                                        onClick={() => handleDuplicateDay(otherIndex, dayIndex)}
+                                        className="w-full text-left px-3 py-1.5 text-xs text-matter-navy hover:bg-matter-neutral-100 disabled:text-matter-neutral-400 disabled:hover:bg-transparent disabled:cursor-not-allowed flex items-center justify-between gap-2"
+                                      >
+                                        <span>{otherLabel.weekday} {otherLabel.date}</span>
+                                        <span className="text-[10px] text-matter-neutral-500">{otherDay.items.length || '—'}</span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              )}
 
                               {day.items.map((item, itemIndex) => {
                                 const isOpen = editingSlot?.dayIndex === dayIndex && editingSlot?.itemIndex === itemIndex;
@@ -1705,7 +1831,7 @@ const MenuManagement = () => {
                                     onClick={() => setEditingSlot({ dayIndex, itemIndex })}
                                     className={`cursor-pointer bg-white rounded-lg p-2.5 border-[1.5px] transition-colors ${isOpen ? 'border-matter-accent' : 'border-matter-neutral-300 hover:border-matter-accent-400'}`}
                                   >
-                                    <div className="text-[9.5px] uppercase tracking-wide text-matter-accent-700 mb-1">{item.mealType || 'lunch'}</div>
+                                    <div className="text-[9.5px] uppercase tracking-wide text-matter-accent-700 mb-1">{mealTypeLabel(item.mealType)}</div>
                                     <div className="text-xs font-semibold text-matter-navy leading-snug">{item.mealName || 'Untitled meal'}</div>
                                     {(item.carbs || item.veg) && (
                                       <div className="text-[10.5px] text-matter-neutral-600 mt-1">
@@ -1740,9 +1866,8 @@ const MenuManagement = () => {
                     </div>
 
                     {editingItem && (
-                      <>
-                        <div className="fixed inset-0 z-40" onClick={() => setEditingSlot(null)} />
-                        <div className="fixed top-0 right-0 bottom-0 w-full sm:w-[420px] z-50 overflow-y-auto bg-white border-l border-matter-neutral-300 shadow-2xl p-6">
+                      <div className="fixed inset-0 z-50 overflow-y-auto bg-white">
+                        <div className="max-w-3xl mx-auto p-6 sm:p-10">
                           <div className="flex items-center justify-between gap-3 mb-1.5">
                             <h6 className="text-xs font-semibold text-matter-neutral-600 uppercase tracking-wide">Editing meal</h6>
                             <button type="button" onClick={() => setEditingSlot(null)} className="text-matter-accent-700 hover:text-matter-accent-800 text-sm font-semibold">
@@ -1761,8 +1886,7 @@ const MenuManagement = () => {
                                   className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
                                 >
                                   <option value="breakfast">Breakfast</option>
-                                  <option value="lunch">Lunch</option>
-                                  <option value="dinner">Dinner</option>
+                                  <option value="main">Main Meal</option>
                                   <option value="snack">Snack</option>
                                 </select>
                               </div>
@@ -1779,19 +1903,148 @@ const MenuManagement = () => {
                               </div>
                             </div>
 
-                            <div>
-                              <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Meal name</label>
-                              <input
-                                type="text"
-                                value={editingItem.mealName}
-                                onChange={(e) => updateEditingField('mealName', e.target.value)}
-                                className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
-                                placeholder="Grilled lemon chicken"
-                              />
-                            </div>
+                            {!isSingleRecipeMeal && (
+                              <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                  <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Portion type</label>
+                                  <select
+                                    value={editingItem.portionType || ''}
+                                    onChange={(e) => updateEditingField('portionType', e.target.value)}
+                                    className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
+                                  >
+                                    <option value="">— none —</option>
+                                    <option value="chicken">Chicken</option>
+                                    <option value="beef">Beef</option>
+                                    <option value="fish">Fish</option>
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Rotation category</label>
+                                  <select
+                                    value={editingItem.rotationCategory || ''}
+                                    onChange={(e) => updateEditingField('rotationCategory', e.target.value)}
+                                    className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
+                                  >
+                                    <option value="">— none —</option>
+                                    <option value="main">Main (today's primary options)</option>
+                                    <option value="sub">Sub (fallback only)</option>
+                                  </select>
+                                  <label className="mt-2 flex items-center gap-2 cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={!!editingItem.usedForCorePlan}
+                                      onChange={(e) => updateEditingField('usedForCorePlan', e.target.checked)}
+                                      className="w-4 h-4 rounded"
+                                    />
+                                    <span className="text-xs text-matter-neutral-700">Also tag for Core Plan</span>
+                                  </label>
+                                  <p className="text-[10.5px] text-matter-neutral-500 mt-0.5">
+                                    Independent of Main/Sub above — this meal is also used in the Matter Core plan's own rotation.
+                                  </p>
+                                </div>
+                              </div>
+                            )}
 
                             <div>
-                              <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">Ingredients</label>
+                              <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">
+                                Meal name {isSingleRecipeMeal && <span className="font-normal text-matter-neutral-500">— searches Supy recipes</span>}
+                              </label>
+                              {isSingleRecipeMeal ? (
+                                <SupyRecipeSearch
+                                  value={editingItem.mealName}
+                                  onChangeText={(text) => updateEditingField('mealName', text)}
+                                  onSelect={(recipe) => applyRecipeSelection('main', recipe)}
+                                  placeholder="Search Supy — e.g. Oatmeal berry bowl"
+                                />
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={editingItem.mealName}
+                                  onChange={(e) => updateEditingField('mealName', e.target.value)}
+                                  className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
+                                  placeholder="Grilled lemon chicken"
+                                />
+                              )}
+                            </div>
+
+                            {!isSingleRecipeMeal && (
+                              <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                  <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">PORTION — searches Supy</label>
+                                  <SupyRecipeSearch
+                                    value={editingItem.proteinSource}
+                                    onChangeText={(text) => updateEditingField('proteinSource', text)}
+                                    onSelect={(recipe) => applyRecipeSelection('portion', recipe)}
+                                    placeholder="e.g. Grilled chicken breast"
+                                  />
+                                  <label className="block text-[11px] font-semibold text-matter-neutral-500 mt-2 mb-1">Portion ingredients</label>
+                                  <IngredientTagEditor
+                                    value={editingItem.portionIngredients}
+                                    onChange={(tags) => updateEditingField('portionIngredients', tags)}
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">CARB — searches Supy</label>
+                                  <SupyRecipeSearch
+                                    value={editingItem.carbs}
+                                    onChangeText={(text) => updateEditingField('carbs', text)}
+                                    onSelect={(recipe) => applyRecipeSelection('carb', recipe)}
+                                    placeholder="e.g. Basmati rice"
+                                  />
+                                  <label className="block text-[11px] font-semibold text-matter-neutral-500 mt-2 mb-1">Carb ingredients</label>
+                                  <IngredientTagEditor
+                                    value={editingItem.carbIngredients}
+                                    onChange={(tags) => updateEditingField('carbIngredients', tags)}
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">VEG — searches Supy</label>
+                                  <SupyRecipeSearch
+                                    value={editingItem.veg}
+                                    onChangeText={(text) => updateEditingField('veg', text)}
+                                    onSelect={(recipe) => applyRecipeSelection('veg', recipe)}
+                                    placeholder="e.g. Steamed broccoli"
+                                  />
+                                  <label className="block text-[11px] font-semibold text-matter-neutral-500 mt-2 mb-1">Veg ingredients</label>
+                                  <IngredientTagEditor
+                                    value={editingItem.vegIngredients}
+                                    onChange={(tags) => updateEditingField('vegIngredients', tags)}
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">SAUCE — searches Supy</label>
+                                  <SupyRecipeSearch
+                                    value={editingItem.sauce}
+                                    onChangeText={(text) => updateEditingField('sauce', text)}
+                                    onSelect={(recipe) => applyRecipeSelection('sauce', recipe)}
+                                    placeholder="e.g. Lemon herb sauce"
+                                  />
+                                  <label className="block text-[11px] font-semibold text-matter-neutral-500 mt-2 mb-1">Sauce ingredients</label>
+                                  <IngredientTagEditor
+                                    value={editingItem.sauceIngredients}
+                                    onChange={(tags) => updateEditingField('sauceIngredients', tags)}
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            {!isSingleRecipeMeal && (
+                              <div>
+                                <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">GARNISH — typed manually, no Supy search</label>
+                                <input
+                                  type="text"
+                                  value={editingItem.garnish || ''}
+                                  onChange={(e) => updateEditingField('garnish', e.target.value)}
+                                  className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
+                                  placeholder="e.g. Parsley, lemon wedge"
+                                />
+                              </div>
+                            )}
+
+                            <div>
+                              <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">
+                                Ingredients {isSingleRecipeMeal && <span className="font-normal text-matter-neutral-500">— pulled from Supy, editable</span>}
+                              </label>
                               <textarea
                                 rows={3}
                                 value={editingItem.ingredients}
@@ -1799,29 +2052,6 @@ const MenuManagement = () => {
                                 className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm resize-y"
                                 placeholder="Chicken breast, lemon, garlic, olive oil, thyme"
                               />
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-3">
-                              <div>
-                                <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">CARB</label>
-                                <input
-                                  type="text"
-                                  value={editingItem.carbs}
-                                  onChange={(e) => updateEditingField('carbs', e.target.value)}
-                                  className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
-                                  placeholder="Basmati rice 120g"
-                                />
-                              </div>
-                              <div>
-                                <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">VEG</label>
-                                <input
-                                  type="text"
-                                  value={editingItem.veg}
-                                  onChange={(e) => updateEditingField('veg', e.target.value)}
-                                  className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky text-sm"
-                                  placeholder="Broccoli, carrots"
-                                />
-                              </div>
                             </div>
 
                             <div>
@@ -1875,7 +2105,7 @@ const MenuManagement = () => {
                             </button>
                           </div>
                         </div>
-                      </>
+                      </div>
                     )}
                   </div>
                 );
@@ -1950,7 +2180,7 @@ const MenuManagement = () => {
                   <span className="text-xs text-matter-neutral-500 font-mono tabular-nums">{String(menu._id).slice(-6).toUpperCase()}</span>
                 </div>
 
-                <h3 className="font-heading-menu text-xl font-bold text-matter-navy mb-1">{menu.title}</h3>
+                <h3 className="font-heading-menu text-xl font-bold text-matter-navy mb-1">{toSentenceCase(menu.title)}</h3>
                 <p className="text-matter-neutral-600 text-sm mb-1">
                   {menu.startDate ? new Date(menu.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''}
                   {' — '}
@@ -2080,7 +2310,7 @@ const MenuManagement = () => {
                   <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={() => setSelectionMenuId(null)}>
                   <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                     <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
-                      <h4 className="font-heading-menu text-lg font-bold text-matter-navy">Customer Selections — {menu.title}</h4>
+                      <h4 className="font-heading-menu text-lg font-bold text-matter-navy">Customer Selections — {toSentenceCase(menu.title)}</h4>
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => handleDownloadSelections(menu)}
@@ -2246,21 +2476,13 @@ const MenuManagement = () => {
                                         badge: 'bg-matter-dust/60 text-matter-charcoal',
                                         icon: Coffee
                                       };
-                                    } else if (type.includes('lunch')) {
+                                    } else if (type.includes('main')) {
                                       return {
                                         bg: 'bg-green-50',
                                         border: 'border-green-200',
                                         text: 'text-green-800',
                                         badge: 'bg-green-100 text-green-700',
                                         icon: Sandwich
-                                      };
-                                    } else if (type.includes('dinner')) {
-                                      return {
-                                        bg: 'bg-matter-accent-100',
-                                        border: 'border-matter-accent-300',
-                                        text: 'text-matter-navy',
-                                        badge: 'bg-matter-accent-200 text-matter-navy',
-                                        icon: Pizza
                                       };
                                     } else if (type.includes('snack')) {
                                       return {
@@ -2279,7 +2501,7 @@ const MenuManagement = () => {
                                       icon: Sandwich
                                     };
                                   };
-                                  
+
                                   const cardSkip = getSkipForDate(customer, key);
 
                                   return (
@@ -2710,7 +2932,7 @@ const MenuManagement = () => {
                           <div key={dateKey} className="border border-matter-neutral-300 rounded-xl p-4">
                             <h4 className="text-sm font-bold text-matter-neutral-800 mb-3">{dateLabel}</h4>
                             <div className="grid grid-cols-2 gap-2">
-                              {mainSlots.map((slot, i) => renderSlot(slot, i, 'lunch', mainItems))}
+                              {mainSlots.map((slot, i) => renderSlot(slot, i, 'main', mainItems))}
                               {bfSlots.map((slot, i) => renderSlot(slot, i, 'breakfast', bfItems))}
                             </div>
                           </div>
@@ -2818,21 +3040,13 @@ const MenuManagement = () => {
                             badge: 'bg-matter-dust/60 text-matter-charcoal',
                             icon: Coffee
                           };
-                        } else if (type.includes('lunch')) {
+                        } else if (type.includes('main')) {
                           return {
                             bg: 'bg-green-50',
                             border: 'border-green-200',
                             text: 'text-green-800',
                             badge: 'bg-green-100 text-green-700',
                             icon: Sandwich
-                          };
-                        } else if (type.includes('dinner')) {
-                          return {
-                            bg: 'bg-matter-accent-100',
-                            border: 'border-matter-accent-300',
-                            text: 'text-matter-navy',
-                            badge: 'bg-matter-accent-200 text-matter-navy',
-                            icon: Pizza
                           };
                         } else if (type.includes('snack')) {
                           return {

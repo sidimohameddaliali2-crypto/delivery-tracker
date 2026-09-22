@@ -15,11 +15,10 @@ import { groupExclusions } from '../constants/exclusionList';
 const fmt = (n) => Number(n || 0).toFixed(2);
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
 
-const MEAL_TYPES = ['breakfast', 'lunch', 'dinner', 'snack'];
+const MEAL_TYPES = ['breakfast', 'main', 'snack'];
 const MEAL_TYPE_COLORS = {
   breakfast: 'bg-amber-100 text-amber-700',
-  lunch: 'bg-green-100 text-green-700',
-  dinner: 'bg-indigo-100 text-indigo-700',
+  main: 'bg-green-100 text-green-700',
   snack: 'bg-pink-100 text-pink-700'
 };
 const TYPE_COLORS = { cafe: 'bg-amber-100 text-amber-700', gym: 'bg-blue-100 text-blue-700', restaurant: 'bg-green-100 text-green-700', other: 'bg-gray-100 text-gray-600' };
@@ -58,20 +57,45 @@ const Modal = ({ title, accent = 'indigo', onClose, children }) => {
 const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
   const isEdit = !!initial;
   const [form, setForm] = useState(isEdit
-    ? { businessName: initial.businessName, businessType: initial.businessType, contactName: initial.contactName, phone: initial.phone || '', address: initial.address || '', minimumOrder: initial.minimumOrder ?? 0 }
-    : { businessName: '', businessType: 'cafe', contactName: '', email: '', password: '', phone: '', address: '', minimumOrder: 0 }
+    ? {
+        businessName: initial.businessName, businessType: initial.businessType, contactName: initial.contactName,
+        phone: initial.phone || '', address: initial.address || '', minimumOrder: initial.minimumOrder ?? 0,
+        menuSelectionEnabled: !!initial.menuSelectionEnabled,
+        presetMacros: { C: initial.presetMacros?.C ?? 0, P: initial.presetMacros?.P ?? 0, F: initial.presetMacros?.F ?? 0 },
+        profilePicture: initial.profilePicture || ''
+      }
+    : {
+        businessName: '', businessType: 'cafe', contactName: '', email: '', password: '', phone: '', address: '', minimumOrder: 0,
+        menuSelectionEnabled: false, presetMacros: { C: 0, P: 0, F: 0 }, profilePicture: ''
+      }
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [uploadingPicture, setUploadingPicture] = useState(false);
 
   const set = (e) => { const { name, value } = e.target; setForm(p => ({ ...p, [name]: value })); setError(''); };
+  const setMacro = (key) => (e) => { const value = e.target.value; setForm(p => ({ ...p, presetMacros: { ...p.presetMacros, [key]: value } })); };
+
+  const uploadPicture = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingPicture(true); setError('');
+    try {
+      const fd = new FormData();
+      fd.append('image', file);
+      const res = await api.post('/admin/partners/upload-picture', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      setForm(p => ({ ...p, profilePicture: res.data.url }));
+    } catch (err) { setError(err.response?.data?.message || 'Failed to upload picture'); }
+    finally { setUploadingPicture(false); e.target.value = ''; }
+  };
 
   const submit = async (e) => {
     e.preventDefault(); setSaving(true); setError('');
     try {
+      const payload = { ...form, presetMacros: { C: Number(form.presetMacros.C) || 0, P: Number(form.presetMacros.P) || 0, F: Number(form.presetMacros.F) || 0 } };
       const res = isEdit
-        ? await api.patch(`/admin/partners/${initial._id}`, form)
-        : await api.post('/admin/partners', form);
+        ? await api.patch(`/admin/partners/${initial._id}`, payload)
+        : await api.post('/admin/partners', payload);
       onSaved(res.data.data); onClose();
     } catch (err) { setError(err.response?.data?.message || 'Failed to save'); }
     finally { setSaving(false); }
@@ -82,6 +106,26 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
       <form onSubmit={submit} className="space-y-4">
         {error && <div className="bg-red-50 border border-red-200 text-red-600 rounded-lg px-4 py-2 text-sm">{error}</div>}
         <div className="grid grid-cols-2 gap-4">
+          <div className="col-span-2 flex items-center gap-4">
+            <div className="w-16 h-16 rounded-full bg-gray-100 border border-gray-200 flex-shrink-0 overflow-hidden flex items-center justify-center">
+              {form.profilePicture
+                ? <img src={form.profilePicture} alt="" className="w-full h-full object-cover" />
+                : <Building2 className="w-6 h-6 text-gray-300" />}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Profile Picture</label>
+              <label className="inline-flex items-center gap-2 text-sm text-indigo-600 hover:text-indigo-800 font-medium cursor-pointer">
+                {uploadingPicture ? <Loader className="w-4 h-4 animate-spin" /> : null}
+                {uploadingPicture ? 'Uploading…' : form.profilePicture ? 'Change picture' : 'Upload picture'}
+                <input type="file" accept="image/*" className="hidden" onChange={uploadPicture} disabled={uploadingPicture} />
+              </label>
+              {form.profilePicture && !uploadingPicture && (
+                <button type="button" onClick={() => setForm(p => ({ ...p, profilePicture: '' }))} className="block text-xs text-gray-400 hover:text-red-500 mt-0.5">
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
           <div className="col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Business Name *</label>
             <input name="businessName" required value={form.businessName} onChange={set} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500" placeholder="Café Bella" />
@@ -115,6 +159,40 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
             <input name="minimumOrder" type="number" min="0" step="0.01" value={form.minimumOrder} onChange={set} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500" placeholder="0" />
             <p className="text-xs text-gray-400 mt-1">Partners must reach this amount before placing an order. Set to 0 for no minimum.</p>
           </div>
+          <div className="col-span-2 border-t border-gray-100 pt-4">
+            <label className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.menuSelectionEnabled}
+                onChange={(e) => setForm(p => ({ ...p, menuSelectionEnabled: e.target.checked }))}
+                className="mt-0.5 h-4 w-4 rounded accent-indigo-600"
+              />
+              <span>
+                <span className="block text-sm font-medium text-gray-700">Menu Selection Partner</span>
+                <span className="block text-xs text-gray-400 mt-0.5">
+                  This partner's members order through the regular Menu Selection flow (weekly menu) instead of
+                  the à-la-carte partner menu — no daily meal limit, and a preset macro target below instead of
+                  entering their own macros.
+                </span>
+              </span>
+            </label>
+            {form.menuSelectionEnabled && (
+              <div className="grid grid-cols-3 gap-3 mt-3 bg-indigo-50 rounded-lg p-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Carbs (C)</label>
+                  <input type="number" min="0" value={form.presetMacros.C} onChange={setMacro('C')} className="w-full border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Protein (P)</label>
+                  <input type="number" min="0" value={form.presetMacros.P} onChange={setMacro('P')} className="w-full border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Fat (F)</label>
+                  <input type="number" min="0" value={form.presetMacros.F} onChange={setMacro('F')} className="w-full border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm focus:ring-2 focus:ring-indigo-500" />
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex gap-3 pt-2">
           <button type="button" onClick={onClose} className="flex-1 border border-gray-300 text-gray-700 rounded-lg py-2 text-sm font-medium hover:bg-gray-50 transition-colors">Cancel</button>
@@ -133,7 +211,7 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
   const isEdit = !!initial;
   const [form, setForm] = useState(isEdit
     ? { name: initial.name, mealType: initial.mealType, description: initial.description || '', price: initial.price, category: initial.category || '', isAvailable: initial.isAvailable, availableFrom: toDateInput(initial.availableFrom), availableTo: toDateInput(initial.availableTo), ingredients: (initial.ingredients || []).join(', ') }
-    : { name: '', mealType: 'lunch', description: '', price: '', category: '', isAvailable: true, availableFrom: '', availableTo: '', ingredients: '' }
+    : { name: '', mealType: 'main', description: '', price: '', category: '', isAvailable: true, availableFrom: '', availableTo: '', ingredients: '' }
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -518,9 +596,13 @@ const AdminPartners = () => {
                 {filteredSpaces.map(space => (
                   <div key={space._id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
                     <div className="px-5 py-4 flex items-center gap-4">
-                      <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
-                        {space.businessName?.charAt(0)?.toUpperCase() || 'S'}
-                      </div>
+                      {space.profilePicture ? (
+                        <img src={space.profilePicture} alt="" className="w-10 h-10 rounded-lg object-cover flex-shrink-0" />
+                      ) : (
+                        <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
+                          {space.businessName?.charAt(0)?.toUpperCase() || 'S'}
+                        </div>
+                      )}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-semibold text-gray-900">{space.businessName}</span>
@@ -530,6 +612,11 @@ const AdminPartners = () => {
                           {space.minimumOrder > 0 && (
                             <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
                               Min AED {space.minimumOrder}
+                            </span>
+                          )}
+                          {space.menuSelectionEnabled && (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+                              Menu Selection · C{space.presetMacros?.C ?? 0}/P{space.presetMacros?.P ?? 0}/F{space.presetMacros?.F ?? 0}
                             </span>
                           )}
                         </div>

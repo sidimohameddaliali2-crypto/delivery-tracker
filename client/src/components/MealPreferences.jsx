@@ -19,6 +19,16 @@ const MealPreferences = ({ customerId, customerEmail }) => {
   const [formData, setFormData] = useState({});
   const [expandedSection, setExpandedSection] = useState('overview');
   const [exclusionSearch, setExclusionSearch] = useState('');
+  // Menu Selection Partners — only fetched once editing starts (the "link to
+  // a partner" dropdown is the only thing that needs the list).
+  const [partners, setPartners] = useState([]);
+
+  useEffect(() => {
+    if (!isEditing || partners.length) return;
+    api.get('/admin/partners?limit=200')
+      .then((res) => setPartners(res.data?.data || []))
+      .catch(() => {});
+  }, [isEditing, partners.length]);
 
   useEffect(() => {
     if (customerId) {
@@ -64,7 +74,11 @@ const MealPreferences = ({ customerId, customerEmail }) => {
         allergies: formData.allergies,
         dietaryRestrictions: formData.dietaryRestrictions,
         preferences: formData.preferences,
-        weekend: !!formData.weekend
+        weekend: !!formData.weekend,
+        partner: formData.partner
+          ? (typeof formData.partner === 'object' ? formData.partner._id : formData.partner)
+          : null,
+        unlimitedMeals: !!formData.unlimitedMeals
       };
       const response = await api.post(
         `/menus/customers/${customerId}/meal-profile`,
@@ -237,6 +251,39 @@ const MealPreferences = ({ customerId, customerEmail }) => {
                 </div>
 
                 <div className="bg-white p-3 rounded-lg border border-gray-200">
+                  <label className="text-gray-600 text-sm block mb-1">Partner (Menu Selection)</label>
+                  <select
+                    value={typeof formData.partner === 'object' ? (formData.partner?._id || '') : (formData.partner || '')}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      const picked = partners.find((p) => p._id === id);
+                      setFormData((prev) => ({
+                        ...prev,
+                        partner: id || null,
+                        unlimitedMeals: id && picked?.menuSelectionEnabled ? true : (id ? prev.unlimitedMeals : false)
+                      }));
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">— None —</option>
+                    {partners.map((p) => (
+                      <option key={p._id} value={p._id}>
+                        {p.businessName}{p.menuSelectionEnabled ? ' · Menu Selection' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <label className="flex items-center gap-2 text-sm text-gray-700 mt-2">
+                    <input
+                      type="checkbox"
+                      checked={!!formData.unlimitedMeals}
+                      onChange={(e) => setFormData((prev) => ({ ...prev, unlimitedMeals: e.target.checked }))}
+                      className="w-4 h-4 accent-blue-600"
+                    />
+                    Unlimited meals (no daily cap)
+                  </label>
+                </div>
+
+                <div className="bg-white p-3 rounded-lg border border-gray-200">
                   <label className="text-gray-600 text-sm block mb-1">Meal Plan</label>
                   <select
                     value={formData.mealPlan || derivedPlan || 'Standard'}
@@ -321,7 +368,14 @@ const MealPreferences = ({ customerId, customerEmail }) => {
                 <div className="bg-white p-3 rounded-lg border border-gray-200">
                   <p className="text-gray-600 text-sm">Meals Per Day</p>
                   <p className="text-2xl font-bold text-indigo-600">
-                    {mealProfile.mealPerDay || 0}
+                    {mealProfile.unlimitedMeals ? 'Unlimited' : (mealProfile.mealPerDay || 0)}
+                  </p>
+                </div>
+
+                <div className="bg-white p-3 rounded-lg border border-gray-200">
+                  <p className="text-gray-600 text-sm">Partner</p>
+                  <p className="text-sm font-semibold text-gray-800">
+                    {mealProfile.partner?.businessName || '—'}
                   </p>
                 </div>
 

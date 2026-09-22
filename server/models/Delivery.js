@@ -10,6 +10,17 @@ const deliverySchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // Set when this delivery was auto-imported from the real Matter
+  // subscription platform (services/matterDeliveryImportService.js,
+  // jobs/importMatterDeliveries.js) — the Matter subscription_id it came
+  // from, as a string (matches Customer.matterSubscriptionId's type). Null
+  // for every manually-entered/CSV-imported delivery, i.e. almost all
+  // existing rows.
+  matterSubscriptionId: {
+    type: String,
+    default: null,
+    index: true
+  },
   // Change scheduledTime to be within the delivery window
   scheduledTime: {
     type: Date,
@@ -61,12 +72,20 @@ const deliverySchema = new mongoose.Schema({
   },
   address: String,
   addressDetails: {
+    // The saved address's own label from the source system (e.g. Matter's
+    // "Home"/"Work") — distinct from locationType below, which is Villa vs
+    // Apartment.
+    label: String,
     city: String,
     area: String,
     street: String,
     building: String,
     floor: String,
     apartment: String,
+    // This saved address's own status at the source (e.g. Matter's
+    // "active"/"inactive" for that customer_address entry) — distinct from
+    // the delivery's own top-level `status` (pending/assigned/delivered/...).
+    addressStatus: String,
     // Category of the delivery location, settable from the bulk import sheet
     // (a "Location Type" column, or a batch-wide default) and from manual entry.
     locationType: {

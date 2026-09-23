@@ -20,6 +20,14 @@ import { importMatterDeliveriesForDate } from '../services/matterDeliveryImportS
 
 const RUN_HOUR = parseInt(process.env.MATTER_IMPORT_RUN_HOUR || '6', 10); // 6 AM local
 const TIMEZONE_OFFSET_MINUTES = parseInt(process.env.LOCAL_TIMEZONE_OFFSET_MINUTES || '240', 10); // Default: UAE
+// Owner (2026-09-23): "remove the option to fetch the active delivery to
+// the delivery page from matter api" — the automatic import is off by
+// default now. The code stays in place (and the manual
+// runImportMatterDeliveriesOnce(dateKey) escape hatch still works from a
+// script) in case it's wanted again later; set MATTER_IMPORT_ENABLED=1 to
+// turn the nightly job back on. Deliveries already imported before this
+// change are untouched — this only stops new ones from being pulled in.
+const IMPORT_ENABLED = process.env.MATTER_IMPORT_ENABLED === '1';
 
 function tomorrowDateKey() {
   const nowLocal = new Date(Date.now() + TIMEZONE_OFFSET_MINUTES * 60 * 1000);
@@ -46,6 +54,11 @@ export async function runImportMatterDeliveriesOnce(dateKey = tomorrowDateKey())
 }
 
 export function startImportMatterDeliveriesJob() {
+  if (!IMPORT_ENABLED) {
+    console.log('[MatterImport] Disabled (set MATTER_IMPORT_ENABLED=1 to turn the nightly import back on).');
+    return;
+  }
+
   // Startup catch-up — see the comment above for why.
   runImportMatterDeliveriesOnce();
 

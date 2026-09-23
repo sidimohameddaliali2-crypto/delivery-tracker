@@ -126,10 +126,24 @@ function serializeDelivery(delivery, customersById) {
     gpsLocation: d.gpsLocation?.lat != null && d.gpsLocation?.lng != null
       ? { lat: d.gpsLocation.lat, lng: d.gpsLocation.lng, link: d.gpsLocation.link || null }
       : null,
-    // The customer's current meal count and plan — always included, per
-    // delivery, so a consumer never has to look the customer up separately.
+    // The customer's own details, grouped together — name, this delivery's
+    // timing/zone/address/GPS from the customer's point of view, and
+    // location type (Villa/Apartment), plus meal count/plan. Owner,
+    // 2026-09-23: "include the customer name, customer timing, customer
+    // zone, customer address, customer gps location, and Location Type."
+    // The same values already exist as flat top-level fields above (kept
+    // as-is — an existing consumer may already read them there); this is
+    // purely additive, not a breaking rename.
     customer: {
       customerId: d.customerId || null,
+      name: d.customerName || null,
+      timing: d.scheduledTime || null,
+      zone: d.zone || null,
+      address: d.address || null,
+      gpsLocation: d.gpsLocation?.lat != null && d.gpsLocation?.lng != null
+        ? { lat: d.gpsLocation.lat, lng: d.gpsLocation.lng, link: d.gpsLocation.link || null }
+        : null,
+      locationType: d.addressDetails?.locationType || null,
       mealPerDay: customer?.mealPerDay ?? null,
       mealPlan: customer?.mealPlan ?? null,
     },

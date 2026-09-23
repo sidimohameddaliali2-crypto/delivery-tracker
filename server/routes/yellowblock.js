@@ -260,7 +260,8 @@ router.get('/assets', async (req, res) => {
 router.post('/assets', async (req, res) => {
   try {
     const itemType = String(req.body?.itemType || '').trim();
-    const unit = String(req.body?.unit || '').trim();
+    const itemName = String(req.body?.itemName || '').trim();
+    const dimension = String(req.body?.dimension || '').trim();
     const material = String(req.body?.material || '').trim();
     const placeOfStorage = String(req.body?.placeOfStorage || '').trim();
     const imageUrl = String(req.body?.imageUrl || '').trim();
@@ -271,13 +272,11 @@ router.post('/assets', async (req, res) => {
     if (!itemType) {
       return res.status(400).json({ success: false, message: 'Item Type is required' });
     }
-    if (!unit) {
-      return res.status(400).json({ success: false, message: 'Unit is required' });
-    }
 
     const asset = await YellowblockAsset.create({
       itemType,
-      unit,
+      itemName,
+      dimension,
       material,
       placeOfStorage,
       imageUrl,
@@ -296,12 +295,81 @@ router.post('/assets', async (req, res) => {
   }
 });
 
+// POST /api/yellowblock/assets/bulk
+// Bulk-import assets parsed client-side from an uploaded Excel file (see
+// AssetManagementView's "Upload Excel" button). Unlike the single-create
+// route above, this accepts an initial `totalCountUsed` per row — the one
+// place manually entering "already used" makes sense, since bulk import is
+// how existing real-world inventory (which may already have some used) gets
+// digitized in the first place. `totalPrice` is still always recomputed
+// server-side (unitPrice x totalCountAvailable), never trusted from the file,
+// so it can never drift from the two numbers it's derived from.
+router.post('/assets/bulk', async (req, res) => {
+  try {
+    const { assets } = req.body || {};
+    if (!Array.isArray(assets) || assets.length === 0) {
+      return res.status(400).json({ success: false, message: 'Please provide an array of assets' });
+    }
+
+    const docs = [];
+    const errors = [];
+
+    assets.forEach((row, index) => {
+      const itemType = String(row?.itemType || '').trim();
+      const dimension = String(row?.dimension || '').trim();
+      // index + 2: header row is row 1, first data row is row 2.
+      const rowLabel = `Row ${index + 2}`;
+
+      if (!itemType) {
+        errors.push(`${rowLabel}: Item Type is required — skipped.`);
+        return;
+      }
+
+      const unitPrice = Number(row?.unitPrice || 0);
+      const totalCountAvailable = Number(row?.totalCountAvailable || 0);
+      const totalCountUsed = Number(row?.totalCountUsed || 0);
+
+      docs.push({
+        imageUrl: String(row?.imageUrl || '').trim(),
+        itemType,
+        itemName: String(row?.itemName || '').trim(),
+        dimension,
+        material: String(row?.material || '').trim(),
+        placeOfStorage: String(row?.placeOfStorage || '').trim(),
+        companyName: 'Yellow Block',
+        unitPrice,
+        totalCountAvailable,
+        totalCountUsed,
+        totalPrice: unitPrice * totalCountAvailable,
+        createdBy: req.user._id,
+      });
+    });
+
+    let created = 0;
+    if (docs.length > 0) {
+      const inserted = await YellowblockAsset.insertMany(docs, { ordered: false });
+      created = inserted.length;
+    }
+
+    res.json({
+      success: true,
+      message: `Imported ${created} asset${created === 1 ? '' : 's'}${errors.length ? `, ${errors.length} row${errors.length === 1 ? '' : 's'} skipped` : ''}`,
+      created,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error) {
+    console.error('[YellowBlock] assets bulk import error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // PATCH /api/yellowblock/assets/:id
 router.patch('/assets/:id', async (req, res) => {
   try {
     const payload = {
       itemType: req.body?.itemType,
-      unit: req.body?.unit,
+      itemName: req.body?.itemName,
+      dimension: req.body?.dimension,
       material: req.body?.material,
       placeOfStorage: req.body?.placeOfStorage,
       imageUrl: req.body?.imageUrl,

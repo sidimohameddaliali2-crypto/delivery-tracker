@@ -9,6 +9,7 @@ import {
   fetchYellowblockAssets,
   createYellowblockAsset,
   updateYellowblockAsset,
+  bulkUploadYellowblockAssets,
   fetchYellowblockAssetUsageLogs,
   fetchYellowblockAssetUsageStats,
   fetchThirdPartyCompanies,
@@ -42,8 +43,10 @@ import {
   Building2,
   Calendar,
   Upload,
+  Download,
   MessageCircle,
 } from 'lucide-react';
+import XLSX from 'xlsx-js-style';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -683,10 +686,14 @@ const AssetManagementView = () => {
   const [historyAsset, setHistoryAsset] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [formError, setFormError] = useState('');
+  const [isImportingAssets, setIsImportingAssets] = useState(false);
+  const [importError, setImportError] = useState('');
+  const [importSummary, setImportSummary] = useState(null); // { created, errors } | null
   const [assetForm, setAssetForm] = useState({
     imageUrl: '',
     itemType: '',
-    unit: '',
+    itemName: '',
+    dimension: '',
     material: '',
     unitPrice: 0,
     totalCountAvailable: 0,
@@ -712,7 +719,8 @@ const AssetManagementView = () => {
     setAssetForm({
       imageUrl: '',
       itemType: '',
-      unit: '',
+      itemName: '',
+      dimension: '',
       material: '',
       unitPrice: 0,
       totalCountAvailable: 0,
@@ -725,7 +733,8 @@ const AssetManagementView = () => {
     setAssetForm({
       imageUrl: '',
       itemType: '',
-      unit: '',
+      itemName: '',
+      dimension: '',
       material: '',
       unitPrice: 0,
       totalCountAvailable: 0,
@@ -740,7 +749,8 @@ const AssetManagementView = () => {
     setAssetForm({
       imageUrl: asset.imageUrl || '',
       itemType: asset.itemType || '',
-      unit: asset.unit || '',
+      itemName: asset.itemName || '',
+      dimension: asset.dimension || '',
       material: asset.material || '',
       unitPrice: Number(asset.unitPrice || 0),
       totalCountAvailable: Number(asset.totalCountAvailable || 0),
@@ -771,15 +781,16 @@ const AssetManagementView = () => {
 
   const handleSaveAsset = async (event) => {
     event.preventDefault();
-    if (!assetForm.itemType.trim() || !assetForm.unit.trim()) {
-      setFormError('Item Type and Unit are required.');
+    if (!assetForm.itemType.trim()) {
+      setFormError('Item Type is required.');
       return;
     }
 
     const payload = {
       imageUrl: assetForm.imageUrl,
       itemType: assetForm.itemType.trim(),
-      unit: assetForm.unit.trim(),
+      itemName: assetForm.itemName.trim(),
+      dimension: assetForm.dimension.trim(),
       material: assetForm.material.trim(),
       unitPrice: Number(assetForm.unitPrice || 0),
       totalCountAvailable: Number(assetForm.totalCountAvailable || 0),
@@ -798,6 +809,109 @@ const AssetManagementView = () => {
     closeModal();
     dispatch(fetchYellowblockAssets({ search, includeInactive: showArchived }));
     dispatch(fetchYellowblockAssetUsageStats());
+  };
+
+  const ASSET_UPLOAD_HEADERS = [
+    'IMAGE', 'ITEM TYPE', 'ITEM NAME', 'DIMENSION', 'MATERIAL',
+    'UNIT PRICE', 'TOTAL COUNT AVAILABLE', 'TOTAL PRICE', 'TOTAL COUNTED USED', 'BOX STORED',
+  ];
+
+  const handleDownloadAssetTemplate = () => {
+    const rows = [
+      ASSET_UPLOAD_HEADERS,
+      [
+        'https://example.com/chair.jpg', 'Furniture', 'Foldable Chair', '45 x 45 x 90 cm', 'Steel',
+        45, 100, 4500, 12, 'Box A3',
+      ],
+    ];
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = ASSET_UPLOAD_HEADERS.map(() => ({ wch: 18 }));
+    XLSX.utils.book_append_sheet(wb, ws, 'Assets Upload');
+    XLSX.writeFile(wb, 'yellowblock_assets_template.xlsx');
+  };
+
+  // Matches a header to one of several accepted spellings, same approach as
+  // the Menu Management bulk-upload parser — tolerant of column reordering
+  // and reasonable naming variations.
+  const findHeaderIndex = (headerRow, candidates) => {
+    const normalized = headerRow.map((h) => String(h || '').trim().toUpperCase());
+    for (const candidate of candidates) {
+      const idx = normalized.indexOf(candidate);
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  };
+
+  const handleUploadAssetExcel = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setImportError('');
+    setImportSummary(null);
+    setIsImportingAssets(true);
+
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { type: 'array' });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
+
+      if (!rows.length) {
+        throw new Error('The file is empty.');
+      }
+
+      const headerRow = rows[0] || [];
+      const idx = {
+        imageUrl: findHeaderIndex(headerRow, ['IMAGE', 'IMAGE URL', 'IMAGEURL']),
+        itemType: findHeaderIndex(headerRow, ['ITEM TYPE', 'TYPE']),
+        itemName: findHeaderIndex(headerRow, ['ITEM NAME', 'NAME']),
+        dimension: findHeaderIndex(headerRow, ['DIMENSION', 'DIMENSIONS', 'SIZE']),
+        material: findHeaderIndex(headerRow, ['MATERIAL']),
+        unitPrice: findHeaderIndex(headerRow, ['UNIT PRICE', 'PRICE']),
+        totalCountAvailable: findHeaderIndex(headerRow, ['TOTAL COUNT AVAILABLE', 'TOTAL AVAILABLE', 'AVAILABLE', 'QUANTITY', 'QTY']),
+        totalCountUsed: findHeaderIndex(headerRow, ['TOTAL COUNTED USED', 'TOTAL COUNT USED', 'TOTAL USED', 'USED']),
+        placeOfStorage: findHeaderIndex(headerRow, ['BOX STORED', 'BOX', 'PLACE OF STORAGE', 'STORAGE']),
+        // TOTAL PRICE is read from the file only to ignore it — the server
+        // always recomputes it from Unit Price x Total Count Available, so
+        // it never drifts from the two numbers it's derived from.
+      };
+
+      if (idx.itemType === -1) {
+        throw new Error('The file must have an "ITEM TYPE" column. Download the template to see the expected format.');
+      }
+
+      const dataRows = rows.slice(1).filter((row) => Array.isArray(row) && row.some((cell) => String(cell || '').trim() !== ''));
+      if (dataRows.length === 0) {
+        throw new Error('No asset rows found below the header.');
+      }
+
+      const assetsToUpload = dataRows.map((row) => ({
+        imageUrl: idx.imageUrl !== -1 ? String(row[idx.imageUrl] || '').trim() : '',
+        itemType: String(row[idx.itemType] || '').trim(),
+        itemName: idx.itemName !== -1 ? String(row[idx.itemName] || '').trim() : '',
+        dimension: idx.dimension !== -1 ? String(row[idx.dimension] || '').trim() : '',
+        material: idx.material !== -1 ? String(row[idx.material] || '').trim() : '',
+        unitPrice: idx.unitPrice !== -1 ? Number(row[idx.unitPrice] || 0) : 0,
+        totalCountAvailable: idx.totalCountAvailable !== -1 ? Number(row[idx.totalCountAvailable] || 0) : 0,
+        totalCountUsed: idx.totalCountUsed !== -1 ? Number(row[idx.totalCountUsed] || 0) : 0,
+        placeOfStorage: idx.placeOfStorage !== -1 ? String(row[idx.placeOfStorage] || '').trim() : '',
+      }));
+
+      const result = await dispatch(bulkUploadYellowblockAssets(assetsToUpload));
+      if (bulkUploadYellowblockAssets.rejected.match(result)) {
+        throw new Error(result.payload || 'Failed to import assets');
+      }
+
+      setImportSummary(result.payload);
+      dispatch(fetchYellowblockAssets({ search, includeInactive: showArchived }));
+      dispatch(fetchYellowblockAssetUsageStats());
+    } catch (err) {
+      setImportError(err.message || 'Failed to import the file.');
+    } finally {
+      setIsImportingAssets(false);
+      event.target.value = '';
+    }
   };
 
   const handleArchiveToggle = async (asset) => {
@@ -837,12 +951,48 @@ const AssetManagementView = () => {
         </button>
         <button
           type="button"
+          onClick={handleDownloadAssetTemplate}
+          className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg border border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition"
+          title="Download an Excel template with the expected columns"
+        >
+          <Download className="w-4 h-4" /> Template
+        </button>
+        <label className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg border border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition cursor-pointer">
+          <Upload className="w-4 h-4" /> {isImportingAssets ? 'Importing...' : 'Upload Excel'}
+          <input
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            onChange={handleUploadAssetExcel}
+            disabled={isImportingAssets}
+            className="hidden"
+          />
+        </label>
+        <button
+          type="button"
           onClick={openCreateModal}
           className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-[#ff5937] text-white hover:opacity-90 transition"
         >
           <Plus className="w-4 h-4" /> Add Asset
         </button>
       </div>
+
+      {(importError || importSummary) && (
+        <div className="px-4 pt-3">
+          {importError && (
+            <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">{importError}</div>
+          )}
+          {importSummary && (
+            <div className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+              Imported {importSummary.created} asset{importSummary.created === 1 ? '' : 's'}.
+              {importSummary.errors?.length > 0 && (
+                <ul className="mt-1.5 list-disc list-inside text-amber-700">
+                  {importSummary.errors.map((msg, i) => <li key={i}>{msg}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-4">
         <div className="bg-white border border-gray-100 rounded-xl p-3">
@@ -890,9 +1040,18 @@ const AssetManagementView = () => {
                   )}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-gray-900 truncate">{asset.itemType}</p>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 truncate">
+                      {asset.itemName || asset.itemType}
+                    </p>
+                    {asset.itemType && (
+                      <Badge text={asset.itemType} colorClass="bg-orange-50 text-[#ff5937] shrink-0" />
+                    )}
+                  </div>
                   <p className="text-xs text-gray-500 truncate">
-                    {asset.material || 'N/A'} · {asset.unit} · {asset.placeOfStorage || 'No storage'}
+                    {[asset.material || 'N/A', asset.dimension, asset.placeOfStorage || 'No storage']
+                      .filter(Boolean)
+                      .join(' · ')}
                   </p>
                   <p className="text-xs text-gray-500">
                     Available: {asset.totalCountAvailable} · Used Units: {asset.totalCountUsed} · Total Price: {formatCurrency(asset.totalPrice || 0)}
@@ -958,8 +1117,17 @@ const AssetManagementView = () => {
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-auto">
             <div className="flex items-center justify-between p-5 border-b border-gray-100">
               <div>
-                <h3 className="text-base font-bold text-gray-900">Asset History</h3>
-                <p className="text-sm text-gray-500">{historyAsset.itemType} · {historyAsset.unit}</p>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-base font-bold text-gray-900">
+                    {historyAsset.itemName || historyAsset.itemType || 'Asset History'}
+                  </h3>
+                  {historyAsset.itemType && (
+                    <Badge text={historyAsset.itemType} colorClass="bg-orange-50 text-[#ff5937]" />
+                  )}
+                </div>
+                {historyAsset.dimension && (
+                  <p className="text-sm text-gray-500 mt-0.5">{historyAsset.dimension}</p>
+                )}
               </div>
               <button onClick={() => setHistoryAsset(null)} className="p-2 hover:bg-gray-100 rounded-lg transition">
                 <X className="w-4 h-4 text-gray-500" />
@@ -991,7 +1159,7 @@ const AssetManagementView = () => {
                     (assetUsageLogsByAssetId[historyAsset._id] || []).map((log) => (
                       <div key={log._id} className="bg-white border border-gray-200 rounded-lg p-3">
                         <p className="text-sm font-semibold text-gray-900">{log.eventName || 'Event'}</p>
-                        <p className="text-xs text-gray-600">Used: {log.quantityUsed} {log.unitSnapshot || historyAsset.unit}</p>
+                        <p className="text-xs text-gray-600">Used: {log.quantityUsed} {log.unitSnapshot}</p>
                         <p className="text-xs text-gray-500">{formatDate(log.usedAt)}</p>
                       </div>
                     ))
@@ -1025,12 +1193,20 @@ const AssetManagementView = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Unit</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Item Name</label>
                   <input
-                    value={assetForm.unit}
-                    onChange={(e) => setAssetForm((prev) => ({ ...prev, unit: e.target.value }))}
+                    value={assetForm.itemName}
+                    onChange={(e) => setAssetForm((prev) => ({ ...prev, itemName: e.target.value }))}
                     className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm"
-                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Dimension</label>
+                  <input
+                    value={assetForm.dimension}
+                    onChange={(e) => setAssetForm((prev) => ({ ...prev, dimension: e.target.value }))}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm"
+                    placeholder="e.g. 10 x 20 x 5 cm"
                   />
                 </div>
                 <div>

@@ -48,9 +48,14 @@ const yellowblockAssetSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
-    unit: {
+    itemName: {
       type: String,
-      required: true,
+      default: '',
+      trim: true,
+    },
+    dimension: {
+      type: String,
+      default: '',
       trim: true,
     },
     material: {

@@ -143,6 +143,18 @@ export const createYellowblockAsset = createAsyncThunk(
   }
 );
 
+export const bulkUploadYellowblockAssets = createAsyncThunk(
+  'yellowblock/bulkUploadAssets',
+  async (assets, { rejectWithValue }) => {
+    try {
+      const res = await api.post('/yellowblock/assets/bulk', { assets });
+      return { created: res.data.created || 0, errors: res.data.errors || [] };
+    } catch (error) {
+      return rejectWithValue(error?.response?.data?.message || 'Failed to import assets');
+    }
+  }
+);
+
 export const updateYellowblockAsset = createAsyncThunk(
   'yellowblock/updateAsset',
   async ({ id, data }, { rejectWithValue }) => {
@@ -359,6 +371,21 @@ const yellowblockSlice = createSlice({
       .addCase(createYellowblockAsset.rejected, (state, action) => {
         state.assetSaving = false;
         state.error = action.payload || 'Failed to create asset';
+      });
+
+    // bulk-import assets from Excel — component re-fetches the list
+    // afterward, so this reducer only tracks the saving flag/error.
+    builder
+      .addCase(bulkUploadYellowblockAssets.pending, (state) => {
+        state.assetSaving = true;
+        state.error = null;
+      })
+      .addCase(bulkUploadYellowblockAssets.fulfilled, (state) => {
+        state.assetSaving = false;
+      })
+      .addCase(bulkUploadYellowblockAssets.rejected, (state, action) => {
+        state.assetSaving = false;
+        state.error = action.payload || 'Failed to import assets';
       });
 
     // update asset

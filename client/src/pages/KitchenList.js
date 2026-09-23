@@ -218,9 +218,11 @@ const KitchenList = () => {
   const [importName, setImportName] = useState('');
   const [mealTypeOverrides, setMealTypeOverrides] = useState({});
   const [savingOverrideKey, setSavingOverrideKey] = useState('');
-  // Kitchen-only note per (customer email, date) — draft text while typing,
-  // keyed by `${email}::${dateKey}`, saved to the server on blur.
-  const [dayNoteDrafts, setDayNoteDrafts] = useState({});
+  // Day-note draft text (per customer, per date) now lives as local state
+  // inside CustomerCard itself, not here — see the note on that component
+  // for why. savingDayNoteKey is the one piece that still needs to live at
+  // this level (it flags which save is in flight, compared against a key
+  // built from the card's own email+date).
   const [savingDayNoteKey, setSavingDayNoteKey] = useState('');
   const [snackOptionsByDate, setSnackOptionsByDate] = useState({});
   const [pdfDate, setPdfDate] = useState('');
@@ -1050,7 +1052,13 @@ const KitchenList = () => {
     .filter((entry) => !showOnlyMissing || entry.missingSelection),
   [allComputedRows, search, showOnlyMissing]);
 
-  const persistMealTypeOverride = async ({ entry, meal, index, value }) => {
+  // useCallback here (and on saveDayNote below) isn't optional — CustomerCard
+  // is React.memo'd specifically so typing in one customer's search match or
+  // day-note field doesn't re-render every OTHER customer card too. A plain
+  // function recreated every render would defeat that: React.memo compares
+  // props by reference, and a fresh function identity every time would make
+  // every card "changed" on every render regardless of the memo.
+  const persistMealTypeOverride = useCallback(async ({ entry, meal, index, value }) => {
     const key = meal?._overrideKey || buildMealOverrideKey(entry, meal, index);
     const normalizedValue = String(value || '').trim().toLowerCase();
 
@@ -1083,13 +1091,13 @@ const KitchenList = () => {
     } finally {
       setSavingOverrideKey('');
     }
-  };
+  }, [selectedMenuId]);
 
   // Saves a kitchen-only note for one customer on one specific delivery day.
   // An empty note removes that date's entry server-side. Updates
   // menuSelections locally on success so the note persists in the UI
   // without needing a full reload.
-  const saveDayNote = async (entry, dateKey, note) => {
+  const saveDayNote = useCallback(async (entry, dateKey, note) => {
     const email = entry?.email;
     if (!email || !selectedMenuId || !dateKey) return;
 
@@ -1116,7 +1124,7 @@ const KitchenList = () => {
     } finally {
       setSavingDayNoteKey('');
     }
-  };
+  }, [selectedMenuId]);
 
   const downloadMealRemarksTemplate = async () => {
     const XLSX = await loadXLSX();
@@ -2170,209 +2178,14 @@ const KitchenList = () => {
 
         <div className="space-y-4">
           {customerRows.map((entry) => (
-            <div
+            <CustomerCard
               key={`${entry.email || entry.customerId}`}
-              className={`overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ${entry.missingSelection ? 'ring-amber-300' : 'ring-slate-200'}`}
-            >
-              <div className="flex flex-col gap-3 border-b border-slate-100 p-5 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-lg font-bold text-slate-900">{entry.customerName || entry.email || 'Unknown customer'}</h2>
-                    {entry.planName && (
-                      <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">
-                        {entry.planName}
-                      </span>
-                    )}
-                    {entry.missingSelection && (
-                      <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
-                        No Meal Selection — {formatDateLabel(entry.missingSelectionDate)}
-                      </span>
-                    )}
-                    {entry.hasMacroShortfall && (
-                      <span
-                        title="Even with a large breakfast, at least one day's meals hit the 65g protein / 75g carb per-meal cap and couldn't reach this customer's full daily macro target."
-                        className="text-xs font-semibold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700"
-                      >
-                        Macro Shortfall
-                      </span>
-                    )}
-                    {entry.hasMatterCoreLookupIssue && (
-                      <span
-                        title="This customer's per-meal carb/protein weight (total weight ÷ meals that day) doesn't match a known Matter Core weight-to-macro combination — at least one meal was left at 0 macros and needs a manual fix."
-                        className="text-xs font-semibold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700"
-                      >
-                        Matter Core Lookup Missing
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-sm text-slate-500">{entry.email || 'No email'} • {entry.mealCount} meal(s)</p>
-                  {entry.dietaryRestrictions?.length > 0 && (
-                    <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                      <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Dietary:</span>
-                      {entry.dietaryRestrictions.map((tag) => (
-                        <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600">{tag}</span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                {!entry.showMissingPlaceholder && (
-                  <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-5">
-                    <Stat label="Total weight" value={`${entry.totalWeight || 0} g`} />
-                    <Stat label="Breakfast" value={`${entry.breakfastPreset?.V || 0} g`} />
-                    <Stat label="Macros" value={`C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}`} />
-                    <Stat label="Calories" value={`${entry.totalCalories || 0}`} />
-                    <Stat label="Snacks/Day" value={entry.snacksPerDay ?? '—'} />
-                  </div>
-                )}
-              </div>
-              {entry.showMissingPlaceholder ? (
-                <div className="p-5">
-                  <p className="text-sm text-amber-700">
-                    This customer has a delivery scheduled on {formatDateLabel(entry.missingSelectionDate)} but hasn't selected any meals yet.
-                  </p>
-                </div>
-              ) : (
-              <div className="space-y-5 p-5">
-                {entry.missingSelection && (
-                  <p className="text-sm text-amber-700">
-                    Also has a delivery scheduled on {formatDateLabel(entry.missingSelectionDate)} with no meal selected yet.
-                  </p>
-                )}
-                {(entry.mealsByDay || []).map((dayGroup) => {
-                  const noteDraftKey = `${entry.email}::${dayGroup.dateKey}`;
-                  const savedNote = (entry.dayNotes || []).find((n) => n.date === dayGroup.dateKey)?.note || '';
-                  const noteValue = dayNoteDrafts[noteDraftKey] ?? savedNote;
-                  return (
-                  <div key={`${entry.email || entry.customerId}-${dayGroup.dateKey}`} className="space-y-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
-                        {dayGroup.dateLabel}
-                      </div>
-                      <input
-                        type="text"
-                        value={noteValue}
-                        onChange={(e) => setDayNoteDrafts((prev) => ({ ...prev, [noteDraftKey]: e.target.value }))}
-                        onBlur={(e) => saveDayNote(entry, dayGroup.dateKey, e.target.value)}
-                        placeholder="Add a note for this day (kitchen only)..."
-                        disabled={savingDayNoteKey === noteDraftKey}
-                        title="Visible only in Kitchen List and printed on the Day Kitchen Paper — never shown to the customer"
-                        className="min-w-[220px] flex-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 focus:border-slate-400 focus:outline-none disabled:opacity-50"
-                      />
-                    </div>
-                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                      {dayGroup.meals.map((meal, index) => (
-                        <div key={`${entry.email}-${dayGroup.dateKey}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              <UtensilsCrossed size={16} className="text-amber-600" />
-                              <span className="text-sm font-semibold text-slate-900">{getMealLabel(meal).mealType}</span>
-                            </div>
-                            <span className="text-xs font-semibold text-slate-500">#{index + 1}</span>
-                          </div>
-                          <div className="mt-2 flex items-center gap-2 text-sm font-medium text-slate-700">
-                            <span className="truncate">{getMealLabel(meal).mealName}</span>
-                            {meal?.isAutoAssigned && (
-                              <span
-                                title="Filled in by kitchen auto-assign — not chosen by the customer, and never shown in their menu selection preview"
-                                className="flex-shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700"
-                              >
-                                Auto
-                              </span>
-                            )}
-                            {meal?.flags?.macroCapped && (
-                              <span
-                                title="This meal's protein/carbs hit the 65g protein / 75g carb per-meal cap and was held there instead of following its full proportional share"
-                                className="flex-shrink-0 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-700"
-                              >
-                                Capped
-                              </span>
-                            )}
-                            {meal?.flags?.autoUpgradedToLarge && (
-                              <span
-                                title="Auto-upgraded to a large breakfast (fixed at 150g protein / 200g carb / 0g fat) to make up for other meals hitting the per-meal cap"
-                                className="flex-shrink-0 rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700"
-                              >
-                                Large
-                              </span>
-                            )}
-                            {meal?.needsSauceChange && (
-                              <span
-                                title={`Sauce hits a customer exclusion (${(meal.sauceConflict || []).join(', ') || 'unspecified'}) — never shown to the customer, swap it before this goes out`}
-                                className="flex-shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
-                              >
-                                Change sauce
-                              </span>
-                            )}
-                            {meal?.needsGarnishChange && (
-                              <span
-                                title={`Garnish hits a customer exclusion (${(meal.garnishConflict || []).join(', ') || 'unspecified'}) — never shown to the customer, swap it before this goes out`}
-                                className="flex-shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
-                              >
-                                Change garnish
-                              </span>
-                            )}
-                            {meal?.remark && (
-                              <span
-                                title="Manually flagged via Kitchen List's Upload Meal Remarks — swap this before it goes out"
-                                className="flex-shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
-                              >
-                                Change {meal.remark}
-                              </span>
-                            )}
-                          </div>
-                          {String(meal?.mealType || '').toLowerCase() !== 'breakfast' && (
-                            <div className="mt-2">
-                              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Protein Type</label>
-                              <select
-                                value={meal.manualProteinType || ''}
-                                onChange={(e) => persistMealTypeOverride({ entry, meal, index, value: e.target.value })}
-                                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
-                              >
-                                <option value="">Auto detect (from meal name)</option>
-                                <option value="chicken">Chicken</option>
-                                <option value="beef">Beef</option>
-                                <option value="fish">Fish</option>
-                              </select>
-                              <p className="mt-1 text-[11px] text-slate-500">
-                                Auto detect looks for keywords in meal name/protein choice: chicken, beef, fish.
-                              </p>
-                              {(!meal.manualProteinType || meal.manualProteinType === '') && (
-                                <p className="mt-1 text-[11px] font-semibold text-amber-700">
-                                  Detected type: {detectProteinType(meal)}
-                                </p>
-                              )}
-                              {savingOverrideKey === (meal?._overrideKey || buildMealOverrideKey(entry, meal, index)) && (
-                                <p className="mt-1 text-xs text-slate-500">Saving...</p>
-                              )}
-                            </div>
-                          )}
-                          <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                            <Tiny label="C" value={meal.macros?.C ?? 0} />
-                            <Tiny label="P" value={meal.macros?.P ?? 0} />
-                            <Tiny label="F" value={meal.macros?.F ?? 0} />
-                          </div>
-                          <div className="mt-3 flex items-center justify-between text-sm text-slate-600">
-                            <span>Weight</span>
-                            <span className="font-semibold text-slate-900">{meal.weight || 0} g</span>
-                          </div>
-                          <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-                            <Tiny label="P" value={`${meal.proteinWeight || 0}g`} />
-                            <Tiny label="C" value={`${meal.carbWeight || 0}g`} />
-                            <Tiny label="V" value={`${meal.vegWeight || 0}g`} />
-                          </div>
-                          <div className="mt-1 flex items-center justify-between text-sm text-slate-600">
-                            <span>Calories</span>
-                            <span className="font-semibold text-slate-900">{meal.macros?.calories || 0}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  );
-                })}
-              </div>
-              )}
-            </div>
+              entry={entry}
+              persistMealTypeOverride={persistMealTypeOverride}
+              savingOverrideKey={savingOverrideKey}
+              saveDayNote={saveDayNote}
+              savingDayNoteKey={savingDayNoteKey}
+            />
           ))}
         </div>
 
@@ -2385,6 +2198,222 @@ const KitchenList = () => {
     </div>
   );
 };
+
+// Wrapped in React.memo, receiving stable (useCallback'd) function props from
+// KitchenList, so typing in one customer's day-note field or changing their
+// protein-type dropdown only re-renders that one card — not the full list of
+// customer cards on every keystroke. Day-note draft text lives as LOCAL state
+// here (keyed by date only, since email is fixed per card instance) instead
+// of a shared object in the parent, which is what made every card re-render
+// together before.
+const CustomerCard = React.memo(({ entry, persistMealTypeOverride, savingOverrideKey, saveDayNote, savingDayNoteKey }) => {
+  const [localDayNoteDrafts, setLocalDayNoteDrafts] = useState({});
+
+  return (
+    <div
+      className={`overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ${entry.missingSelection ? 'ring-amber-300' : 'ring-slate-200'}`}
+    >
+      <div className="flex flex-col gap-3 border-b border-slate-100 p-5 md:flex-row md:items-center md:justify-between">
+        <div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="text-lg font-bold text-slate-900">{entry.customerName || entry.email || 'Unknown customer'}</h2>
+            {entry.planName && (
+              <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">
+                {entry.planName}
+              </span>
+            )}
+            {entry.missingSelection && (
+              <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                No Meal Selection — {formatDateLabel(entry.missingSelectionDate)}
+              </span>
+            )}
+            {entry.hasMacroShortfall && (
+              <span
+                title="Even with a large breakfast, at least one day's meals hit the 65g protein / 75g carb per-meal cap and couldn't reach this customer's full daily macro target."
+                className="text-xs font-semibold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700"
+              >
+                Macro Shortfall
+              </span>
+            )}
+            {entry.hasMatterCoreLookupIssue && (
+              <span
+                title="This customer's per-meal carb/protein weight (total weight ÷ meals that day) doesn't match a known Matter Core weight-to-macro combination — at least one meal was left at 0 macros and needs a manual fix."
+                className="text-xs font-semibold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700"
+              >
+                Matter Core Lookup Missing
+              </span>
+            )}
+          </div>
+          <p className="text-sm text-slate-500">{entry.email || 'No email'} • {entry.mealCount} meal(s)</p>
+          {entry.dietaryRestrictions?.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Dietary:</span>
+              {entry.dietaryRestrictions.map((tag) => (
+                <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600">{tag}</span>
+              ))}
+            </div>
+          )}
+        </div>
+        {!entry.showMissingPlaceholder && (
+          <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-5">
+            <Stat label="Total weight" value={`${entry.totalWeight || 0} g`} />
+            <Stat label="Breakfast" value={`${entry.breakfastPreset?.V || 0} g`} />
+            <Stat label="Macros" value={`C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}`} />
+            <Stat label="Calories" value={`${entry.totalCalories || 0}`} />
+            <Stat label="Snacks/Day" value={entry.snacksPerDay ?? '—'} />
+          </div>
+        )}
+      </div>
+      {entry.showMissingPlaceholder ? (
+        <div className="p-5">
+          <p className="text-sm text-amber-700">
+            This customer has a delivery scheduled on {formatDateLabel(entry.missingSelectionDate)} but hasn't selected any meals yet.
+          </p>
+        </div>
+      ) : (
+      <div className="space-y-5 p-5">
+        {entry.missingSelection && (
+          <p className="text-sm text-amber-700">
+            Also has a delivery scheduled on {formatDateLabel(entry.missingSelectionDate)} with no meal selected yet.
+          </p>
+        )}
+        {(entry.mealsByDay || []).map((dayGroup) => {
+          const noteDraftKey = `${entry.email}::${dayGroup.dateKey}`;
+          const savedNote = (entry.dayNotes || []).find((n) => n.date === dayGroup.dateKey)?.note || '';
+          const noteValue = localDayNoteDrafts[dayGroup.dateKey] ?? savedNote;
+          return (
+          <div key={`${entry.email || entry.customerId}-${dayGroup.dateKey}`} className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
+                {dayGroup.dateLabel}
+              </div>
+              <input
+                type="text"
+                value={noteValue}
+                onChange={(e) => setLocalDayNoteDrafts((prev) => ({ ...prev, [dayGroup.dateKey]: e.target.value }))}
+                onBlur={(e) => saveDayNote(entry, dayGroup.dateKey, e.target.value)}
+                placeholder="Add a note for this day (kitchen only)..."
+                disabled={savingDayNoteKey === noteDraftKey}
+                title="Visible only in Kitchen List and printed on the Day Kitchen Paper — never shown to the customer"
+                className="min-w-[220px] flex-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 focus:border-slate-400 focus:outline-none disabled:opacity-50"
+              />
+            </div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {dayGroup.meals.map((meal, index) => (
+                <div key={`${entry.email}-${dayGroup.dateKey}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <UtensilsCrossed size={16} className="text-amber-600" />
+                      <span className="text-sm font-semibold text-slate-900">{getMealLabel(meal).mealType}</span>
+                    </div>
+                    <span className="text-xs font-semibold text-slate-500">#{index + 1}</span>
+                  </div>
+                  <div className="mt-2 flex items-center gap-2 text-sm font-medium text-slate-700">
+                    <span className="truncate">{getMealLabel(meal).mealName}</span>
+                    {meal?.isAutoAssigned && (
+                      <span
+                        title="Filled in by kitchen auto-assign — not chosen by the customer, and never shown in their menu selection preview"
+                        className="flex-shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700"
+                      >
+                        Auto
+                      </span>
+                    )}
+                    {meal?.flags?.macroCapped && (
+                      <span
+                        title="This meal's protein/carbs hit the 65g protein / 75g carb per-meal cap and was held there instead of following its full proportional share"
+                        className="flex-shrink-0 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-700"
+                      >
+                        Capped
+                      </span>
+                    )}
+                    {meal?.flags?.autoUpgradedToLarge && (
+                      <span
+                        title="Auto-upgraded to a large breakfast (fixed at 150g protein / 200g carb / 0g fat) to make up for other meals hitting the per-meal cap"
+                        className="flex-shrink-0 rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-purple-700"
+                      >
+                        Large
+                      </span>
+                    )}
+                    {meal?.needsSauceChange && (
+                      <span
+                        title={`Sauce hits a customer exclusion (${(meal.sauceConflict || []).join(', ') || 'unspecified'}) — never shown to the customer, swap it before this goes out`}
+                        className="flex-shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
+                      >
+                        Change sauce
+                      </span>
+                    )}
+                    {meal?.needsGarnishChange && (
+                      <span
+                        title={`Garnish hits a customer exclusion (${(meal.garnishConflict || []).join(', ') || 'unspecified'}) — never shown to the customer, swap it before this goes out`}
+                        className="flex-shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
+                      >
+                        Change garnish
+                      </span>
+                    )}
+                    {meal?.remark && (
+                      <span
+                        title="Manually flagged via Kitchen List's Upload Meal Remarks — swap this before it goes out"
+                        className="flex-shrink-0 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
+                      >
+                        Change {meal.remark}
+                      </span>
+                    )}
+                  </div>
+                  {String(meal?.mealType || '').toLowerCase() !== 'breakfast' && (
+                    <div className="mt-2">
+                      <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Protein Type</label>
+                      <select
+                        value={meal.manualProteinType || ''}
+                        onChange={(e) => persistMealTypeOverride({ entry, meal, index, value: e.target.value })}
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
+                      >
+                        <option value="">Auto detect (from meal name)</option>
+                        <option value="chicken">Chicken</option>
+                        <option value="beef">Beef</option>
+                        <option value="fish">Fish</option>
+                      </select>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        Auto detect looks for keywords in meal name/protein choice: chicken, beef, fish.
+                      </p>
+                      {(!meal.manualProteinType || meal.manualProteinType === '') && (
+                        <p className="mt-1 text-[11px] font-semibold text-amber-700">
+                          Detected type: {detectProteinType(meal)}
+                        </p>
+                      )}
+                      {savingOverrideKey === (meal?._overrideKey || buildMealOverrideKey(entry, meal, index)) && (
+                        <p className="mt-1 text-xs text-slate-500">Saving...</p>
+                      )}
+                    </div>
+                  )}
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
+                    <Tiny label="C" value={meal.macros?.C ?? 0} />
+                    <Tiny label="P" value={meal.macros?.P ?? 0} />
+                    <Tiny label="F" value={meal.macros?.F ?? 0} />
+                  </div>
+                  <div className="mt-3 flex items-center justify-between text-sm text-slate-600">
+                    <span>Weight</span>
+                    <span className="font-semibold text-slate-900">{meal.weight || 0} g</span>
+                  </div>
+                  <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                    <Tiny label="P" value={`${meal.proteinWeight || 0}g`} />
+                    <Tiny label="C" value={`${meal.carbWeight || 0}g`} />
+                    <Tiny label="V" value={`${meal.vegWeight || 0}g`} />
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-sm text-slate-600">
+                    <span>Calories</span>
+                    <span className="font-semibold text-slate-900">{meal.macros?.calories || 0}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          );
+        })}
+      </div>
+      )}
+    </div>
+  );
+});
 
 const Stat = ({ label, value }) => (
   <div className="rounded-2xl bg-slate-50 px-3 py-2">

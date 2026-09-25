@@ -253,10 +253,13 @@ function buildRealModel(weeklyMenu, profile) {
         exclMatchTokens,
         // Own ingredient display names per component, for reporting exactly
         // which carb/veg/sauce/garnish ingredient conflicts with a
-        // customer's exclusion (see matchAgainstExclusions below).
-        carbNames: tagNames(item.carbIngredients),
-        vegNames: tagNames(item.vegIngredients),
-        sauceNames: tagNames(item.sauceIngredients),
+        // customer's exclusion (see matchAgainstExclusions below). Each
+        // combines the tagged ingredient list AND the recipe's own plain
+        // carbs/veg/sauce field — matching carbTokens/vegTokens/sauceTokens
+        // above, since a customer's exclusion can hit either one.
+        carbNames: [...tokens(item.carbs).map(titleCase), ...tagNames(item.carbIngredients)],
+        vegNames: [...tokens(item.veg).map(titleCase), ...tagNames(item.vegIngredients)],
+        sauceNames: [...tokens(item.sauce).map(titleCase), ...tagNames(item.sauceIngredients)],
         garnishNames: tokens(item.garnish).map(titleCase),
         dietTags,
         item,

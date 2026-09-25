@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
-import { groupExclusions, exclusionMatchesAny } from '../../constants/exclusionList';
+import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm } from '../../constants/exclusionList';
 import { toSentenceCase } from '../../utils/textFormat';
 import MatterLogo from './MatterLogo';
 import {
@@ -114,6 +114,20 @@ const visibleIngredientNames = (list) =>
     .map((t) => t?.name)
     .filter(Boolean)
     .join(', ');
+
+// Every ingredient's own display name (unfiltered by visible, like
+// tagTokens) — used to report exactly which carb/veg/sauce/garnish
+// ingredient triggered an exclusion match, for Kitchen List/kitchen paper.
+const tagNames = (list) => (Array.isArray(list) ? list : []).map((t) => t?.name).filter(Boolean);
+
+// Which of `names` (a meal component's own ingredient names) match any of
+// the customer's exclusion phrases — mirrors MenuSelection.jsx's
+// matchAgainstExclusions, kept here so carb/veg/sauce/garnish swaps can be
+// flagged to Kitchen List the same way the legacy selection flow did.
+const matchAgainstExclusions = (names, exclusionPhrases) =>
+  (Array.isArray(names) ? names : []).filter((name) =>
+    (exclusionPhrases || []).some((phrase) => exclusionMatchesTerm(phrase, String(name).trim().toLowerCase()))
+  );
 
 const titleCase = (s) => String(s || '').replace(/\b\w/g, (c) => c.toUpperCase());
 const initialsOf = (name) =>
@@ -237,6 +251,13 @@ function buildRealModel(weeklyMenu, profile) {
         allergens: allergensDisplay,
         allergenMatchTokens,
         exclMatchTokens,
+        // Own ingredient display names per component, for reporting exactly
+        // which carb/veg/sauce/garnish ingredient conflicts with a
+        // customer's exclusion (see matchAgainstExclusions below).
+        carbNames: tagNames(item.carbIngredients),
+        vegNames: tagNames(item.vegIngredients),
+        sauceNames: tagNames(item.sauceIngredients),
+        garnishNames: tokens(item.garnish).map(titleCase),
         dietTags,
         item,
       });
@@ -275,6 +296,10 @@ const MenuSelectionLink = ({ token }) => {
   // that. Days that had real meal selections stay fully editable.
   const [lockedSkipDays, setLockedSkipDays] = useState({});
   const [acknowledged, setAcknowledged] = useState({});
+  // Per-meal-key exclusion flags to carry through to submit: carbVegAction
+  // ('kept'/'replace', from the modal below) plus the silent sauce/garnish
+  // swap flags Kitchen List reads — see computeSauceGarnishFlags/addWithCap.
+  const [mealFlags, setMealFlags] = useState({});
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -478,7 +503,17 @@ const MenuSelectionLink = ({ token }) => {
       } else {
         ex = (account.exclusionPhrases || []).filter((p) => exclusionMatchesAny(p, m.exclMatchTokens || []));
       }
-      if (ex.length) return { kind: 'exclusion', items: Array.from(new Set(ex)) };
+      if (ex.length) {
+        // Which of the meal's own carb/veg ingredients actually caused the
+        // match — lets the modal offer a "keep it / have the kitchen
+        // replace it" choice instead of the generic "pick something else"
+        // one, and lets that choice be recorded (carbVegAction) for Kitchen
+        // List, same as the legacy MenuSelection.jsx change-carb/veg flow.
+        const exclusionPhrases = preview ? [] : (account.exclusionPhrases || []);
+        const matchedCarb = matchAgainstExclusions(m.carbNames || [], exclusionPhrases);
+        const matchedVeg = matchAgainstExclusions(m.vegNames || [], exclusionPhrases);
+        return { kind: 'exclusion', items: Array.from(new Set(ex)), matchedCarb, matchedVeg };
+      }
       return null;
     },
     [account, preview]
@@ -488,9 +523,31 @@ const MenuSelectionLink = ({ token }) => {
     setQty((s) => ({ ...s, [key]: Math.max(0, (s[key] || 0) + delta) }));
   }, []);
 
-  // Adds one meal but never lets a day exceed the customer's meals-per-day.
-  const addWithCap = useCallback(
+  // Sauce/garnish exclusion matches are never shown to the customer or
+  // blocked — the meal is added normally either way, this just carries the
+  // flag through to Kitchen List so staff know to swap that component
+  // before it goes out (mirrors MenuSelection.jsx's sauceGarnishFlags).
+  const computeSauceGarnishFlags = useCallback(
     (m) => {
+      const exclusionPhrases = preview ? [] : (account?.exclusionPhrases || []);
+      const matchedSauce = matchAgainstExclusions(m.sauceNames || [], exclusionPhrases);
+      const matchedGarnish = matchAgainstExclusions(m.garnishNames || [], exclusionPhrases);
+      return {
+        needsSauceChange: matchedSauce.length > 0,
+        needsGarnishChange: matchedGarnish.length > 0,
+        sauceConflict: matchedSauce,
+        garnishConflict: matchedGarnish,
+      };
+    },
+    [account, preview]
+  );
+
+  // Adds one meal but never lets a day exceed the customer's meals-per-day.
+  // `extraFlags` (carbVegAction + its conflict lists, from the exclusion
+  // modal) are merged with the always-computed silent sauce/garnish flags
+  // and stashed per meal key so doSubmit can attach them to the selection.
+  const addWithCap = useCallback(
+    (m, extraFlags = {}) => {
       const dayTotal = (model?.meals || [])
         .filter((mm) => mm.dayIndex === m.dayIndex)
         .reduce((a, mm) => a + (qty[mm.key] || 0), 0);
@@ -499,9 +556,10 @@ const MenuSelectionLink = ({ token }) => {
         return false;
       }
       bump(m.key, 1);
+      setMealFlags((s) => ({ ...s, [m.key]: { ...computeSauceGarnishFlags(m), ...extraFlags } }));
       return true;
     },
-    [bump, flash, model, qty, target]
+    [bump, computeSauceGarnishFlags, flash, model, qty, target]
   );
 
   const openAllergen = useCallback(
@@ -529,24 +587,58 @@ const MenuSelectionLink = ({ token }) => {
   );
 
   const openExclusion = useCallback(
-    (m, items) => {
+    (m, conflict) => {
+      const items = conflict.items || [];
+      const carbVegNames = [...(conflict.matchedCarb || []), ...(conflict.matchedVeg || [])];
+      const hasCarbVeg = carbVegNames.length > 0;
+
+      const carbVegFlags = (action) => ({
+        carbVegAction: action,
+        carbVegConflict: carbVegNames,
+        carbConflict: conflict.matchedCarb || [],
+        vegConflict: conflict.matchedVeg || [],
+      });
+
       setModal({
         kicker: 'Against your preferences',
         title: `This meal includes ${items.join(', ')}`,
-        body: `${m.name} conflicts with an exclusion on your plan. You can keep it in your selection anyway, or pick something else for this slot.`,
+        body: hasCarbVeg
+          ? `${m.name} conflicts with an exclusion on your plan. Would you like the kitchen to replace the ${carbVegNames.join(', ')}, or keep it as is?`
+          : `${m.name} conflicts with an exclusion on your plan. You can keep it in your selection anyway, or pick something else for this slot.`,
         items: items.map((x) => ({ label: x, bg: 'var(--color-neutral-200)', fg: 'var(--color-neutral-800)' })),
-        actions: [
-          { label: 'Replace with another', kind: 'secondary', onClick: () => setModal(null) },
-          {
-            label: 'Keep selection',
-            kind: 'primary',
-            onClick: () => {
-              setModal(null);
-              setAcknowledged((s) => ({ ...s, [m.key]: true }));
-              if (addWithCap(m)) flash('Added — exclusion acknowledged');
-            },
-          },
-        ],
+        actions: hasCarbVeg
+          ? [
+              {
+                label: 'Replace it',
+                kind: 'secondary',
+                onClick: () => {
+                  setModal(null);
+                  setAcknowledged((s) => ({ ...s, [m.key]: true }));
+                  if (addWithCap(m, carbVegFlags('replace'))) flash('Added — kitchen will replace it');
+                },
+              },
+              {
+                label: 'Keep as is',
+                kind: 'primary',
+                onClick: () => {
+                  setModal(null);
+                  setAcknowledged((s) => ({ ...s, [m.key]: true }));
+                  if (addWithCap(m, carbVegFlags('kept'))) flash('Added — kept as is');
+                },
+              },
+            ]
+          : [
+              { label: 'Replace with another', kind: 'secondary', onClick: () => setModal(null) },
+              {
+                label: 'Keep selection',
+                kind: 'primary',
+                onClick: () => {
+                  setModal(null);
+                  setAcknowledged((s) => ({ ...s, [m.key]: true }));
+                  if (addWithCap(m)) flash('Added — exclusion acknowledged');
+                },
+              },
+            ],
       });
     },
     [addWithCap, flash]
@@ -556,7 +648,7 @@ const MenuSelectionLink = ({ token }) => {
     (m) => {
       const c = conflictOf(m);
       if (c && c.kind === 'allergen') return openAllergen(c.items);
-      if (c && c.kind === 'exclusion' && !acknowledged[m.key]) return openExclusion(m, c.items);
+      if (c && c.kind === 'exclusion' && !acknowledged[m.key]) return openExclusion(m, c);
       addWithCap(m);
     },
     [acknowledged, addWithCap, conflictOf, openAllergen, openExclusion]
@@ -581,6 +673,9 @@ const MenuSelectionLink = ({ token }) => {
           menuItemId: m.item?._id || undefined,
           mealName: m.name,
           quantity: n,
+          // carbVegAction/carbConflict/vegConflict (from the exclusion modal)
+          // and needsSauceChange/needsGarnishChange (silent) — see addWithCap.
+          ...(mealFlags[m.key] || {}),
         });
       });
       const skippedDates = dayKeys.filter((_, i) => skipped[i]);
@@ -601,7 +696,7 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setSubmitting(false);
     }
-  }, [account, dayKeys, flash, model, preview, qty, rawMenu, skipped]);
+  }, [account, dayKeys, flash, mealFlags, model, preview, qty, rawMenu, skipped]);
 
   const onSubmitButton = useCallback(() => {
     // A day is either skipped entirely, or filled to exactly the customer's
@@ -636,6 +731,7 @@ const MenuSelectionLink = ({ token }) => {
     setSkipped({});
     setLockedSkipDays({});
     setAcknowledged({});
+    setMealFlags({});
     setModal(null);
     setDay(0);
   }, []);
@@ -723,7 +819,7 @@ const MenuSelectionLink = ({ token }) => {
             onCard: () => {
               if (deadlineLockedToday) return;
               if (blocked) return openAllergen(conflict.items);
-              if (warned && !acknowledged[m.key]) return openExclusion(m, conflict.items);
+              if (warned && !acknowledged[m.key]) return openExclusion(m, conflict);
             },
             onPlus: () => tryAdd(m),
             onMinus: () => bump(m.key, -1),

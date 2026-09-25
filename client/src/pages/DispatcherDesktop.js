@@ -1109,6 +1109,15 @@ const DispatcherDesktop = () => {
                         +Sun
                       </span>
                     )}
+                    {delivery.sundayOnlyCarriedOver && (
+                      <span
+                        title="This customer only has a Sunday meal — delivered together with Saturday's route since there's no separate Sunday route."
+                        className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700 align-middle"
+                      >
+                        <Package className="w-3 h-3" />
+                        Sun only
+                      </span>
+                    )}
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-600">{formatTime(delivery.scheduledTime)}</td>
                   <td className="px-6 py-4 text-sm text-gray-600">{delivery.address || '-'}</td>
@@ -1684,6 +1693,17 @@ const DispatcherDesktop = () => {
                         <p className="text-xs text-indigo-700 font-semibold">Combined into Saturday's delivery</p>
                         <p className="text-sm text-indigo-900">
                           This was already delivered as part of Saturday ({formatDate(selectedDeliveryDetail.combinedIntoSaturday.scheduledTime)}) — it won't appear in Sunday's lists separately.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {selectedDeliveryDetail.sundayOnlyCarriedOver && (
+                    <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                      <Package className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-xs text-amber-700 font-semibold">Sunday-only meal</p>
+                        <p className="text-sm text-amber-900">
+                          This customer only has a meal for Sunday ({formatDate(selectedDeliveryDetail.scheduledTime)}) — delivered together with Saturday's route since there's no separate Sunday route.
                         </p>
                       </div>
                     </div>

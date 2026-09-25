@@ -163,10 +163,48 @@ const BagTagPrintModal = forwardRef(({
     }
   };
 
+  // A delivery combined with its customer's Sunday delivery (see
+  // applyWeekendCombining server-side — `combinedSunday` on a Saturday
+  // delivery) represents TWO meals handed over in one physical drop-off; the
+  // Sunday record itself is deliberately excluded from list results so it
+  // doesn't look like a separate stop. Print both bag tags automatically
+  // here too, same as StickerDesignerModal: the Saturday tag as-is, plus a
+  // Sunday-dated clone. Bag tags show a single admin-picked `printDate` on
+  // every tag rather than each delivery's own scheduledTime, so the clone
+  // carries an explicit `_bagTagDate` override the print markup falls back
+  // to instead of `printDate`.
+  const expandedDeliveries = useMemo(() => {
+    const list = Array.isArray(deliveries) ? deliveries : [];
+    const expanded = [];
+    list.forEach((delivery) => {
+      // A customer with only a Sunday meal (no Saturday order) is carried
+      // into Saturday's list by the server (`sundayOnlyCarriedOver`) since
+      // there's no separate Sunday route — its own scheduledTime is already
+      // Sunday's real date, so the bag tag just needs to use that instead of
+      // the admin's global printDate.
+      if (delivery?.sundayOnlyCarriedOver && delivery?.scheduledTime) {
+        expanded.push({ ...delivery, _bagTagDate: delivery.scheduledTime });
+        return;
+      }
+      expanded.push(delivery);
+      if (delivery?.combinedSunday?.scheduledTime) {
+        const baseId = delivery._id || delivery.id;
+        expanded.push({
+          ...delivery,
+          _id: `${baseId}-sunday`,
+          id: `${baseId}-sunday`,
+          combinedSunday: null,
+          _bagTagDate: delivery.combinedSunday.scheduledTime,
+        });
+      }
+    });
+    return expanded;
+  }, [deliveries]);
+
   // Get unique drivers from deliveries
   const drivers = useMemo(() => {
     const driverMap = {};
-    deliveries.forEach(d => {
+    expandedDeliveries.forEach(d => {
       if (d.driver?._id) {
         const driverId = d.driver._id;
         if (!driverMap[driverId]) {
@@ -181,7 +219,7 @@ const BagTagPrintModal = forwardRef(({
       }
     });
     return Object.values(driverMap);
-  }, [deliveries]);
+  }, [expandedDeliveries]);
 
   // Organize deliveries by driver or all
   const organizedDeliveries = useMemo(() => {
@@ -196,9 +234,9 @@ const BagTagPrintModal = forwardRef(({
     return [{
       label: 'All Deliveries',
       colorCode: '#6366f1',
-      items: deliveries
+      items: expandedDeliveries
     }];
-  }, [deliveries, drivers, groupBy]);
+  }, [expandedDeliveries, drivers, groupBy]);
 
   // Sticker dimensions based on measurement unit
   const stickerDimensions = {
@@ -238,7 +276,7 @@ const BagTagPrintModal = forwardRef(({
   const displayHeight = (actualHeight / convertToMM(1, measurementUnit)).toFixed(2);
 
   const handlePrint = () => {
-    if (!deliveries || deliveries.length === 0) {
+    if (!expandedDeliveries || expandedDeliveries.length === 0) {
       alert('No deliveries selected to print.');
       return;
     }
@@ -558,7 +596,7 @@ const BagTagPrintModal = forwardRef(({
       </div>
       <div class="meta-footer">
         <span class="pill accent">${escapeHtml(delivery.customerId || 'Bag')}</span>
-        <span class="pill">${escapeHtml(new Date(printDate).toLocaleDateString())}</span>
+        <span class="pill">${escapeHtml(new Date(delivery._bagTagDate || printDate).toLocaleDateString())}</span>
       </div>
     </div>
 `;
@@ -634,7 +672,7 @@ const BagTagPrintModal = forwardRef(({
 
         <div className="mt-auto pt-3 flex items-center justify-between text-[10px] font-semibold text-slate-700">
           <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-2 py-1">{delivery.customerId || 'Bag'}</span>
-          <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-2 py-1">{new Date(printDate).toLocaleDateString()}</span>
+          <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-2 py-1">{new Date(delivery._bagTagDate || printDate).toLocaleDateString()}</span>
         </div>
       </div>
     );
@@ -826,7 +864,7 @@ const BagTagPrintModal = forwardRef(({
                 </label>
                 <div className="px-3 py-2 bg-gray-100 border border-gray-300 rounded-lg">
                   <span className="text-lg font-bold text-gray-900">
-                    {deliveries.length}
+                    {expandedDeliveries.length}
                   </span>
                 </div>
               </div>
@@ -867,9 +905,9 @@ const BagTagPrintModal = forwardRef(({
                       />
                     ))
                   )}
-                  {deliveries.length > 6 && (
+                  {expandedDeliveries.length > 6 && (
                     <div className="text-xs text-gray-500 text-center py-2 w-full">
-                      +{deliveries.length - 6} more stickers
+                      +{expandedDeliveries.length - 6} more stickers
                     </div>
                   )}
                 </div>

@@ -851,7 +851,8 @@ router.get('/', async (req, res) => {
       .lean();
 
     const timedDeliveries = deliveries.map(delivery => enrichDeliveryTiming(delivery));
-    const enhancedDeliveries = await applyWeekendCombining(timedDeliveries);
+    const combinedDeliveries = await applyWeekendCombining(timedDeliveries);
+    const enhancedDeliveries = await injectSundayOnlyIntoSaturday(query, dateFrom, dateTo, combinedDeliveries);
 
     const total = await Delivery.countDocuments(query);
 
@@ -1223,6 +1224,51 @@ async function applyWeekendCombining(deliveries) {
     });
 }
 
+// Sunday-only carryover: a customer who has ONLY a Sunday delivery (no
+// Saturday order at all — so applyWeekendCombining above has nothing to
+// combine) still needs a physical drop-off on Saturday's route, since no
+// separate Sunday route exists. When the request is for a single business
+// Saturday's deliveries (the normal day-view fetch), pull those Sunday-only
+// records into the result too, annotated with `sundayOnlyCarriedOver` so the
+// UI/prints can call out that the meal itself is for Sunday even though it
+// rides along on Saturday's route (their own real `scheduledTime` stays
+// Sunday's date, so stickers/bag tags built from it are already correct).
+// Scoped to the unfiltered dispatcher view (no driver constraint) since the
+// Sunday record carries no driver/route of its own to filter against.
+async function injectSundayOnlyIntoSaturday(query, dateFrom, dateTo, deliveries) {
+  if (query.driver || (query.type && query.type !== 'Delivery')) return deliveries;
+  if (!dateFrom || !dateTo) return deliveries;
+
+  const from = new Date(dateFrom);
+  const to = new Date(dateTo);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return deliveries;
+  if (to.getTime() - from.getTime() !== DAY_MS) return deliveries;
+  if (!isBusinessSaturday(from)) return deliveries;
+
+  const { startOfDay: saturdayStart } = getBusinessDayBounds(from);
+  const sundayStart = new Date(saturdayStart.getTime() + DAY_MS);
+  const sundayEndExclusive = new Date(sundayStart.getTime() + DAY_MS);
+
+  const sundayDeliveries = await Delivery.find({
+    type: 'Delivery',
+    scheduledTime: { $gte: sundayStart, $lt: sundayEndExclusive }
+  })
+    .populate('driver', 'profile.firstName profile.lastName profile.colorCode email')
+    .lean();
+  if (sundayDeliveries.length === 0) return deliveries;
+
+  const saturdayCustomerIds = new Set(deliveries.map((d) => d.customerId));
+  const sundayOnly = sundayDeliveries.filter((d) => !saturdayCustomerIds.has(d.customerId));
+  if (sundayOnly.length === 0) return deliveries;
+
+  const carriedOver = sundayOnly.map((d) => ({
+    ...enrichDeliveryTiming(d),
+    sundayOnlyCarriedOver: true
+  }));
+
+  return [...deliveries, ...carriedOver];
+}
+
 // Single-record version for GET /:id — never removes the record (a direct
 // fetch by id must always return something), just annotates whichever side
 // applies: `combinedSunday` on a Saturday delivery, or `combinedIntoSaturday`
@@ -1253,6 +1299,10 @@ async function annotateWeekendCombo(delivery) {
     if (match) {
       return { ...delivery, combinedIntoSaturday: { deliveryId: String(match._id), scheduledTime: match.scheduledTime } };
     }
+    // No Saturday sibling — this customer only has a Sunday meal, which
+    // still rides along on Saturday's route (mirrors injectSundayOnlyIntoSaturday
+    // above, for whoever opens this Sunday delivery's own detail page directly).
+    return { ...delivery, sundayOnlyCarriedOver: true };
   }
   return delivery;
 }

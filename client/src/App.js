@@ -10,6 +10,7 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Drivers from './pages/Drivers';
 import FleetManagement from './pages/FleetManagement';
+import LiveTracking from './pages/LiveTracking';
 import DriverDetail from './pages/DriverDetail';
 import Deliveries from './pages/Deliveries';
 import DeliveryDetail from './pages/DeliveryDetail';
@@ -300,6 +301,16 @@ function App() {
                 <PermissionBasedRoute permission="fleet">
                   <Layout>
                     <FleetManagement />
+                  </Layout>
+                </PermissionBasedRoute>
+              </ProtectedRoute>
+            } />
+
+            <Route path="/live-tracking" element={
+              <ProtectedRoute>
+                <PermissionBasedRoute permission="live_map">
+                  <Layout>
+                    <LiveTracking />
                   </Layout>
                 </PermissionBasedRoute>
               </ProtectedRoute>

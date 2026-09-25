@@ -468,6 +468,30 @@ const DeliveryDetail = () => {
               <p className="text-xs text-gray-400">Company</p>
               <p className="text-sm font-medium text-gray-900">{currentDelivery.company || '—'}</p>
             </div>
+            {currentDelivery.combinedSunday && (
+              <div className="col-span-2 flex items-start gap-2 bg-indigo-50 border border-indigo-200 rounded-lg p-2.5">
+                <Archive className="w-4 h-4 text-indigo-500 flex-shrink-0 mt-0.5" />
+                <p className="text-sm text-indigo-900">
+                  Sunday's delivery is included with this one — no separate Sunday trip needed for this customer.
+                </p>
+              </div>
+            )}
+            {currentDelivery.combinedIntoSaturday && (
+              <div className="col-span-2 flex items-start gap-2 bg-indigo-50 border border-indigo-200 rounded-lg p-2.5">
+                <Archive className="w-4 h-4 text-indigo-500 flex-shrink-0 mt-0.5" />
+                <p className="text-sm text-indigo-900">
+                  This was already delivered as part of Saturday's route — it won't appear in Sunday's lists separately.
+                </p>
+              </div>
+            )}
+            {currentDelivery.sundayOnlyCarriedOver && (
+              <div className="col-span-2 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                <Archive className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                <p className="text-sm text-amber-900">
+                  This customer only has a Sunday meal — delivered together with Saturday's route since there's no separate Sunday route.
+                </p>
+              </div>
+            )}
             {currentDelivery.notes && (
               <div className="col-span-2">
                 <p className="text-xs text-gray-400">Notes</p>
@@ -689,6 +713,30 @@ const DeliveryDetail = () => {
                     <p className="text-xs text-gray-500 mb-1">Delivery Type</p>
                     <p className="text-sm text-gray-900 capitalize">{currentDelivery.type}</p>
                   </div>
+                  {currentDelivery.combinedSunday && (
+                    <div className="flex items-start gap-2 bg-indigo-50 border border-indigo-200 rounded-lg p-2.5">
+                      <Archive className="w-4 h-4 text-indigo-500 flex-shrink-0 mt-0.5" />
+                      <p className="text-sm text-indigo-900">
+                        Sunday's delivery is included with this one — no separate Sunday trip needed for this customer.
+                      </p>
+                    </div>
+                  )}
+                  {currentDelivery.combinedIntoSaturday && (
+                    <div className="flex items-start gap-2 bg-indigo-50 border border-indigo-200 rounded-lg p-2.5">
+                      <Archive className="w-4 h-4 text-indigo-500 flex-shrink-0 mt-0.5" />
+                      <p className="text-sm text-indigo-900">
+                        This was already delivered as part of Saturday's route — it won't appear in Sunday's lists separately.
+                      </p>
+                    </div>
+                  )}
+                  {currentDelivery.sundayOnlyCarriedOver && (
+                    <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                      <Archive className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                      <p className="text-sm text-amber-900">
+                        This customer only has a Sunday meal — delivered together with Saturday's route since there's no separate Sunday route.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
               <div>

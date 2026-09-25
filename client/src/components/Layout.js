@@ -25,7 +25,8 @@ import {
   FileText,
   Globe,
   LineChart,
-  ChevronDown
+  ChevronDown,
+  Radar
 } from 'lucide-react';
 import { logout } from '../store/slices/authSlice';
 import UserAvatar from './users/UserAvatar';
@@ -38,6 +39,7 @@ const NAV_ITEMS = [
   { name: 'Deliveries', href: '/deliveries', icon: Package, permission: 'deliveries', group: 'Operations' },
   { name: 'Drivers', href: '/drivers', icon: Motorbike, permission: 'drivers', group: 'Operations' },
   { name: 'Fleet', href: '/fleet', icon: Truck, permission: 'fleet', group: 'Operations' },
+  { name: 'Live Tracking', href: '/live-tracking', icon: Radar, permission: 'live_map', group: 'Operations' },
   { name: 'Delivery Changes', href: '/delivery-changes', icon: ReplaceAll, permission: 'delivery_changes', group: 'Operations' },
   { name: 'Bag Tracking', href: '/bags', icon: ShoppingBag, permission: 'bags', group: 'Operations' },
   { name: 'Report', href: '/reports', icon: BarChart3, permission: 'reports', group: 'Operations' },

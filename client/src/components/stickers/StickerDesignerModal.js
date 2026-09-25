@@ -217,7 +217,29 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
 
     const safeDeliveries = useMemo(() => {
       const list = Array.isArray(deliveries) ? deliveries : [];
-      return [...list].sort((a, b) => {
+      // A delivery combined with its customer's Sunday delivery (see
+      // applyWeekendCombining server-side — `combinedSunday` on a Saturday
+      // delivery) represents TWO meals handed over in one physical drop-off;
+      // the Sunday record itself is deliberately excluded from list results
+      // so it doesn't look like a separate stop. Print both labels
+      // automatically here instead: the Saturday delivery as-is, plus a
+      // second clone dated for Sunday, so staff never have to separately dig
+      // up and print the hidden Sunday record.
+      const expanded = [];
+      list.forEach((delivery) => {
+        expanded.push(delivery);
+        if (delivery?.combinedSunday?.scheduledTime) {
+          const baseId = getDeliveryId(delivery);
+          expanded.push({
+            ...delivery,
+            _id: `${baseId}-sunday`,
+            id: `${baseId}-sunday`,
+            scheduledTime: delivery.combinedSunday.scheduledTime,
+            combinedSunday: null,
+          });
+        }
+      });
+      return expanded.sort((a, b) => {
         const timeA =
           a?.scheduledTime && !Number.isNaN(new Date(a.scheduledTime).getTime())
             ? new Date(a.scheduledTime).getTime()

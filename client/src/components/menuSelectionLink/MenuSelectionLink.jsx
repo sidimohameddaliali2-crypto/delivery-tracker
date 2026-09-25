@@ -803,18 +803,19 @@ const MenuSelectionLink = ({ token }) => {
         initials: initialsOf(account.name),
         plan: account.plan,
         perDay: account.unlimitedMeals ? 'Unlimited' : `${account.perDay} meal${account.perDay === 1 ? '' : 's'}`,
-        flags: [
-          ...account.allergensDisplay.map((x) => ({
-            label: `${x} allergy`,
-            bg: 'var(--color-accent-200)',
-            fg: 'var(--color-accent-900)',
-          })),
-          ...account.exclusionsDisplay.map((x) => ({
-            label: x,
-            bg: 'var(--color-accent-2-200)',
-            fg: 'var(--color-accent-2-900)',
-          })),
-        ],
+        // Split so allergens (hard-block, from the customer's profile) and
+        // dietary exclusions (soft-warn, from mealExclusion) each get their
+        // own labeled section instead of one merged, ambiguous tag list.
+        allergenFlags: account.allergensDisplay.map((x) => ({
+          label: x,
+          bg: 'var(--color-accent-200)',
+          fg: 'var(--color-accent-900)',
+        })),
+        exclusionFlags: account.exclusionsDisplay.map((x) => ({
+          label: x,
+          bg: 'var(--color-accent-2-200)',
+          fg: 'var(--color-accent-2-900)',
+        })),
       }
     : null;
 
@@ -940,12 +941,24 @@ const MenuSelectionLink = ({ token }) => {
               <div style={{ fontSize: 14, fontWeight: 600, marginTop: 3 }}>{customer.perDay}</div>
             </div>
             <div style={{ gridColumn: 'span 2', background: '#fff', borderRadius: 'var(--radius-md)', padding: '11px 13px' }}>
-              <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 6 }}>Exclusions &amp; allergens</div>
+              <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 6 }}>Allergens</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                {customer.flags.length === 0 ? (
+                {customer.allergenFlags.length === 0 ? (
                   <span className="text-muted" style={{ fontSize: 12 }}>None on file</span>
                 ) : (
-                  customer.flags.map((f, i) => (
+                  customer.allergenFlags.map((f, i) => (
+                    <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: f.bg, color: f.fg }}>{f.label}</span>
+                  ))
+                )}
+              </div>
+            </div>
+            <div style={{ gridColumn: 'span 2', background: '#fff', borderRadius: 'var(--radius-md)', padding: '11px 13px' }}>
+              <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 6 }}>Exclusions</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                {customer.exclusionFlags.length === 0 ? (
+                  <span className="text-muted" style={{ fontSize: 12 }}>None on file</span>
+                ) : (
+                  customer.exclusionFlags.map((f, i) => (
                     <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: f.bg, color: f.fg }}>{f.label}</span>
                   ))
                 )}

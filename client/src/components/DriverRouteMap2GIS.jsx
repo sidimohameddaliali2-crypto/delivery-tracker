@@ -142,6 +142,14 @@ const depotHtml = (label) =>
   `<div title="${escapeAttr(label)}" style="width:32px;height:32px;border-radius:8px;background:#111827;border:2px solid #fff;` +
   `box-shadow:0 1px 4px rgba(0,0,0,.5);font:16px/28px system-ui,sans-serif;text-align:center">🏠</div>`;
 
+// Real vehicle GPS (Truckoom), shown as a second, distinct pin — no
+// mismatch-detection logic (owner, 2026-09-24: "just show it as a second
+// pin, recommended to start"), just where the tracked vehicle actually is.
+const vehicleGpsHtml = (label) =>
+  `<div title="${escapeAttr(label)}" style="display:flex;flex-direction:column;align-items:center;">` +
+  `<div style="width:26px;height:26px;border-radius:9999px;background:#0f766e;border:2px solid #fff;` +
+  `box-shadow:0 1px 4px rgba(0,0,0,.5);font:13px/22px system-ui,sans-serif;text-align:center">🚚</div></div>`;
+
 // A van the dispatcher has marked as a Simulation hub — shown at roughly
 // where that van is/works today, so choosing a hub isn't just picking a name
 // off a list (owner, 2026-09-09: "I should be able to pin his location on
@@ -311,6 +319,11 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   // fix is reflected immediately without waiting for a refetch.
   const [manualOverrides, setManualOverrides] = useState({});
   const [editMode, setEditMode] = useState(false);
+  // Real vehicle GPS overlay (owner, 2026-09-24) — a second, distinct pin at
+  // each tracked driver's actual Truckoom vehicle location, toggled on/off.
+  // Polled every 60s while on; fetched fresh each time it's turned on.
+  const [showVehicleGps, setShowVehicleGps] = useState(false);
+  const [vehicleFleet, setVehicleFleet] = useState([]);
   const [savingId, setSavingId] = useState(null);
   const [saveMsg, setSaveMsg] = useState(null); // { text, error }
   // A delivery with NO stored location has no marker to drag — instead, the
@@ -393,6 +406,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const mapglRef = useRef(null);
   const mapRef = useRef(null);
   const markersRef = useRef([]);
+  const vehicleMarkersRef = useRef([]);
   const lineRef = useRef(null);
   const returnLineRef = useRef(null); // dashed leg back to the kitchen
   const etaCacheRef = useRef(new Map());
@@ -844,6 +858,8 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       cancelled = true;
       markersRef.current.forEach(safeDestroy);
       markersRef.current = [];
+      vehicleMarkersRef.current.forEach(safeDestroy);
+      vehicleMarkersRef.current = [];
       safeDestroy(lineRef.current);
       lineRef.current = null;
       safeDestroy(returnLineRef.current);
@@ -853,6 +869,43 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
       setMapReady(false);
     };
   }, [open]);
+
+  // Fetch/poll real vehicle GPS while the overlay is toggled on.
+  useEffect(() => {
+    if (!open || !showVehicleGps) return undefined;
+    let cancelled = false;
+    const fetchFleet = () => {
+      api.get('/truckoom/vehicles')
+        .then((res) => { if (!cancelled) setVehicleFleet(res.data?.data || []); })
+        .catch(() => { if (!cancelled) setVehicleFleet([]); });
+    };
+    fetchFleet();
+    const interval = setInterval(fetchFleet, 60000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [open, showVehicleGps]);
+
+  // Vehicle GPS pins — a second, distinct marker per tracked driver's real
+  // vehicle location, independent of the numbered delivery-stop markers above.
+  useEffect(() => {
+    const map = mapRef.current;
+    const mapgl = mapglRef.current;
+    if (!mapReady || !map || !mapgl) return;
+    vehicleMarkersRef.current.forEach(safeDestroy);
+    vehicleMarkersRef.current = [];
+    if (!showVehicleGps) return;
+
+    vehicleFleet
+      .filter((v) => Number.isFinite(v.latitude) && Number.isFinite(v.longitude))
+      .forEach((v) => {
+        const label = v.driver ? `${v.driver.name} (${v.vehicleNo})` : `Unassigned vehicle (${v.vehicleNo})`;
+        vehicleMarkersRef.current.push(new mapgl.HtmlMarker(map, {
+          coordinates: [v.longitude, v.latitude],
+          html: vehicleGpsHtml(label),
+          anchor: [13, 26],
+          zIndex: 8,
+        }));
+      });
+  }, [mapReady, showVehicleGps, vehicleFleet]);
 
   // Markers: depot + numbered stops for the visible groups.
   useEffect(() => {
@@ -1324,6 +1377,16 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
             <span className="ml-2 text-[11px] uppercase tracking-wide text-gray-400">2GIS</span>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowVehicleGps((v) => !v)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 ${
+                showVehicleGps ? 'bg-teal-600 text-white hover:bg-teal-700' : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50'
+              }`}
+              title="Show each tracked driver's real GPS vehicle location (Truckoom) as a second pin on the map"
+            >
+              🚚 {showVehicleGps ? 'Hide Vehicle GPS' : 'Show Vehicle GPS'}
+            </button>
             {onOptimizeRoutes ? (
               <button
                 type="button"

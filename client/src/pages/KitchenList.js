@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText } from 'lucide-react';
+import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
 import api from '../utils/api';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
@@ -2208,6 +2208,16 @@ const KitchenList = () => {
 // together before.
 const CustomerCard = React.memo(({ entry, persistMealTypeOverride, savingOverrideKey, saveDayNote, savingDayNoteKey }) => {
   const [localDayNoteDrafts, setLocalDayNoteDrafts] = useState({});
+  // Each day's full meal grid starts collapsed — with a realistic customer
+  // count (hundreds), rendering every day's meal detail for every customer
+  // at once put tens of thousands of DOM nodes (10,500+ <select> elements
+  // alone, measured with 300 customers on a 7-day menu) on screen
+  // simultaneously, which is what made search typing, toggling filters, and
+  // editing a single field take 1-12 seconds — the browser wasn't crashing,
+  // it was just reconciling a huge tree on every keystroke. Collapsing to a
+  // one-line summary per day (expand on demand) cuts the always-rendered
+  // DOM by roughly the number of days on the menu.
+  const [expandedDays, setExpandedDays] = useState({});
 
   return (
     <div
@@ -2281,12 +2291,32 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, savingOverrid
           const noteDraftKey = `${entry.email}::${dayGroup.dateKey}`;
           const savedNote = (entry.dayNotes || []).find((n) => n.date === dayGroup.dateKey)?.note || '';
           const noteValue = localDayNoteDrafts[dayGroup.dateKey] ?? savedNote;
+          const isExpanded = !!expandedDays[dayGroup.dateKey];
+          const dayNeedsAttention = dayGroup.meals.some((meal) => meal?.remark
+            || meal?.needsSauceChange
+            || meal?.needsGarnishChange
+            || meal?.flags?.macroCapped
+            || meal?.flags?.autoUpgradedToLarge);
           return (
           <div key={`${entry.email || entry.customerId}-${dayGroup.dateKey}`} className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
-              <div className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
+              <button
+                type="button"
+                onClick={() => setExpandedDays((prev) => ({ ...prev, [dayGroup.dateKey]: !prev[dayGroup.dateKey] }))}
+                className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600 hover:bg-slate-200"
+              >
                 {dayGroup.dateLabel}
-              </div>
+                {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              </button>
+              <span className="text-xs text-slate-400">{dayGroup.meals.length} meal(s)</span>
+              {dayNeedsAttention && (
+                <span
+                  title="At least one meal this day needs kitchen attention (remark, sauce/garnish swap, cap, or large-breakfast upgrade)"
+                  className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-700"
+                >
+                  <AlertTriangle size={12} /> Needs attention
+                </span>
+              )}
               <input
                 type="text"
                 value={noteValue}
@@ -2298,6 +2328,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, savingOverrid
                 className="min-w-[220px] flex-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 focus:border-slate-400 focus:outline-none disabled:opacity-50"
               />
             </div>
+            {isExpanded && (
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {dayGroup.meals.map((meal, index) => (
                 <div key={`${entry.email}-${dayGroup.dateKey}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -2406,6 +2437,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, savingOverrid
                 </div>
               ))}
             </div>
+            )}
           </div>
           );
         })}

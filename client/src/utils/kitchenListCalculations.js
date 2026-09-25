@@ -472,13 +472,18 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
   // A single meal's protein/carbs must never exceed these — kitchen portion
   // control, not a nutrition target. When honoring that cap would otherwise
   // leave a meal short of what the proportional split calls for, the day's
-  // breakfast automatically escalates to a large, FIXED macro profile
-  // (not scaled from whatever preset is assigned — always exactly this) so
-  // the customer's daily total still lands on target without any single
-  // meal's portion growing past the cap.
+  // breakfast automatically escalates to a "large" profile: the portion
+  // WEIGHT jumps to a fixed 150g protein / 200g carb (same as before), and
+  // separately the SAME breakfast item's own C/P/F macros scale by 1.5x
+  // (never a fixed macro value — only the weight is fixed).
   const MEAL_PROTEIN_CAP = 65;
   const MEAL_CARB_CAP = 75;
-  const LARGE_BREAKFAST_FIXED_MACROS = { C: 200, P: 150, F: 0 };
+  const LARGE_BREAKFAST_MULTIPLIER = 1.5;
+  const scaleToLargeBreakfast = (macros) => ({
+    C: (Number(macros?.C) || 0) * LARGE_BREAKFAST_MULTIPLIER,
+    P: (Number(macros?.P) || 0) * LARGE_BREAKFAST_MULTIPLIER,
+    F: (Number(macros?.F) || 0) * LARGE_BREAKFAST_MULTIPLIER
+  });
 
   // Trial-runs a day's non-breakfast/non-snack meals against a given
   // breakfast macro deduction and reports whether any meal's raw (pre-cap)
@@ -545,20 +550,22 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
       F: Number(defaultPreset.F) || 0
     };
 
-    // The escalated profile is a FIXED 200g carb / 150g protein allocation —
+    const largeBreakfastMacros = scaleToLargeBreakfast(defaultBreakfastMacros);
+
+    // The escalated profile scales this day's own breakfast item by 1.5x —
     // fine for a customer whose daily target comfortably exceeds that, but
-    // for a customer whose entire day's budget is smaller than the fixed
-    // escalation itself (e.g. a 1-meal-per-day plan with 180g carbs / 120g
-    // protein total), "escalating" would consume more than their whole day,
-    // clamping every other meal to 0 — worse than the over-cap problem it's
-    // meant to solve. Only escalate when it can't backfire this way.
-    const escalationWouldFitBudget = normalizedMacros.C > LARGE_BREAKFAST_FIXED_MACROS.C
-      && normalizedMacros.P > LARGE_BREAKFAST_FIXED_MACROS.P;
+    // for a customer whose entire day's budget is smaller than the escalated
+    // allocation itself (e.g. a 1-meal-per-day plan with a small daily
+    // total), "escalating" would consume more than their whole day, clamping
+    // every other meal to 0 — worse than the over-cap problem it's meant to
+    // solve. Only escalate when it can't backfire this way.
+    const escalationWouldFitBudget = normalizedMacros.C > largeBreakfastMacros.C
+      && normalizedMacros.P > largeBreakfastMacros.P;
 
     if (dayWouldExceedCap(dayKey, dayMeta, defaultBreakfastMacros)) {
       if (escalationWouldFitBudget) {
         dayUsesLargeBreakfast.add(dayKey);
-        if (dayWouldExceedCap(dayKey, dayMeta, LARGE_BREAKFAST_FIXED_MACROS)) {
+        if (dayWouldExceedCap(dayKey, dayMeta, largeBreakfastMacros)) {
           dayHasMacroShortfall.add(dayKey);
         }
       } else {
@@ -581,21 +588,24 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
       const autoLarge = dayUsesLargeBreakfast.has(dayKey);
       const mealBreakfastPreset = resolveBreakfastPresetForMeal(meal, breakfastPreset);
       const isLarge = autoLarge || !!mealBreakfastPreset?.isLargeBreakfast;
+      // Large breakfast portion weight is fixed (150g protein / 200g carb),
+      // same as before — it's the MACROS that scale by 1.5x instead of being
+      // fixed, not the physical portion size. See scaleToLargeBreakfast below.
       const proteinWeight = isLarge ? 150 : 100;
-      const carbWeight = isLarge ? 150 : 100;
+      const carbWeight = isLarge ? 200 : 100;
       // Breakfast never includes a veg portion, for every plan.
       const vegWeight = 0;
       const totalWeight = proteinWeight + carbWeight + vegWeight;
-      // Auto-escalated days use the fixed large-breakfast macro profile
-      // outright (never the assigned item's own preset values) — see
-      // LARGE_BREAKFAST_FIXED_MACROS above for why.
+      const baseBreakfastMacros = {
+        C: Number(mealBreakfastPreset.C) || 0,
+        P: (Number(mealBreakfastPreset.P) || 0) <= 30 ? 30 : (Number(mealBreakfastPreset.P) || 0),
+        F: Number(mealBreakfastPreset.F) || 0
+      };
+      // Auto-escalated days scale this SAME item's macros by 1.5x (never a
+      // fixed value) — see scaleToLargeBreakfast above for why.
       const breakfastMacros = autoLarge
-        ? { ...LARGE_BREAKFAST_FIXED_MACROS }
-        : {
-            C: Number(mealBreakfastPreset.C) || 0,
-            P: (Number(mealBreakfastPreset.P) || 0) <= 30 ? 30 : (Number(mealBreakfastPreset.P) || 0),
-            F: Number(mealBreakfastPreset.F) || 0
-          };
+        ? scaleToLargeBreakfast(baseBreakfastMacros)
+        : baseBreakfastMacros;
       return {
         ...meal,
         category: 'breakfast',
@@ -698,18 +708,21 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
       : defaultBreakfast;
     const dayBreakfastProteinRaw = Number(dayBreakfastPreset.P) || 0;
     const dayBreakfastProtein = dayBreakfastProteinRaw <= 30 ? 30 : dayBreakfastProteinRaw;
+    const dayLargeBreakfastMacros = dayAutoLargeBreakfast
+      ? scaleToLargeBreakfast({ C: Number(dayBreakfastPreset.C) || 0, P: dayBreakfastProtein, F: Number(dayBreakfastPreset.F) || 0 })
+      : null;
 
     // Apply breakfast deductions only when breakfast exists on this specific
-    // day. A day auto-escalated to the large breakfast profile always uses
-    // the fixed macros (never the assigned item's own preset values).
+    // day. A day auto-escalated to the large breakfast profile scales that
+    // SAME assigned item's own macros by 1.5x (never a fixed value).
     const breakfastCarbsForDefault = dayMeta.hasBreakfast
-      ? (dayAutoLargeBreakfast ? LARGE_BREAKFAST_FIXED_MACROS.C : (Number(dayBreakfastPreset.C) || 0))
+      ? (dayAutoLargeBreakfast ? dayLargeBreakfastMacros.C : (Number(dayBreakfastPreset.C) || 0))
       : 0;
     const breakfastProteinForDefault = dayMeta.hasBreakfast
-      ? (dayAutoLargeBreakfast ? LARGE_BREAKFAST_FIXED_MACROS.P : dayBreakfastProtein)
+      ? (dayAutoLargeBreakfast ? dayLargeBreakfastMacros.P : dayBreakfastProtein)
       : 0;
     const breakfastFatsForDefault = dayMeta.hasBreakfast
-      ? (dayAutoLargeBreakfast ? LARGE_BREAKFAST_FIXED_MACROS.F : (Number(dayBreakfastPreset.F) || 0))
+      ? (dayAutoLargeBreakfast ? dayLargeBreakfastMacros.F : (Number(dayBreakfastPreset.F) || 0))
       : 0;
 
     // Snack macros reduce the day's remaining budget for every plan except

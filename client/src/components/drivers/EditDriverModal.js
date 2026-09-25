@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { motion, AnimatePresence } from 'framer-motion';
 import { updateDriver } from '../../store/slices/driverSlice';
 import { uploadPhoto } from '../../utils/fileUpload';
+import api from '../../utils/api';
 
 const toDateInput = (value) => (value ? new Date(value).toISOString().slice(0, 10) : '');
 
@@ -19,6 +20,7 @@ const buildFormFromDriver = (driver) => ({
   shiftTiming: driver?.profile?.shiftTiming || '',
   vehicleType: driver?.profile?.vehicleType || '',
   vehicleId: driver?.profile?.vehicleId || '',
+  truckoomVehicleNo: driver?.profile?.truckoomVehicleNo || '',
   stopCapacity: driver?.profile?.stopCapacity ?? '',
   baseSalary: driver?.profile?.baseSalary ?? '',
   contractType: driver?.profile?.contractType || 'full_time',
@@ -48,6 +50,17 @@ const EditDriverModal = ({ driver, onClose }) => {
   const [vehiclePaperPreview, setVehiclePaperPreview] = useState(driver?.profile?.vehiclePaper || null);
   const [uploadingVehiclePaper, setUploadingVehiclePaper] = useState(false);
   const vehiclePaperInputRef = useRef(null);
+
+  // Truckoom-tracked vehicles, for the "Truckoom Vehicle" dropdown below —
+  // fetched once; if the API isn't reachable/configured the dropdown just
+  // shows the driver's already-saved value (if any) plus nothing else,
+  // rather than blocking the rest of the form.
+  const [truckoomVehicles, setTruckoomVehicles] = useState([]);
+  useEffect(() => {
+    api.get('/truckoom/vehicles')
+      .then((res) => setTruckoomVehicles(res.data?.data || []))
+      .catch(() => setTruckoomVehicles([]));
+  }, []);
 
   useEffect(() => {
     setFormData(buildFormFromDriver(driver));
@@ -132,6 +145,7 @@ const EditDriverModal = ({ driver, onClose }) => {
             shiftTiming: formData.shiftTiming || undefined,
             vehicleType: formData.vehicleType || undefined,
             vehicleId: formData.vehicleId || undefined,
+            truckoomVehicleNo: formData.truckoomVehicleNo || null,
             stopCapacity: formData.stopCapacity !== '' ? Number(formData.stopCapacity) : undefined,
             vehiclePaper: vehiclePaperUrl || undefined,
             baseSalary: formData.baseSalary !== '' ? Number(formData.baseSalary) : undefined,
@@ -301,6 +315,18 @@ const EditDriverModal = ({ driver, onClose }) => {
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Vehicle ID</label>
                   <input type="text" name="vehicleId" value={formData.vehicleId} onChange={handleChange} placeholder="e.g. DXB-A-12345" className={inputCls('vehicleId')} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Truckoom Vehicle (GPS)</label>
+                  <select name="truckoomVehicleNo" value={formData.truckoomVehicleNo} onChange={handleChange} className={inputCls('truckoomVehicleNo')}>
+                    <option value="">— None —</option>
+                    {truckoomVehicles.map((v) => (
+                      <option key={v.vehicleNo} value={v.vehicleNo}>
+                        {v.vehicleNo}{v.deviceName ? ` — ${v.deviceName}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-[11px] text-gray-500">Links this driver to their real GPS-tracked vehicle, for Live Tracking and Driver Routes.</p>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Registration Paper</label>

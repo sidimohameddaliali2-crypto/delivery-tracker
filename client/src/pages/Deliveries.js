@@ -466,7 +466,25 @@ const Deliveries = () => {
               <div className={`absolute top-0 left-0 w-1 h-full ${getTimingBandColor(delivery)}`} />
               <div className="flex justify-between items-start">
                 <div className="min-w-0">
-                  <h3 className="font-semibold text-gray-900 leading-tight truncate">{delivery.customerName}</h3>
+                  <h3 className="font-semibold text-gray-900 leading-tight truncate">
+                    {delivery.customerName}
+                    {delivery.combinedSunday && (
+                      <span
+                        title="Sunday's delivery is included — no separate Sunday trip needed for this customer."
+                        className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-100 text-indigo-700 align-middle"
+                      >
+                        +Sun
+                      </span>
+                    )}
+                    {delivery.sundayOnlyCarriedOver && (
+                      <span
+                        title="This customer only has a Sunday meal — delivered together with Saturday's route since there's no separate Sunday route."
+                        className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700 align-middle"
+                      >
+                        Sun only
+                      </span>
+                    )}
+                  </h3>
                   <p className="text-xs text-gray-400 font-mono mt-0.5">ID: {delivery.customerId}</p>
                 </div>
                 <span className={`flex-shrink-0 ml-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${statusStyle.cls}`}>
@@ -581,7 +599,25 @@ const Deliveries = () => {
                       />
                     </td>
                     <td className="p-3">
-                      <div className="font-medium text-gray-900">{delivery.customerName}</div>
+                      <div className="font-medium text-gray-900">
+                        {delivery.customerName}
+                        {delivery.combinedSunday && (
+                          <span
+                            title="Sunday's delivery is included — no separate Sunday trip needed for this customer."
+                            className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-100 text-indigo-700 align-middle"
+                          >
+                            +Sun
+                          </span>
+                        )}
+                        {delivery.sundayOnlyCarriedOver && (
+                          <span
+                            title="This customer only has a Sunday meal — delivered together with Saturday's route since there's no separate Sunday route."
+                            className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700 align-middle"
+                          >
+                            Sun only
+                          </span>
+                        )}
+                      </div>
                       <div className="text-xs text-gray-400 mt-0.5">ID: {delivery.customerId}</div>
                     </td>
                     <td className="p-3">

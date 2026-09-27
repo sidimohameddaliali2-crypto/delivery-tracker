@@ -667,6 +667,7 @@ const AddDelivery = () => {
       location: 'address',
       address: 'address',
       area: 'zone',
+      zone: 'zone',
       driver: 'driverName',
       gps: 'gpsLink',
       company: 'company',

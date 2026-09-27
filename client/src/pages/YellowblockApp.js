@@ -681,6 +681,7 @@ const AssetManagementView = () => {
   } = useSelector((s) => s.yellowblock);
 
   const [search, setSearch] = useState('');
+  const [materialFilter, setMaterialFilter] = useState('');
   const [showArchived, setShowArchived] = useState(true);
   const [editingAsset, setEditingAsset] = useState(null);
   const [historyAsset, setHistoryAsset] = useState(null);
@@ -925,6 +926,17 @@ const AssetManagementView = () => {
     dispatch(fetchYellowblockAssetUsageLogs({ assetId: asset._id, limit: 300 }));
   };
 
+  // Distinct materials among the currently-loaded assets, for the Material
+  // filter dropdown — free-text field on the asset itself, so options are
+  // derived rather than a fixed list.
+  const materialOptions = useMemo(
+    () => Array.from(new Set(assets.map((a) => String(a.material || '').trim()).filter(Boolean))).sort(),
+    [assets]
+  );
+  const visibleAssets = materialFilter
+    ? assets.filter((a) => String(a.material || '').trim() === materialFilter)
+    : assets;
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-100 bg-white sticky top-0 z-10">
@@ -938,6 +950,16 @@ const AssetManagementView = () => {
             className="text-sm outline-none w-48 placeholder:text-gray-400"
           />
         </div>
+        <select
+          value={materialFilter}
+          onChange={(e) => setMaterialFilter(e.target.value)}
+          className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-600 outline-none"
+        >
+          <option value="">All Materials</option>
+          {materialOptions.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
         <button
           type="button"
           onClick={() => setShowArchived((prev) => !prev)}
@@ -1012,14 +1034,14 @@ const AssetManagementView = () => {
       <div className="flex-1 overflow-auto px-4 pb-4">
         {assetsLoading ? (
           <div className="flex items-center justify-center h-40"><Spinner /></div>
-        ) : assets.length === 0 ? (
+        ) : visibleAssets.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-40 text-gray-400">
             <PackageSearch className="w-10 h-10 mb-2" />
             <p className="text-sm">No assets found</p>
           </div>
         ) : (
           <div className="space-y-3">
-            {assets.map((asset) => {
+            {visibleAssets.map((asset) => {
               const totalUnits = Number(asset.totalCountAvailable || 0) + Number(asset.totalCountUsed || 0);
               const availabilityPercent = totalUnits > 0
                 ? Math.round((Number(asset.totalCountAvailable || 0) / totalUnits) * 100)

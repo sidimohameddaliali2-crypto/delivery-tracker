@@ -682,6 +682,7 @@ const AssetManagementView = () => {
 
   const [search, setSearch] = useState('');
   const [materialFilter, setMaterialFilter] = useState('');
+  const [itemTypeFilter, setItemTypeFilter] = useState('');
   const [showArchived, setShowArchived] = useState(true);
   const [editingAsset, setEditingAsset] = useState(null);
   const [historyAsset, setHistoryAsset] = useState(null);
@@ -933,9 +934,15 @@ const AssetManagementView = () => {
     () => Array.from(new Set(assets.map((a) => String(a.material || '').trim()).filter(Boolean))).sort(),
     [assets]
   );
-  const visibleAssets = materialFilter
-    ? assets.filter((a) => String(a.material || '').trim() === materialFilter)
-    : assets;
+  const itemTypeOptions = useMemo(
+    () => Array.from(new Set(assets.map((a) => String(a.itemType || '').trim()).filter(Boolean))).sort(),
+    [assets]
+  );
+  const visibleAssets = assets.filter(
+    (a) =>
+      (!materialFilter || String(a.material || '').trim() === materialFilter) &&
+      (!itemTypeFilter || String(a.itemType || '').trim() === itemTypeFilter)
+  );
 
   return (
     <div className="flex flex-col h-full">
@@ -958,6 +965,16 @@ const AssetManagementView = () => {
           <option value="">All Materials</option>
           {materialOptions.map((m) => (
             <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+        <select
+          value={itemTypeFilter}
+          onChange={(e) => setItemTypeFilter(e.target.value)}
+          className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-600 outline-none"
+        >
+          <option value="">All Item Types</option>
+          {itemTypeOptions.map((t) => (
+            <option key={t} value={t}>{t}</option>
           ))}
         </select>
         <button

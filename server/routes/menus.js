@@ -14,6 +14,7 @@ import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
 import athleatService from '../services/athleatService.js';
 import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
 import supyService from '../services/supyService.js';
+import { getNutritionForLinkedSubscription } from '../services/matterNutritionLookup.js';
 import {
   resolveCustomerMatch,
   resolveCustomerMatchBulk,
@@ -1572,7 +1573,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}) {
       let nutrition = null;
       try {
         nutrition = matterSubscriptionId
-          ? await matterApiService.getSubscriptionNutritionBySubscriptionId(matterSubscriptionId)
+          ? await getNutritionForLinkedSubscription(matterSubscriptionId, record.email)
           : await matterApiService.getSubscriptionNutritionByEmail(record.email);
       } catch (lookupError) {
         console.error(`Snack assignment: failed to look up ${record.email}:`, lookupError.message);
@@ -1807,7 +1808,10 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
       (m) => m.mealType === 'snack' && toDateKey(m.date) === dateKey
     ).length;
 
-    const breakfastInclude = breakfastIncludeByEmail.get(email.toLowerCase()) || false;
+    // Matter subscription's own breakfast_included wins; Customer profile is fallback.
+    const breakfastInclude = typeof customer.breakfastIncluded === 'boolean'
+      ? customer.breakfastIncluded
+      : (breakfastIncludeByEmail.get(email.toLowerCase()) || false);
     // Unlike the standard-plan assignment (runAssignMainMeals), breakfast is
     // never subtracted from the main meal count for Matter Core — it's
     // always an extra on top of the full meal_frequency, per the plan's
@@ -2051,7 +2055,12 @@ async function runAutoPopulateMissing(menuId, dateKey) {
 
     if (hasSelectionThatDay) {
       alreadyCovered += 1;
-      const email = customer?.email || sub.email;
+      // The selection record's own email first: with a duplicate Customer
+      // (the Matter subscription linked to an older record with a different
+      // email), customer.email points at the record that has NO selection,
+      // and runAssignSnacks — which looks records up by email — found
+      // nothing, so these customers silently never got snacks.
+      const email = existingRecord?.email || customer?.email || sub.email;
       if (email) {
         const item = { email, subscriptionId: sub.subscription_id };
         if (isMatterCore) needsMatterCoreSnackOnly.push(item);
@@ -2072,6 +2081,7 @@ async function runAutoPopulateMissing(menuId, dateKey) {
       customerRef: customer._id,
       subscriptionId: sub.subscription_id,
       mealFrequency: sub.meal_frequency,
+      breakfastIncluded: typeof sub.breakfast_included === 'boolean' ? sub.breakfast_included : undefined,
       exclusions: sub.exclusions || []
     };
 
@@ -2424,6 +2434,9 @@ async function runAssignMainMeals(menuId, dateKey, customers) {
     let assigned = 0;
     let skippedNoOption = 0;
     let skippedAlreadyAssigned = 0;
+    let repeatedDish = 0;
+    let assignedWithExclusionConflict = 0;
+    const skippedCustomers = new Set();
     let assignedBreakfast = 0;
     let skippedBreakfastNoOption = 0;
 
@@ -2439,12 +2452,24 @@ async function runAssignMainMeals(menuId, dateKey, customers) {
         (m) => toDateKey(m.date) === dateKey && m.mealType === 'breakfast'
       );
 
-      const breakfastInclude = breakfastIncludeByEmail.get(email.toLowerCase()) || false;
+      const customerExclusions = (customer.exclusions || []).map((e) => String(e).toLowerCase().trim());
+
+      // The Matter subscription's own breakfast_included flag (passed by the
+      // caller) wins; the internal Customer profile is only the fallback.
+      const breakfastInclude = typeof customer.breakfastIncluded === 'boolean'
+        ? customer.breakfastIncluded
+        : (breakfastIncludeByEmail.get(email.toLowerCase()) || false);
+      const eligibleBreakfasts = breakfastOptions.filter((opt) => !optionExcludedByCustomer(opt, customerExclusions));
+      // Breakfast only takes one of meal_frequency's slots if the customer
+      // will actually GET one (or already has one). If there's no eligible
+      // breakfast that day (no options, or every option hits their
+      // exclusions), the slot goes back to a main meal — otherwise a 2-meal
+      // customer ended up with 1 meal and no breakfast at all.
+      const breakfastCoversASlot = breakfastInclude && (hasBreakfastAlready || eligibleBreakfasts.length > 0);
       const baseMealFrequency = Math.max(1, Number(customer.mealFrequency) || 1);
-      const totalNeeded = Math.max(0, baseMealFrequency - (breakfastInclude ? 1 : 0));
+      const totalNeeded = Math.max(0, baseMealFrequency - (breakfastCoversASlot ? 1 : 0));
       const slotsNeeded = totalNeeded - existingMainMealsCount;
 
-      const customerExclusions = (customer.exclusions || []).map((e) => String(e).toLowerCase().trim());
       const assignedMeals = [];
 
       // Seed with what the customer already has today, so a re-run (or a
@@ -2467,21 +2492,63 @@ async function runAssignMainMeals(menuId, dateKey, customers) {
         }
 
         typesForSlots.forEach((type) => {
-          const mainCandidate = mainMeals.find((m) => m.type === type);
           let chosen = null;
+          const isEligible = (opt) => !optionExcludedByCustomer(opt, customerExclusions)
+            && !assignedNamesToday.has(nameKeyOf(opt));
 
-          if (
-            mainCandidate
-            && !optionExcludedByCustomer(mainCandidate, customerExclusions)
-            && !assignedNamesToday.has(nameKeyOf(mainCandidate))
-          ) {
-            chosen = mainCandidate;
-          } else {
-            chosen = subMeals.find((sub) =>
-              sub.type === type
-              && !optionExcludedByCustomer(sub, customerExclusions)
-              && !assignedNamesToday.has(nameKeyOf(sub))
-            ) || null;
+          // Owner request: a slot should never stay empty. Walk the types
+          // starting at this slot's own type and wrapping around the
+          // chicken → beef → fish order; for each type try its main first,
+          // then its sub, before moving to the next type (main of type 1,
+          // sub of type 1, main of type 2, sub of type 2, main of type 3,
+          // sub of type 3).
+          const startIndex = MAIN_MEAL_TYPE_ORDER.indexOf(type);
+          for (let offset = 0; offset < MAIN_MEAL_TYPE_ORDER.length && !chosen; offset += 1) {
+            const tryType = MAIN_MEAL_TYPE_ORDER[(startIndex + offset) % MAIN_MEAL_TYPE_ORDER.length];
+            chosen = mainMeals.find((m) => m.type === tryType && isEligible(m))
+              || subMeals.find((s) => s.type === tryType && isEligible(s))
+              || null;
+          }
+
+          // Owner (2026-09-30): a slot must never be skipped. If every dish
+          // that day is already on this customer's plate (e.g. a 4-meal
+          // customer on a day with only 3 dishes), repeat one — same type
+          // walk, exclusions still respected. Only when EVERY dish hits their
+          // exclusions is the slot left empty (never serve an excluded dish).
+          if (!chosen) {
+            for (let offset = 0; offset < MAIN_MEAL_TYPE_ORDER.length && !chosen; offset += 1) {
+              const tryType = MAIN_MEAL_TYPE_ORDER[(startIndex + offset) % MAIN_MEAL_TYPE_ORDER.length];
+              chosen = mainMeals.find((m) => m.type === tryType && !optionExcludedByCustomer(m, customerExclusions))
+                || subMeals.find((s) => s.type === tryType && !optionExcludedByCustomer(s, customerExclusions))
+                || null;
+            }
+            if (chosen) repeatedDish += 1;
+          }
+
+          // Owner (2026-09-30): never leave a slot empty. If every dish that
+          // day hits the customer's exclusions, give the one that clashes
+          // with the fewest (type order breaks ties) and save the clashing
+          // exclusions on the meal — it shows as "Needs attention" on the
+          // Kitchen List and kitchen paper so it's swapped before it goes out.
+          if (!chosen) {
+            const conflictsFor = (opt) => {
+              const tags = (opt.exclusions || []).map((e) => String(e).toLowerCase().trim());
+              return customerExclusions.filter((ex) => tags.some((tag) => tag.includes(ex) || ex.includes(tag)));
+            };
+            let best = null;
+            for (let offset = 0; offset < MAIN_MEAL_TYPE_ORDER.length; offset += 1) {
+              const tryType = MAIN_MEAL_TYPE_ORDER[(startIndex + offset) % MAIN_MEAL_TYPE_ORDER.length];
+              [...mainMeals, ...subMeals]
+                .filter((opt) => opt.type === tryType)
+                .forEach((opt) => {
+                  const conflicts = conflictsFor(opt);
+                  if (!best || conflicts.length < best.conflicts.length) best = { opt, conflicts };
+                });
+            }
+            if (best) {
+              chosen = { ...best.opt, _exclusionConflict: best.conflicts };
+              assignedWithExclusionConflict += 1;
+            }
           }
 
           if (chosen) {
@@ -2490,6 +2557,7 @@ async function runAssignMainMeals(menuId, dateKey, customers) {
             assigned += 1;
           } else {
             skippedNoOption += 1;
+            skippedCustomers.add(customer.name || email);
           }
         });
       } else {
@@ -2510,11 +2578,11 @@ async function runAssignMainMeals(menuId, dateKey, customers) {
         // when read back — see the mealType/slotNumber consolidation key in
         // GET /:id/selections.
         slotNumber: existingMainMealsCount + index,
+        exclusionConflict: meal._exclusionConflict || [],
         isAutoAssigned: true
       }));
 
       if (breakfastInclude && !hasBreakfastAlready) {
-        const eligibleBreakfasts = breakfastOptions.filter((opt) => !optionExcludedByCustomer(opt, customerExclusions));
         if (eligibleBreakfasts.length > 0) {
           const choice = eligibleBreakfasts[Math.floor(Math.random() * eligibleBreakfasts.length)];
           newMeals.push({
@@ -2556,12 +2624,178 @@ async function runAssignMainMeals(menuId, dateKey, customers) {
         assigned,
         skippedNoOption,
         skippedAlreadyAssigned,
+        repeatedDish,
+        assignedWithExclusionConflict,
+        skippedCustomers: Array.from(skippedCustomers),
         assignedBreakfast,
         skippedBreakfastNoOption,
         customersProcessed: sortedCustomers.length
       }
     };
 }
+
+/**
+ * Kitchen List → "Assign Partner Meals". Owner (2026-09-29): kitchen staff
+ * pick a Partner, then one of its members (a Customer linked via
+ * Customer.partner), and add that date's dishes to them by hand. Those
+ * members get fixed Lean-plan macros (C35 P30 F15 per main meal — applied in
+ * kitchenListCalculations) and print under the kitchen paper's "Partners"
+ * section, not by emirate.
+ */
+router.get('/kitchen-partners', protect, async (req, res) => {
+  try {
+    const partners = await Partner.find({})
+      .select('businessName businessType')
+      .sort({ businessName: 1 })
+      .lean();
+    return res.json({ success: true, data: partners });
+  } catch (error) {
+    console.error('Error listing kitchen partners:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/kitchen-partners/:partnerId/members', protect, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.partnerId)) {
+      return res.status(400).json({ success: false, message: 'Invalid partner id' });
+    }
+    const members = await Customer.find({ partner: req.params.partnerId })
+      .select('customerId email firstName lastName')
+      .sort({ firstName: 1, lastName: 1 })
+      .lean();
+    return res.json({ success: true, data: members });
+  } catch (error) {
+    console.error('Error listing partner members:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * GET /api/menus/:id/day-dishes?date=YYYY-MM-DD
+ * Every dish available on that date, for the partner-meal picker: main
+ * dishes from the meal editor's MenuItem records (falling back to the older
+ * mainMealOptionsByDate pool), plus the date's breakfast and snack options.
+ */
+router.get('/:id/day-dishes', protect, async (req, res) => {
+  try {
+    const dateKey = toDateKey(req.query.date);
+    if (!dateKey) {
+      return res.status(400).json({ success: false, message: 'A valid date is required' });
+    }
+    const menu = await WeeklyMenu.findById(req.params.id)
+      .select('mainMealOptionsByDate breakfastOptionsByDate snackOptionsByDate')
+      .lean();
+    if (!menu) {
+      return res.status(404).json({ success: false, message: 'Menu not found' });
+    }
+
+    const items = await MenuItem.find({ itemDate: new Date(dateKey) })
+      .select('mealName mealType')
+      .lean();
+    const seen = new Set();
+    const pushUnique = (list, entry) => {
+      const key = `${entry.mealType}::${String(entry.mealName).trim().toLowerCase()}`;
+      if (!entry.mealName || seen.has(key)) return;
+      seen.add(key);
+      list.push(entry);
+    };
+
+    const dishes = [];
+    items.forEach((item) => {
+      const mealType = ['breakfast', 'snack'].includes(item.mealType) ? item.mealType : 'main';
+      pushUnique(dishes, { mealType, mealName: item.mealName, menuItemId: item._id });
+    });
+    const legacyMain = (menu.mainMealOptionsByDate || {})[dateKey] || {};
+    [...(legacyMain.mainMeals || []), ...(legacyMain.subMeals || [])]
+      .forEach((opt) => pushUnique(dishes, { mealType: 'main', mealName: opt.name }));
+    ((menu.breakfastOptionsByDate || {})[dateKey] || [])
+      .forEach((opt) => pushUnique(dishes, { mealType: 'breakfast', mealName: opt.name }));
+    const snackPools = (menu.snackOptionsByDate || {})[dateKey];
+    const snackList = Array.isArray(snackPools)
+      ? snackPools
+      : [...(snackPools?.first || []), ...(snackPools?.second || [])];
+    snackList.forEach((opt) => pushUnique(dishes, { mealType: 'snack', mealName: opt.name }));
+
+    return res.json({ success: true, data: dishes });
+  } catch (error) {
+    console.error('Error listing day dishes:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
+ * POST /api/menus/:id/partner-meals
+ * Body: { date, customerId (Customer _id), meals: [{ mealType, mealName, menuItemId?, quantity }] }
+ * Appends the meals to that member's selection for this menu (creating the
+ * record if needed), marked isAutoAssigned so they never show in the
+ * customer-facing selection preview.
+ */
+router.post('/:id/partner-meals', protect, async (req, res) => {
+  try {
+    const { date, customerId, meals } = req.body || {};
+    const dateKey = toDateKey(date);
+    if (!dateKey) {
+      return res.status(400).json({ success: false, message: 'A valid date is required' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(customerId)) {
+      return res.status(400).json({ success: false, message: 'A valid partner member is required' });
+    }
+    const customer = await Customer.findById(customerId).select('customerId email firstName lastName partner').lean();
+    if (!customer?.partner) {
+      return res.status(400).json({ success: false, message: 'This customer is not linked to a partner' });
+    }
+    if (!customer.email) {
+      return res.status(400).json({ success: false, message: 'This partner member has no email on file' });
+    }
+
+    const allowedTypes = ['main', 'breakfast', 'snack'];
+    const newMeals = (Array.isArray(meals) ? meals : [])
+      .map((m) => ({
+        mealType: allowedTypes.includes(m?.mealType) ? m.mealType : 'main',
+        mealName: String(m?.mealName || '').trim(),
+        menuItemId: mongoose.Types.ObjectId.isValid(m?.menuItemId) ? m.menuItemId : undefined,
+        quantity: Math.max(1, Math.min(50, Math.floor(Number(m?.quantity) || 1)))
+      }))
+      .filter((m) => m.mealName)
+      .map((m) => ({
+        date: new Date(dateKey),
+        mealType: m.mealType,
+        mealName: m.mealName,
+        menuItemId: m.menuItemId,
+        quantity: m.quantity,
+        isAutoAssigned: true
+      }));
+    if (newMeals.length === 0) {
+      return res.status(400).json({ success: false, message: 'Add at least one meal' });
+    }
+
+    const email = String(customer.email).trim().toLowerCase();
+    await MenuSelectionRecord.findOneAndUpdate(
+      { weeklyMenuId: req.params.id, email },
+      {
+        $setOnInsert: {
+          weeklyMenuId: req.params.id,
+          email,
+          customer: customer._id,
+          customerId: customer.customerId ? String(customer.customerId) : undefined,
+          firstName: customer.firstName || email,
+          lastName: customer.lastName || ''
+        },
+        $push: { selectedMeals: { $each: newMeals } }
+      },
+      { upsert: true }
+    );
+    // Selections GET caches for ~20s — drop it so the Kitchen List reload
+    // shows the new meals immediately.
+    await cacheDeletePattern(`menu:${req.params.id}:selections:*`);
+
+    return res.json({ success: true, data: { added: newMeals.length } });
+  } catch (error) {
+    console.error('Error assigning partner meals:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
 
 router.post('/:id/assign-main-meals', protect, async (req, res) => {
   try {
@@ -3367,6 +3601,15 @@ router.get('/:id/selections', protect, async (req, res) => {
         ...recObj,
         targetMacros: activeMacros,
         customerMacros: activeMacros,
+        // firstName/lastName on the record itself are a snapshot taken at
+        // submission time (see select-meals) and never refresh — editing a
+        // customer's name in Customer Management updates only the Customer
+        // document, not every past MenuSelectionRecord. Prefer the live
+        // Customer's name here so an edit shows up on reload; fall back to
+        // the record's own snapshot only when there's no linked Customer at
+        // all (matches every other field below).
+        firstName: customer?.firstName || recObj.firstName,
+        lastName: customer?.lastName || recObj.lastName,
         mealPerDay: customer?.mealPerDay,
         breakfastInclude: customer?.breakfastInclude,
         mealSnack: customer?.mealSnack,
@@ -3590,7 +3833,13 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // phone -> name), not just an exact email lookup, so a customer who
     // already exists internally under a different address (e.g. imported
     // from FileMaker/Athleat) is reused instead of creating a duplicate.
-    let { customer } = await resolveCustomerMatch({ email: cleanEmail });
+    // subscriptionId must be passed here too — without it, the manual-link
+    // tier (Customer.matterSubscriptionId) never gets a chance to fire, so a
+    // customer whose internal email doesn't match what they sign in with
+    // (the exact case fixed via mergeUnnamedCustomerIntoRealRecord.js,
+    // 2026-09-29) would immediately spawn a new throwaway duplicate again on
+    // their very next selection.
+    let { customer } = await resolveCustomerMatch({ email: cleanEmail, subscriptionId: cleanSubscriptionId });
 
     if (!customer) {
       customer = new Customer({ email: cleanEmail, customerId: cleanEmail.split('@')[0] });
@@ -4024,6 +4273,7 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
       sauceConflict: sel.sauceConflict,
       garnishConflict: sel.garnishConflict,
       remark: String(sel.remark || '').trim(),
+      exclusionConflict: Array.isArray(sel.exclusionConflict) ? sel.exclusionConflict : [],
       isAutoAssigned: !!sel.isAutoAssigned
     }));
 

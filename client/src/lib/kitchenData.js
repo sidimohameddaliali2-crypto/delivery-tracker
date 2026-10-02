@@ -282,7 +282,7 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     // single slow/hung Matter API call for one customer would otherwise
     // block the entire page's load indefinitely.
     const nutritionResponse = subscriptionId
-      ? await api.get('/matter/subscriptions/nutrition-by-subscription-id', { params: { subscriptionId }, timeout: 20000 })
+      ? await api.get('/matter/subscriptions/nutrition-by-subscription-id', { params: { subscriptionId, email }, timeout: 20000 })
       : await api.get('/matter/subscriptions/nutrition-by-email', { params: { email }, timeout: 20000 });
     const nutrition = nutritionResponse.data?.data;
     const websiteMacros = nutrition?.macros
@@ -294,6 +294,8 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       customerMacros: hasNonZeroMacros(websiteMacros) ? websiteMacros : entry?.customerMacros,
       snacksPerDay: nutrition?.snacks_per_day ?? null,
       planName: nutrition?.plan_name ?? null,
+      mealsPerDay: nutrition?.meal_frequency ?? null,
+      breakfastIncluded: typeof nutrition?.breakfast_included === 'boolean' ? nutrition.breakfast_included : null,
       ...(extended ? {
         deliveryAddress: nutrition?.customer_addresses?.[0] || null,
         deliveryWindow: nutrition?.delivery_window || null,

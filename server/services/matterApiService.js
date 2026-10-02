@@ -175,6 +175,8 @@ class MatterApiService {
       total_calories: subscription.total_calories ?? null,
       snacks_per_day: subscription.snacks_per_day ?? null,
       plan_name: subscription.plan?.name ?? null,
+      meal_frequency: subscription.plan?.meal_frequency ?? null,
+      breakfast_included: !!subscription.breakfast_included,
       customer_addresses: subscription.customer_addresses || [],
       delivery_window: subscription.delivery_window || null,
       exclusions: (subscription.exclusions || []).map((ex) => ex.title).filter(Boolean)
@@ -294,6 +296,7 @@ class MatterApiService {
             address_detail: selectBestAddress(detail.data.customer_addresses),
             delivery_window: detail.data.delivery_window || null,
             meal_frequency: detail.data.plan?.meal_frequency ?? 1,
+            breakfast_included: !!detail.data.breakfast_included,
             exclusions: (detail.data.exclusions || []).map((ex) => ex.title).filter(Boolean),
             subscription_status: sub.subscription_status,
             plan_name: detail.data.plan?.name ?? null,

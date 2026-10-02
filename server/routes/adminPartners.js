@@ -176,6 +176,23 @@ router.get('/orders/:orderId', async (req, res) => {
   }
 });
 
+// Acknowledge a submitted order — a lightweight confirmation step before
+// locking/invoicing. Does not touch `status`.
+router.patch('/orders/:orderId/acknowledge', admin, async (req, res) => {
+  try {
+    const order = await SpaceOrder.findById(req.params.orderId);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    if (order.status !== 'submitted') {
+      return res.status(400).json({ success: false, message: 'Only submitted orders can be acknowledged.' });
+    }
+    order.acknowledgedAt = new Date();
+    await order.save();
+    res.json({ success: true, data: order });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 router.patch('/orders/:orderId/status', admin, async (req, res) => {
   try {
     const { status } = req.body;

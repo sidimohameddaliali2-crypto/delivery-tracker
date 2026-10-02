@@ -42,7 +42,8 @@ router.post('/login', async (req, res) => {
           phone: partner.phone,
           address: partner.address,
           minimumOrder: partner.minimumOrder ?? 0,
-          defaultDeliveryTime: partner.defaultDeliveryTime || null
+          defaultDeliveryTime: partner.defaultDeliveryTime || null,
+          profilePicture: partner.profilePicture || ''
         }
       }
     });

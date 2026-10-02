@@ -2,6 +2,14 @@ import express from 'express';
 import Customer from '../models/Customer.js';
 import Delivery from '../models/Delivery.js';
 import Partner from '../models/Partner.js';
+import DeliveryChange from '../models/DeliveryChange.js';
+import DeliveryIssue from '../models/DeliveryIssue.js';
+import BagNote from '../models/BagNote.js';
+import Bag from '../models/Bag.js';
+import Communication from '../models/Communication.js';
+import FlaggedAlert from '../models/FlaggedAlert.js';
+import SlackLog from '../models/SlackLog.js';
+import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { resolveCustomerMatch, resolveCustomerMatchBulk } from '../services/customerMatchService.js';
 
 const router = express.Router();
@@ -614,6 +622,100 @@ router.patch('/:customerId', async (req, res) => {
     }
     console.error('Error updating customer:', error);
     res.status(500).json({ success: false, message: 'Error updating customer' });
+  }
+});
+
+/**
+ * Rename a customer's customerId — a distinct operation from the regular
+ * field PATCH above, because customerId is stored as a plain string (not an
+ * ObjectId ref) on 9 other collections: Delivery, DeliveryChange,
+ * DeliveryIssue, BagNote, Bag (assignedTo.customer.customerId),
+ * Communication, FlaggedAlert, SlackLog, MenuSelectionRecord. Renaming it
+ * without also updating every one of those would orphan them — the exact
+ * "duplicate/Unknown customer" bug class fixed via mergeUnnamedCustomerInto-
+ * RealRecord.js (2026-09-29) — so this cascades the new value everywhere
+ * that string is stored, not just on the Customer document itself.
+ *
+ * Identified by the CURRENT customerId (:oldCustomerId), matching every
+ * other route on this page — the client's customer objects never carry the
+ * Mongo _id. A retry after a crash mid-cascade would 404 here since the
+ * Customer document is already renamed by then; that's an accepted rare
+ * edge case, surfaced as a normal 404 rather than silently no-op'd.
+ *
+ * PATCH /api/customers/:oldCustomerId/rename-id
+ * Body: { newCustomerId }
+ */
+router.patch('/:oldCustomerId/rename-id', async (req, res) => {
+  try {
+    const newCustomerId = String(req.body.newCustomerId || '').trim();
+    if (!newCustomerId) {
+      return res.status(400).json({ success: false, message: 'newCustomerId is required' });
+    }
+
+    const customer = await Customer.findOne({ customerId: req.params.oldCustomerId });
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+
+    const oldCustomerId = customer.customerId;
+    if (newCustomerId === oldCustomerId) {
+      return res.json({ success: true, data: customer, cascaded: null });
+    }
+
+    const clash = await Customer.findOne({ customerId: newCustomerId, _id: { $ne: customer._id } }).select('_id');
+    if (clash) {
+      return res.status(409).json({ success: false, message: `Customer ID "${newCustomerId}" is already in use` });
+    }
+
+    // Rename the canonical record first — cheap, single-document, and once
+    // this succeeds the new ID is the source of truth even if a cascade
+    // step below fails partway (each updateMany below is independently
+    // re-runnable: matching on the still-old value in each collection, a
+    // retry of this same request after a partial failure just picks up
+    // wherever it left off, since already-migrated collections have nothing
+    // left matching oldCustomerId).
+    customer.customerId = newCustomerId;
+    await customer.save();
+
+    const cascadeTargets = [
+      ['deliveries', Delivery, 'customerId'],
+      ['deliveryChanges', DeliveryChange, 'customerId'],
+      ['deliveryIssues', DeliveryIssue, 'customerId'],
+      ['bagNotes', BagNote, 'customerId'],
+      ['bagsCurrentAssignment', Bag, 'assignedTo.customer.customerId'],
+      ['communications', Communication, 'customerId'],
+      ['flaggedAlerts', FlaggedAlert, 'customerId'],
+      ['slackLogs', SlackLog, 'customerId'],
+      ['menuSelectionRecords', MenuSelectionRecord, 'customerId']
+    ];
+
+    const cascaded = {};
+    const failures = [];
+    for (const [label, Model, field] of cascadeTargets) {
+      try {
+        const result = await Model.updateMany({ [field]: oldCustomerId }, { $set: { [field]: newCustomerId } });
+        cascaded[label] = result.modifiedCount || 0;
+      } catch (cascadeError) {
+        failures.push(label);
+        cascaded[label] = `failed: ${cascadeError.message}`;
+      }
+    }
+
+    res.json({
+      success: true,
+      data: customer,
+      cascaded,
+      // Surfaced so the client can warn the user even though the rename
+      // itself succeeded — a failure here means some historical records
+      // still show the old ID until this endpoint is retried.
+      partialFailure: failures.length > 0 ? failures : undefined
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({ success: false, message: 'That Customer ID is already in use' });
+    }
+    console.error('Error renaming customer ID:', error);
+    res.status(500).json({ success: false, message: 'Error renaming customer ID' });
   }
 });
 

@@ -237,6 +237,7 @@ const AddCustomerModal = ({ onClose, onSubmit, isSubmitting, submitError }) => {
 
 const EditCustomerModal = ({ customer, onClose, onSubmit, isSubmitting, submitError }) => {
   const [form, setForm] = useState({
+    customerId: customer.customerId || '',
     customerName: customer.customerName && customer.customerName !== 'Unknown' ? customer.customerName : '',
     email: customer.email && customer.email !== 'N/A' ? customer.email : '',
     phone: customer.phone && customer.phone !== 'N/A' ? customer.phone : '',
@@ -244,6 +245,7 @@ const EditCustomerModal = ({ customer, onClose, onSubmit, isSubmitting, submitEr
     address: customer.address && customer.address !== 'N/A' ? customer.address : '',
   });
   const set = (field) => (e) => setForm(p => ({ ...p, [field]: e.target.value }));
+  const customerIdChanged = form.customerId.trim() !== customer.customerId;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -255,7 +257,12 @@ const EditCustomerModal = ({ customer, onClose, onSubmit, isSubmitting, submitEr
         <form onSubmit={(e) => { e.preventDefault(); onSubmit(form); }} className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Customer ID</label>
-            <input type="text" value={customer.customerId} disabled className="w-full border border-gray-200 bg-gray-50 text-gray-500 rounded-lg px-3 py-2 text-sm" />
+            <input type="text" required value={form.customerId} onChange={set('customerId')} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            {customerIdChanged && (
+              <p className="text-xs text-amber-600 mt-1">
+                Changing this updates every delivery, bag note, communication and past menu selection on file for this customer — it's safe, but can't be undone with a click.
+              </p>
+            )}
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Customer Name <span className="text-red-500">*</span></label>
@@ -386,6 +393,25 @@ const Customers = () => {
         setEditCustomerError('Customer name is required');
         return;
       }
+      const trimmedCustomerId = formData.customerId.trim();
+      if (!trimmedCustomerId) {
+        setEditCustomerError('Customer ID is required');
+        return;
+      }
+
+      // Rename first, on the OLD customerId — cascades to every other
+      // collection that stores it as a string (see PATCH .../rename-id).
+      // Done before the regular field PATCH below so a rename failure
+      // (e.g. that ID is already taken) stops here instead of silently
+      // saving the other fields under a mismatched ID.
+      let activeCustomerId = selectedCustomer.customerId;
+      if (trimmedCustomerId !== selectedCustomer.customerId) {
+        await api.patch(`/customers/${selectedCustomer.customerId}/rename-id`, {
+          newCustomerId: trimmedCustomerId
+        });
+        activeCustomerId = trimmedCustomerId;
+      }
+
       const nameParts = trimmedName.split(/\s+/);
       const firstName = nameParts[0] || '';
       const lastName = nameParts.slice(1).join(' ') || '';
@@ -398,11 +424,12 @@ const Customers = () => {
         address: formData.address.trim(),
       };
 
-      const { data } = await api.patch(`/customers/${selectedCustomer.customerId}`, payload);
+      const { data } = await api.patch(`/customers/${activeCustomerId}`, payload);
       const saved = data?.data || {};
 
       const merged = {
         ...selectedCustomer,
+        customerId: activeCustomerId,
         customerName: `${saved.firstName || firstName} ${saved.lastName || lastName}`.trim() || 'Unknown',
         email: saved.email || payload.email || 'N/A',
         phone: saved.phone || payload.phone || 'N/A',
@@ -411,8 +438,8 @@ const Customers = () => {
       };
 
       setSelectedCustomer(merged);
-      setCustomers(prev => prev.map(c => c.customerId === merged.customerId ? { ...c, ...merged } : c));
-      setFilteredCustomers(prev => prev.map(c => c.customerId === merged.customerId ? { ...c, ...merged } : c));
+      setCustomers(prev => prev.map(c => c.customerId === selectedCustomer.customerId ? { ...c, ...merged } : c));
+      setFilteredCustomers(prev => prev.map(c => c.customerId === selectedCustomer.customerId ? { ...c, ...merged } : c));
       setShowEditCustomerModal(false);
     } catch (err) {
       setEditCustomerError(err.response?.data?.message || 'Failed to update customer');

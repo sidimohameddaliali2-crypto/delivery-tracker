@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { load } from '@2gis/mapgl';
+import React, { useMemo, useState, useCallback, useEffect, useRef } from 'react';
+import { GoogleMap, OverlayView, useLoadScript } from '@react-google-maps/api';
 import { RefreshCw, Truck, AlertTriangle } from 'lucide-react';
 import api from '../utils/api';
 
@@ -8,36 +8,24 @@ import api from '../utils/api';
 // separate from the driver app's own phone-GPS tracking. Polls every
 // REFRESH_INTERVAL_MS while this page is open, matching Truckoom's own
 // documented ~1-minute request interval for this kind of call.
+//
+// Uses Google Maps JS (owner request, 2026-09-30) rather than the 2GIS
+// MapGL display everywhere else in the app (dispatcher route maps) — that's
+// a deliberate one-page exception, not a project-wide switch; see
+// DriverDeliveryMap.js for the same @react-google-maps/api pattern this
+// reuses (useLoadScript + REACT_APP_GOOGLE_MAPS_API_KEY).
 
-let mapglLoadPromise = null;
-function loadMapglOnce() {
-  if (!mapglLoadPromise) mapglLoadPromise = load();
-  return mapglLoadPromise;
-}
-const API_KEY = process.env.REACT_APP_2GIS_API_KEY || '';
-const DUBAI_CENTER = [55.2708, 25.2048]; // MapGL uses [lng, lat]
-const MAP_ID = 'live-tracking-map-2gis';
+const GOOGLE_MAPS_API_KEY = process.env.REACT_APP_GOOGLE_MAPS_API_KEY || '';
+const DUBAI_CENTER = { lat: 25.2048, lng: 55.2708 };
 const REFRESH_INTERVAL_MS = 60 * 1000;
-
-const safeDestroy = (obj) => { try { obj?.destroy(); } catch (_) { /* already gone */ } };
-function destroyMapSuppressingSdkNoise(map) {
-  if (!map) return;
-  const onRejection = (e) => { if (e.reason === undefined) e.preventDefault(); };
-  window.addEventListener('unhandledrejection', onRejection);
-  setTimeout(() => window.removeEventListener('unhandledrejection', onRejection), 500);
-  safeDestroy(map);
-}
-
-function vehicleMarkerHtml(vehicle, isActive) {
-  const color = vehicle.driver?.colorCode || '#9CA3AF';
-  const label = vehicle.driver ? vehicle.driver.name : `Vehicle ${vehicle.vehicleNo}`;
-  return `
-    <div style="display:flex;flex-direction:column;align-items:center;cursor:pointer;${isActive ? 'z-index:20;' : ''}">
-      <div style="background:${color};border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.4);border-radius:9999px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-size:15px;">🚚</div>
-      <div style="margin-top:2px;background:white;border-radius:6px;padding:1px 6px;font-size:11px;font-weight:600;color:#111827;box-shadow:0 1px 3px rgba(0,0,0,0.3);white-space:nowrap;">${label}</div>
-    </div>
-  `;
-}
+const MAP_CONTAINER_STYLE = { width: '100%', height: '100%' };
+const MAP_OPTIONS = {
+  disableDefaultUI: false,
+  zoomControl: true,
+  mapTypeControl: false,
+  streetViewControl: false,
+  fullscreenControl: true,
+};
 
 function timeAgo(iso) {
   if (!iso) return '';
@@ -47,18 +35,67 @@ function timeAgo(iso) {
   return `${minutes}m ago`;
 }
 
+// Same truck-emoji-plus-name-label look the 2GIS HtmlMarker used, rendered
+// here as a plain OverlayView so it survives the switch pixel-for-pixel.
+function VehicleMarker({ vehicle, isActive, onClick }) {
+  const color = vehicle.driver?.colorCode || '#9CA3AF';
+  const label = vehicle.driver ? vehicle.driver.name : `Vehicle ${vehicle.vehicleNo}`;
+  return (
+    <OverlayView
+      position={{ lat: vehicle.latitude, lng: vehicle.longitude }}
+      mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
+      getPixelPositionOffset={(width, height) => ({ x: -width / 2, y: -height / 2 })}
+    >
+      <div
+        onClick={onClick}
+        style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer', zIndex: isActive ? 20 : 10 }}
+      >
+        <div
+          style={{
+            background: color,
+            border: '2px solid white',
+            boxShadow: '0 1px 4px rgba(0,0,0,0.4)',
+            borderRadius: '9999px',
+            width: 30,
+            height: 30,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: 15,
+          }}
+        >
+          🚚
+        </div>
+        <div
+          style={{
+            marginTop: 2,
+            background: 'white',
+            borderRadius: 6,
+            padding: '1px 6px',
+            fontSize: 11,
+            fontWeight: 600,
+            color: '#111827',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {label}
+        </div>
+      </div>
+    </OverlayView>
+  );
+}
+
 const LiveTracking = () => {
   const [vehicles, setVehicles] = useState([]);
   const [fetchedAt, setFetchedAt] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeVehicleNo, setActiveVehicleNo] = useState(null);
-  const [mapReady, setMapReady] = useState(false);
-  const [mapError, setMapError] = useState('');
 
-  const mapRef = useRef(null);
-  const mapglRef = useRef(null);
-  const markersRef = useRef([]);
+  const mapInstanceRef = useRef(null);
+
+  const { isLoaded, loadError } = useLoadScript({ googleMapsApiKey: GOOGLE_MAPS_API_KEY });
 
   const fetchVehicles = useCallback(async () => {
     try {
@@ -79,67 +116,20 @@ const LiveTracking = () => {
     return () => clearInterval(interval);
   }, [fetchVehicles]);
 
-  // Map setup — once.
-  useEffect(() => {
-    if (!API_KEY) return undefined;
-    let cancelled = false;
-    loadMapglOnce()
-      .then((mapgl) => {
-        if (cancelled) return;
-        if (typeof mapgl.isSupported === 'function' && !mapgl.isSupported()) {
-          setMapError('This browser cannot render the 2GIS map (WebGL is unavailable).');
-          return;
-        }
-        const container = document.getElementById(MAP_ID);
-        if (!container) return;
-        mapglRef.current = mapgl;
-        mapRef.current = new mapgl.Map(container, { center: DUBAI_CENTER, zoom: 11, key: API_KEY });
-        setMapReady(true);
-      })
-      .catch((err) => {
-        mapglLoadPromise = null;
-        if (!cancelled) setMapError(err?.message || 'Failed to load the 2GIS map script.');
-      });
-    return () => {
-      cancelled = true;
-      markersRef.current.forEach(safeDestroy);
-      markersRef.current = [];
-      destroyMapSuppressingSdkNoise(mapRef.current);
-      mapRef.current = null;
-      setMapReady(false);
-    };
-  }, []);
-
   const locatedVehicles = useMemo(
     () => vehicles.filter((v) => Number.isFinite(v.latitude) && Number.isFinite(v.longitude)),
     [vehicles]
   );
 
-  // Markers — redrawn whenever the vehicle list refreshes.
-  useEffect(() => {
-    const map = mapRef.current;
-    const mapgl = mapglRef.current;
-    if (!mapReady || !map || !mapgl) return;
-    markersRef.current.forEach(safeDestroy);
-    markersRef.current = [];
-
-    locatedVehicles.forEach((v) => {
-      const marker = new mapgl.HtmlMarker(map, {
-        coordinates: [v.longitude, v.latitude],
-        html: vehicleMarkerHtml(v, activeVehicleNo === v.vehicleNo),
-        anchor: [15, 15],
-        zIndex: activeVehicleNo === v.vehicleNo ? 20 : 10,
-      });
-      marker.getContent().addEventListener('click', () => setActiveVehicleNo(v.vehicleNo));
-      markersRef.current.push(marker);
-    });
-  }, [mapReady, locatedVehicles, activeVehicleNo]);
+  const handleMapLoad = useCallback((map) => {
+    mapInstanceRef.current = map;
+  }, []);
 
   const panToVehicle = (v) => {
     setActiveVehicleNo(v.vehicleNo);
-    if (mapRef.current && Number.isFinite(v.latitude) && Number.isFinite(v.longitude)) {
-      mapRef.current.setCenter([v.longitude, v.latitude]);
-      mapRef.current.setZoom(14);
+    if (mapInstanceRef.current && Number.isFinite(v.latitude) && Number.isFinite(v.longitude)) {
+      mapInstanceRef.current.panTo({ lat: v.latitude, lng: v.longitude });
+      mapInstanceRef.current.setZoom(14);
     }
   };
 
@@ -215,14 +205,33 @@ const LiveTracking = () => {
 
         {/* Map */}
         <div className="flex-1 relative">
-          {!API_KEY ? (
+          {!GOOGLE_MAPS_API_KEY ? (
             <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-gray-500">
-              Add <span className="font-mono">REACT_APP_2GIS_API_KEY</span> to <span className="font-mono">client/.env</span> to show the map.
+              Add <span className="font-mono">REACT_APP_GOOGLE_MAPS_API_KEY</span> to <span className="font-mono">client/.env</span> to show the map.
             </div>
-          ) : mapError ? (
-            <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-red-600">{mapError}</div>
+          ) : loadError ? (
+            <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-red-600">
+              Failed to load the Google Maps script.
+            </div>
+          ) : !isLoaded ? (
+            <div className="absolute inset-0 flex items-center justify-center text-sm text-gray-400">Loading map…</div>
           ) : (
-            <div id={MAP_ID} className="absolute inset-0" />
+            <GoogleMap
+              mapContainerStyle={MAP_CONTAINER_STYLE}
+              center={DUBAI_CENTER}
+              zoom={11}
+              options={MAP_OPTIONS}
+              onLoad={handleMapLoad}
+            >
+              {locatedVehicles.map((v) => (
+                <VehicleMarker
+                  key={v.vehicleNo}
+                  vehicle={v}
+                  isActive={activeVehicleNo === v.vehicleNo}
+                  onClick={() => setActiveVehicleNo(v.vehicleNo)}
+                />
+              ))}
+            </GoogleMap>
           )}
         </div>
       </div>

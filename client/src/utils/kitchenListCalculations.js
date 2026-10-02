@@ -69,7 +69,20 @@ const getCarbMealWeight = (grams) => {
   return 225;
 };
 
-const normalizeBreakfastName = (value) => normalizeText(String(value || '').replace(/\s+/g, ' ').trim());
+const FIXED_PLAN_MEAL_MACROS = {
+  lean: { C: 35, P: 30, F: 15 },
+  thrive: { C: 65, P: 40, F: 20 },
+  perform: { C: 75, P: 50, F: 33 }
+};
+
+// "Lean Plan 1/2", "Thrive Plan 1/2", "Perform Plan 1/2" → fixed per-meal macros.
+// Anything else (Custom, Matter Core, ...) returns null and is left alone.
+const getFixedPlanMealMacros = (planName) => {
+  const match = normalizeText(planName).match(/^(lean|thrive|perform) plan [12]$/);
+  return match ? { ...FIXED_PLAN_MEAL_MACROS[match[1]] } : null;
+};
+
+const normalizeBreakfastName =(value) => normalizeText(String(value || '').replace(/\s+/g, ' ').trim());
 
 const simplifyBreakfastName = (value) => normalizeText(
   String(value || '')
@@ -309,12 +322,14 @@ const buildDayMealMeta = (dayMeals) => {
   const beefMeals = typed.filter((item) => item.type === 'beef');
   const fishMeals = typed.filter((item) => item.type === 'fish');
   const beefOrFishMeals = typed.filter((item) => item.type === 'beef' || item.type === 'fish');
-  const typedCount = typed.length;
   const hasChicken = chickenMeals.length > 0;
   const hasBeef = beefMeals.length > 0;
   const hasFish = fishMeals.length > 0;
-  const onlyBeefDay = hasBeef && !hasFish && !hasChicken && beefMeals.length === typedCount;
-  const onlyFishDay = hasFish && !hasBeef && !hasChicken && fishMeals.length === typedCount;
+  // Owner (2026-09-28): "only Beef / only Fish" means the day's beef/fish
+  // meals are all one type — chicken meals on the same day don't change that
+  // (a chicken + beef day still uses the only-beef rule for its beef meals).
+  const onlyBeefDay = hasBeef && !hasFish;
+  const onlyFishDay = hasFish && !hasBeef;
   const allBeefOrFishSingleTypeDay = onlyBeefDay || onlyFishDay;
 
   const positionMap = new Map();
@@ -423,7 +438,26 @@ const calculateByProteinRule = ({
   };
 };
 
-export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakfastPreset = {}, snackPreset = {} }) => {
+// A customer who picked the same dish twice is stored as ONE row with
+// quantity: 2. Every calculation below (how many meals the day's macros are
+// split across, per-meal weights, totals) works per row, so that second
+// portion used to vanish. Expand every meal (main, breakfast, snack) into one row per portion —
+// each copy carries quantity: 1 so consumers that multiply by quantity
+// (Kitchen Counting) don't count it twice. Copies keep the original
+// _overrideKey so a protein-type override on the dish applies to both.
+const expandMealQuantities = (meals) => meals.flatMap((meal) => {
+  const type = normalizeText(meal?.mealType);
+  const qty = Math.max(1, Math.floor(Number(meal?.quantity) || 1));
+  if (qty === 1) return [meal];
+  return Array.from({ length: qty }, (_, copy) => ({
+    ...meal,
+    quantity: 1,
+    slotNumber: (Number(meal?.slotNumber) || 0) + copy
+  }));
+});
+
+export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelectedMeals = [], breakfastPreset = {}, snackPreset = {} }) => {
+  const selectedMeals = expandMealQuantities(rawSelectedMeals);
   const snackPresetsByName = snackPreset?.presetsByName || {};
   const customerMacros = customer?.targetMacros
     || customer?.customerMacros
@@ -458,6 +492,14 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
   // Breakfast and snacks are unaffected either way — they're always
   // additive on top of the main meals, for every plan.
   const isMatterCorePlan = normalizeText(customer?.planName) === 'matter core';
+  // Lean/Thrive/Perform plans: every main meal gets the plan's fixed C/P/F
+  // (a preset, like breakfast) instead of the proportional split. Custom and
+  // any other plan are untouched.
+  // Owner (2026-09-29): partner members get the same fixed macros as Lean
+  // Plan 1/2, whatever plan name (if any) their record carries.
+  const fixedPlanMealMacros = customer?.partner
+    ? { ...FIXED_PLAN_MEAL_MACROS.lean }
+    : getFixedPlanMealMacros(customer?.planName);
 
   const sortedDayKeys = Array.from(new Set(selectedMeals.map((m) => getDateKey(m?.date)))).sort();
   const deliveryNumberByDay = new Map(sortedDayKeys.map((key, idx) => [key, idx + 1]));
@@ -532,23 +574,31 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
   // dateKey -> true once escalated to the fixed large-breakfast profile;
   // dateKey -> true if a meal would still exceed the cap even after that
   // (accepted — flagged for kitchen visibility, nothing further attempted).
+  // Sum of every breakfast's macros on one day (each with the 30g protein
+  // floor, same as a single breakfast's own card shows). A customer can pick
+  // two breakfasts, and both must come off the day's budget.
+  const sumDayBreakfastMacros = (dayMeals) => dayMeals
+    .filter((m) => normalizeText(m?.mealType) === 'breakfast')
+    .reduce((acc, m) => {
+      const preset = resolveBreakfastPresetForMeal(m, breakfastPreset);
+      const p = Number(preset.P) || 0;
+      return {
+        C: acc.C + (Number(preset.C) || 0),
+        P: acc.P + (p <= 30 ? 30 : p),
+        F: acc.F + (Number(preset.F) || 0)
+      };
+    }, { C: 0, P: 0, F: 0 });
+
   const dayUsesLargeBreakfast = new Set();
   const dayHasMacroShortfall = new Set();
 
   sortedDayKeys.forEach((dayKey) => {
-    if (isMatterCorePlan) return;
+    if (isMatterCorePlan || fixedPlanMealMacros) return;
     const dayMeals = mealsByDay[dayKey] || [];
     const dayMeta = buildDayMealMeta(dayMeals);
     if (!dayMeta.hasBreakfast || dayMeta.nonBreakfastCount === 0) return;
 
-    const breakfastMeal = dayMeals.find((m) => normalizeText(m?.mealType) === 'breakfast');
-    const defaultPreset = resolveBreakfastPresetForMeal(breakfastMeal, breakfastPreset);
-    const defaultProteinRaw = Number(defaultPreset.P) || 0;
-    const defaultBreakfastMacros = {
-      C: Number(defaultPreset.C) || 0,
-      P: defaultProteinRaw <= 30 ? 30 : defaultProteinRaw,
-      F: Number(defaultPreset.F) || 0
-    };
+    const defaultBreakfastMacros = sumDayBreakfastMacros(dayMeals);
 
     const largeBreakfastMacros = scaleToLargeBreakfast(defaultBreakfastMacros);
 
@@ -698,31 +748,51 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
       };
     }
 
+    if (fixedPlanMealMacros) {
+      const fixedProteinWeight = getProteinMealWeight(fixedPlanMealMacros.P);
+      const fixedCarbWeight = getCarbMealWeight(fixedPlanMealMacros.C);
+      const fixedVegWeight = 80;
+      return {
+        ...meal,
+        category: 'meal',
+        macros: {
+          ...fixedPlanMealMacros,
+          calories: calculateCalories(fixedPlanMealMacros)
+        },
+        weight: fixedProteinWeight + fixedCarbWeight + fixedVegWeight,
+        proteinWeight: fixedProteinWeight,
+        carbWeight: fixedCarbWeight,
+        vegWeight: fixedVegWeight,
+        position: index + 1,
+        flags: {
+          isChicken: type === 'chicken',
+          isBeef: type === 'beef',
+          isFish: type === 'fish',
+          manualProteinType: normalizeText(meal.manualProteinType || '') || null,
+          fixedPlanMacros: true
+        }
+      };
+    }
+
     const deliveryNumber = deliveryNumberByDay.get(dayKey) || 1;
     const macroAdjustment = getMacroAdjustment(deliveryNumber);
     const dayAutoLargeBreakfast = dayUsesLargeBreakfast.has(dayKey);
 
-    const dayBreakfastMeal = dayMeals.find((m) => normalizeText(m?.mealType) === 'breakfast') || null;
-    const dayBreakfastPreset = dayBreakfastMeal
-      ? resolveBreakfastPresetForMeal(dayBreakfastMeal, breakfastPreset)
-      : defaultBreakfast;
-    const dayBreakfastProteinRaw = Number(dayBreakfastPreset.P) || 0;
-    const dayBreakfastProtein = dayBreakfastProteinRaw <= 30 ? 30 : dayBreakfastProteinRaw;
-    const dayLargeBreakfastMacros = dayAutoLargeBreakfast
-      ? scaleToLargeBreakfast({ C: Number(dayBreakfastPreset.C) || 0, P: dayBreakfastProtein, F: Number(dayBreakfastPreset.F) || 0 })
-      : null;
+    // Every breakfast that day comes off the budget (a customer can pick two),
+    // not just the first. A day auto-escalated to large scales them all by 1.5x.
+    const dayBreakfastTotals = sumDayBreakfastMacros(dayMeals);
+    const dayBreakfastDeduction = dayAutoLargeBreakfast
+      ? scaleToLargeBreakfast(dayBreakfastTotals)
+      : dayBreakfastTotals;
 
-    // Apply breakfast deductions only when breakfast exists on this specific
-    // day. A day auto-escalated to the large breakfast profile scales that
-    // SAME assigned item's own macros by 1.5x (never a fixed value).
     const breakfastCarbsForDefault = dayMeta.hasBreakfast
-      ? (dayAutoLargeBreakfast ? dayLargeBreakfastMacros.C : (Number(dayBreakfastPreset.C) || 0))
+      ? dayBreakfastDeduction.C
       : 0;
     const breakfastProteinForDefault = dayMeta.hasBreakfast
-      ? (dayAutoLargeBreakfast ? dayLargeBreakfastMacros.P : dayBreakfastProtein)
+      ? dayBreakfastDeduction.P
       : 0;
     const breakfastFatsForDefault = dayMeta.hasBreakfast
-      ? (dayAutoLargeBreakfast ? dayLargeBreakfastMacros.F : (Number(dayBreakfastPreset.F) || 0))
+      ? dayBreakfastDeduction.F
       : 0;
 
     // Snack macros reduce the day's remaining budget for every plan except
@@ -823,6 +893,11 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals = [], breakf
     macros: normalizedMacros,
     snacksPerDay: customer?.snacksPerDay ?? null,
     planName: customer?.planName ?? null,
+    // The plan's per-day entitlement (from the Matter subscription, falling
+    // back to the internal Customer profile) — shown on the kitchen paper,
+    // independent of what the customer actually picked for any one date.
+    mealsPerDay: customer?.mealsPerDay ?? customer?.mealPerDay ?? null,
+    breakfastIncluded: customer?.breakfastIncluded ?? customer?.breakfastInclude ?? null,
     // Set when this customer is a B2B Partner's member ordering through Menu
     // Selection (Partner.menuSelectionEnabled) — the kitchen paper groups
     // these under a "Partners" section instead of by delivery emirate/window.

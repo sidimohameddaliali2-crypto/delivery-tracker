@@ -1326,11 +1326,12 @@ const MenuManagement = () => {
 
     if (dateList.length === 0) {
       const rows = [
-        ['NAME', 'CUS ID', 'STATUS'],
+        ['NAME', 'CUS ID', 'STATUS', 'AUTO-ASSIGNED'],
         ...menuSelections.map((customer) => [
           `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Unnamed Customer',
           customer.customerId || '',
-          'No meal selection'
+          'No meal selection',
+          ''
         ])
       ];
       const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -1404,7 +1405,7 @@ const MenuManagement = () => {
       const uniqueMeals = Array.from(uniqueMealsSet).sort();
 
       // Add status column to show skipped days/no selection
-      const headerRow = ['NAME', 'CUS ID', 'STATUS', ...uniqueMeals];
+      const headerRow = ['NAME', 'CUS ID', 'STATUS', 'AUTO-ASSIGNED', ...uniqueMeals];
 
       // Create data rows - one row per customer
       // Also track which cells need yellow highlighting (exclusion conflicts)
@@ -1422,10 +1423,19 @@ const MenuManagement = () => {
         // A day the customer explicitly skipped takes precedence over the
         // generic "No meal selection" — and carries the Matter pause result.
         const skipStatus = formatSkipStatus(getSkipForDate(customer, dateKey));
+        const autoAssignedCount = customer.meals.filter((m) => m.isAutoAssigned).length;
+        const autoAssignedLabel = !hasMealsForDay
+          ? ''
+          : autoAssignedCount === customer.meals.length
+            ? 'Auto-Assigned'
+            : autoAssignedCount > 0
+              ? 'Partially Auto-Assigned'
+              : '';
         const row = [
           customer.name,
           customer.id,
-          skipStatus || (hasMealsForDay ? '' : dayClosed ? 'Closed Day' : 'No meal selection')
+          skipStatus || (hasMealsForDay ? '' : dayClosed ? 'Closed Day' : 'No meal selection'),
+          autoAssignedLabel
         ];
 
         // For each unique meal, include quantity if selected multiple times
@@ -1454,8 +1464,8 @@ const MenuManagement = () => {
             // Flag for yellow highlight: meal name contains one of the customer's exclusions
             const hasConflict = mealsWithName.some((m) => m.conflict);
             if (hasConflict) {
-              // rowIdx + 1 because row 0 is the header; mealIdx + 3 for NAME/CUS ID/STATUS cols
-              conflictCells.push({ r: rowIdx + 1, c: mealIdx + 3 });
+              // rowIdx + 1 because row 0 is the header; mealIdx + 4 for NAME/CUS ID/STATUS/AUTO-ASSIGNED cols
+              conflictCells.push({ r: rowIdx + 1, c: mealIdx + 4 });
             }
           } else {
             row.push('');
@@ -2389,18 +2399,35 @@ const MenuManagement = () => {
                                     {`${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Unnamed Customer'}
                                   </div>
                                   <div className="text-sm text-matter-neutral-700">{customer.email || 'No email'}</div>
+                                  {customer.customerId && (
+                                    <div className="text-xs text-matter-neutral-500">ID: {customer.customerId}</div>
+                                  )}
                                 </div>
                               </div>
                               <div className="flex items-center gap-2">
+                                {(() => {
+                                  const meals = customer.selectedMeals || [];
+                                  const autoCount = meals.filter((m) => m.isAutoAssigned).length;
+                                  if (autoCount === 0) return null;
+                                  const label = autoCount === meals.length ? 'Auto-Assigned' : 'Partially Auto-Assigned';
+                                  return (
+                                    <span
+                                      title="Some or all of this customer's meals were filled in by kitchen auto-assign, not chosen by them"
+                                      className="flex-shrink-0 rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-amber-700"
+                                    >
+                                      {label}
+                                    </span>
+                                  );
+                                })()}
                                 <div className="bg-matter-accent-200 text-matter-navy px-3 py-1.5 rounded-lg text-sm font-semibold">
                                   {(() => {
                                     // Calculate total meals accounting for quantity
-                                    const total = (customer.selectedMeals || []).reduce((sum, meal) => 
+                                    const total = (customer.selectedMeals || []).reduce((sum, meal) =>
                                       sum + (meal.quantity || 1), 0
                                     );
                                     return total;
                                   })()} meal{(() => {
-                                    const total = (customer.selectedMeals || []).reduce((sum, meal) => 
+                                    const total = (customer.selectedMeals || []).reduce((sum, meal) =>
                                       sum + (meal.quantity || 1), 0
                                     );
                                     return total === 1 ? '' : 's';
@@ -2617,8 +2644,22 @@ const MenuManagement = () => {
                       })()}
                     </div>
                     <div>
-                      <h2 className="text-2xl font-bold mb-1">
+                      <h2 className="text-2xl font-bold mb-1 flex items-center gap-2 flex-wrap">
                         {`${selectedCustomerDetail.firstName || ''} ${selectedCustomerDetail.lastName || ''}`.trim() || 'Unnamed Customer'}
+                        {(() => {
+                          const meals = selectedCustomerDetail.selectedMeals || [];
+                          const autoCount = meals.filter((m) => m.isAutoAssigned).length;
+                          if (autoCount === 0) return null;
+                          const label = autoCount === meals.length ? 'Auto-Assigned' : 'Partially Auto-Assigned';
+                          return (
+                            <span
+                              title="Some or all of this customer's meals were filled in by kitchen auto-assign, not chosen by them"
+                              className="flex-shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-amber-700"
+                            >
+                              {label}
+                            </span>
+                          );
+                        })()}
                       </h2>
                       <p className="text-white/70">{selectedCustomerDetail.email || 'No email'}</p>
                       {selectedCustomerDetail.customerId && (

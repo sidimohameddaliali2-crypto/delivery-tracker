@@ -117,7 +117,12 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     remark: {
       type: String,
       default: ''
-    }
+    },
+    // Set by auto-assign only when EVERY dish that day hit the customer's
+    // exclusions and it had to give one anyway (a slot is never left empty) —
+    // the exclusions this dish clashes with. Shown as "Needs attention" on the
+    // Kitchen List and kitchen paper so it's swapped before it goes out.
+    exclusionConflict: [String]
   }],
 
   // Kitchen-only notes for this customer on a specific delivery day (e.g.

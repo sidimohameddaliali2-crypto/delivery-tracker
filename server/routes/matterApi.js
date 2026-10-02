@@ -1,6 +1,8 @@
 import express from 'express';
 import { protect } from '../middleware/auth.js';
 import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
+import { detectAreaFromAddress } from '../config/areas.js';
+import { getNutritionForLinkedSubscription } from '../services/matterNutritionLookup.js';
 
 const router = express.Router();
 
@@ -39,11 +41,12 @@ router.get('/subscriptions/nutrition-by-email', protect, async (req, res) => {
 // Customer Management's "Internal Customer Match" panel).
 router.get('/subscriptions/nutrition-by-subscription-id', protect, async (req, res) => {
   try {
-    const { subscriptionId } = req.query;
+    const { subscriptionId, email } = req.query;
     if (!subscriptionId) {
       return res.status(400).json({ success: false, message: 'subscriptionId is required' });
     }
-    const data = await matterApiService.getSubscriptionNutritionBySubscriptionId(subscriptionId);
+    // Falls back to `email` (and relinks) when the linked id no longer exists.
+    const data = await getNutritionForLinkedSubscription(subscriptionId, email);
     res.json({ success: true, data });
   } catch (error) {
     const status = error?.response?.status || 500;
@@ -65,7 +68,13 @@ router.get('/subscriptions/delivery-on-date', protect, async (req, res) => {
     if (dateTo && dateTo < date) {
       return res.status(400).json({ success: false, message: 'dateTo must be on or after date' });
     }
-    const data = await matterApiService.findSubscriptionsWithDeliveryInRange(date, dateTo || date);
+    const rows = await matterApiService.findSubscriptionsWithDeliveryInRange(date, dateTo || date);
+    // Zone isn't a Matter field — derive it the same way the Matter delivery
+    // import does (saved address's own area, else detect from the address text).
+    const data = rows.map((s) => ({
+      ...s,
+      zone: s.address_detail?.area || detectAreaFromAddress(s.address || '') || ''
+    }));
     res.json({ success: true, data });
   } catch (error) {
     const status = error?.response?.status || 500;

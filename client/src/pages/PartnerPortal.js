@@ -107,8 +107,9 @@ const PartnerPortal = () => {
   const now = useMemo(() => new Date(), []);
   const [calY, setCalY] = useState(now.getFullYear());
   const [calM, setCalM] = useState(now.getMonth());
-  const [sel, setSel] = useState(firstOrderableISO());
-  const [cart, setCart] = useState({}); // { [menuItemId]: qty }
+  const [selMode, setSelMode] = useState('single'); // 'single' | 'multi'
+  const [selectedDates, setSelectedDates] = useState(() => new Set([firstOrderableISO()]));
+  const [cart, setCart] = useState({}); // { [menuItemId]: qty } — same cart applied to every selected day
   const [sheet, setSheet] = useState(null); // null | 'checkout'  (mobile only)
   const [placing, setPlacing] = useState(false);
   const [orderErr, setOrderErr] = useState('');
@@ -184,8 +185,15 @@ const PartnerPortal = () => {
     }
   }, []);
 
+  // Sorted list of every day currently selected on the calendar (single mode
+  // always holds exactly one), and the earliest of them — the "anchor" day
+  // whose menu/availability is shown and used to build the one shared cart
+  // that gets placed on every selected day.
+  const sortedSelected = useMemo(() => Array.from(selectedDates).sort(), [selectedDates]);
+  const anchorDate = sortedSelected[0] || firstOrderableISO();
+
   useEffect(() => { loadOrders(); }, [loadOrders]);
-  useEffect(() => { if (tab === 'order') loadMenu(sel); }, [tab, sel, loadMenu]);
+  useEffect(() => { if (tab === 'order') loadMenu(anchorDate); }, [tab, anchorDate, loadMenu]);
   useEffect(() => { if (tab === 'profile' && !reports) loadReports(); }, [tab, reports, loadReports]);
   useEffect(() => { if (tab === 'members') loadMembers(); }, [tab, loadMembers]);
 
@@ -225,12 +233,26 @@ const PartnerPortal = () => {
     [orders, todayISO]
   );
   const orderList = ordersView === 'up' ? upcoming : past;
-  const existingCount = ordersByDate[sel]?.length || 0;
+  const existingDays = useMemo(() => sortedSelected.filter((d) => ordersByDate[d]?.length), [sortedSelected, ordersByDate]);
   const monthLabel = new Date(calY, calM, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
   // ── actions ───────────────────────────────────────────────────────────────
   const prevMonth = () => (calM === 0 ? (setCalY(calY - 1), setCalM(11)) : setCalM(calM - 1));
   const nextMonth = () => (calM === 11 ? (setCalY(calY + 1), setCalM(0)) : setCalM(calM + 1));
+  const setDayMode = (mode) => {
+    setSelMode(mode);
+    if (mode === 'single') setSelectedDates((prev) => new Set([Array.from(prev).sort()[0] || firstOrderableISO()]));
+  };
+  const toggleDay = (iso) => {
+    setOrderErr('');
+    if (selMode === 'single') { setSelectedDates(new Set([iso])); return; }
+    setSelectedDates((prev) => {
+      const next = new Set(prev);
+      if (next.has(iso)) { if (next.size > 1) next.delete(iso); } // keep at least one day selected
+      else next.add(iso);
+      return next;
+    });
+  };
   const inc = (id) => { setOrderErr(''); setCart((c) => ({ ...c, [id]: (c[id] || 0) + 1 })); };
   const dec = (id) =>
     setCart((c) => {
@@ -256,30 +278,46 @@ const PartnerPortal = () => {
     }
     setPlacing(true);
     setOrderErr('');
-    try {
-      const lines = menu.filter((m) => cart[m._id]).map((m) => ({ menuItemId: m._id, quantity: cart[m._id] }));
-      const r = await partnerApi.post('/partner/orders', {
-        deliveryDate: sel,
-        lines,
-        notes: '',
-        deliveryTime: DELIVERY_WINDOW,
-      });
+    const lines = menu.filter((m) => cart[m._id]).map((m) => ({ menuItemId: m._id, quantity: cart[m._id] }));
+    const results = [];
+    for (const date of sortedSelected) {
       try {
-        await partnerApi.post(`/partner/orders/${r.data.data._id}/submit`);
+        const r = await partnerApi.post('/partner/orders', {
+          deliveryDate: date,
+          lines,
+          notes: '',
+          deliveryTime: DELIVERY_WINDOW,
+        });
+        try {
+          await partnerApi.post(`/partner/orders/${r.data.data._id}/submit`);
+        } catch (e) {
+          const msg = e.response?.data?.message || '';
+          if (!/already submitted/i.test(msg)) throw e;
+        }
+        results.push({ date, ok: true });
       } catch (e) {
-        const m = e.response?.data?.message || '';
-        if (!/already submitted/i.test(m)) throw e;
+        results.push({ date, ok: false, message: e.response?.data?.message || 'Failed' });
       }
-      const total = subtotal;
-      setDone({ id: `PO-${String(r.data.data._id).slice(-4).toUpperCase()}`, date: fmtDay(sel), win: DELIVERY_WINDOW, total });
+    }
+    setPlacing(false);
+
+    const okResults = results.filter((r) => r.ok);
+    const failResults = results.filter((r) => !r.ok);
+    if (okResults.length > 0) {
+      setDone({
+        count: okResults.length,
+        days: okResults.map((r) => fmtDay(r.date)),
+        win: DELIVERY_WINDOW,
+        perDay: subtotal,
+        total: subtotal * okResults.length,
+        failed: failResults.map((r) => `${fmtDay(r.date)}: ${r.message}`),
+      });
       setCart({});
       setSheet(null);
       loadOrders();
       setReports(null);
-    } catch (e) {
-      setOrderErr(e.response?.data?.message || 'Could not place the order. Try again.');
-    } finally {
-      setPlacing(false);
+    } else {
+      setOrderErr(failResults.map((r) => `${fmtDay(r.date)}: ${r.message}`).join(' · ') || 'Could not place the order. Try again.');
     }
   };
 
@@ -294,6 +332,21 @@ const PartnerPortal = () => {
   const card = 'bg-[#051747] border border-[#12275e] rounded-[20px]';
 
   // ── render helpers (plain functions) ──────────────────────────────────────
+  const renderDayModeSwitch = () => (
+    <div className="flex gap-1 bg-[#0a1230] border-[1.5px] border-[#12275e] rounded-full p-1 mb-3">
+      {[['single', 'Single day'], ['multi', 'Multiple days']].map(([v, label]) => {
+        const on = selMode === v;
+        return (
+          <button key={v} onClick={() => setDayMode(v)}
+            className="flex-1 py-2 rounded-full text-[12px] font-bold transition-colors"
+            style={{ background: on ? '#bcf679' : 'transparent', color: on ? '#051747' : '#a8ccf5' }}>
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   const renderCalendar = ({ cellH = 46, radius = 14 }) => (
     <>
       <div className="flex items-center gap-2">
@@ -311,11 +364,11 @@ const PartnerPortal = () => {
           if (!d) return <div key={i} style={{ height: cellH }} />;
           const iso = toISO(d);
           const disabled = iso < minISO;
-          const isSel = iso === sel;
+          const isSel = selectedDates.has(iso);
           const isToday = iso === todayISO;
           const has = !!ordersByDate[iso];
           return (
-            <button key={i} disabled={disabled} onClick={() => { setSel(iso); setOrderErr(''); }}
+            <button key={i} disabled={disabled} onClick={() => toggleDay(iso)}
               className="relative border-[1.5px] font-bold transition-colors disabled:cursor-default"
               style={{
                 height: cellH,
@@ -340,7 +393,12 @@ const PartnerPortal = () => {
     <div className={`flex flex-col gap-2.5 rounded-[16px] px-3.5 py-3 ${dark ? 'bg-[#0a1230] border-[1.5px] border-[#12275e]' : card}`}>
       <div>
         <div className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5]">Deliver on</div>
-        <div className="text-sm font-bold mt-0.5">{fmtDay(sel)}</div>
+        <div className="text-sm font-bold mt-0.5">
+          {sortedSelected.length <= 1 ? fmtDay(anchorDate) : `${sortedSelected.length} days selected`}
+        </div>
+        {sortedSelected.length > 1 && (
+          <div className="text-[10.5px] text-[#a8ccf5] mt-1 leading-snug">{sortedSelected.map(fmtDay).join(' · ')}</div>
+        )}
       </div>
       <div className={`flex items-center gap-1.5 rounded-full px-3 py-2 border-[1.5px] border-[#12275e] ${dark ? 'bg-[#051747]' : 'bg-[#0a1230]'}`}>
         <span className="text-[11px] text-[#a8ccf5] font-bold">Window</span>
@@ -350,11 +408,13 @@ const PartnerPortal = () => {
   );
 
   const renderExistingBanner = () =>
-    existingCount > 0 ? (
+    existingDays.length > 0 ? (
       <div className="mt-2.5 flex items-start gap-2.5 rounded-[14px] px-3 py-2.5 text-[11.5px] leading-snug"
         style={{ background: 'rgba(188,246,121,.1)', border: '1.5px solid #bcf679' }}>
         <span className="w-[7px] h-[7px] rounded-full bg-[#bcf679] flex-none mt-1" />
-        You already have {existingCount} order{existingCount > 1 ? 's' : ''} on this day — new items merge into it.
+        {existingDays.length === 1
+          ? <>You already have {ordersByDate[existingDays[0]].length} order{ordersByDate[existingDays[0]].length > 1 ? 's' : ''} on {fmtDay(existingDays[0])} — new items merge into it.</>
+          : <>You already have orders on {existingDays.length} of your {sortedSelected.length} selected days ({existingDays.map(fmtDay).join(', ')}) — new items merge into them.</>}
       </div>
     ) : null;
 
@@ -390,7 +450,7 @@ const PartnerPortal = () => {
   const renderMenuGrid = (cols) => {
     if (menuLoading) return <div className="flex justify-center py-16"><Loader2 className="w-7 h-7 animate-spin text-[#bcf679]" /></div>;
     if (menu.length === 0)
-      return <div className={`${card} px-4 py-10 text-center text-[13px] text-[#a8ccf5]`}>No menu items available for {fmtDay(sel)}.</div>;
+      return <div className={`${card} px-4 py-10 text-center text-[13px] text-[#a8ccf5]`}>No menu items available for {fmtDay(anchorDate)}.</div>;
     return <div className={`grid ${cols} gap-3`}>{menu.map(renderMenuCard)}</div>;
   };
 
@@ -450,9 +510,13 @@ const PartnerPortal = () => {
   const renderProfileContent = (perfCols) => (
     <>
       <div className="flex items-center gap-3.5">
-        <div className="w-[60px] h-[60px] rounded-full bg-[#12275e] text-[#bcf679] flex items-center justify-center flex-none text-[22px]" style={AB}>
-          {initials(partner?.businessName)}
-        </div>
+        {partner?.profilePicture
+          ? <img src={partner.profilePicture} alt="" className="w-[60px] h-[60px] rounded-full object-cover flex-none" />
+          : (
+            <div className="w-[60px] h-[60px] rounded-full bg-[#12275e] text-[#bcf679] flex items-center justify-center flex-none text-[22px]" style={AB}>
+              {initials(partner?.businessName)}
+            </div>
+          )}
         <div className="min-w-0">
           <div className="text-[18px]" style={AB}>{partner?.businessName || 'Partner'}</div>
           {partner?.address && <div className="text-[12.5px] text-[#a8ccf5] mt-0.5">{partner.address}</div>}
@@ -626,11 +690,14 @@ const PartnerPortal = () => {
       </div>
 
       <div className="mt-4 flex flex-col gap-1.5 text-[13px]">
-        <div className="flex justify-between text-[#a8ccf5]"><span>Subtotal</span><span>AED {fmtAED(subtotal)}</span></div>
+        <div className="flex justify-between text-[#a8ccf5]"><span>{sortedSelected.length > 1 ? 'Per day' : 'Subtotal'}</span><span>AED {fmtAED(subtotal)}</span></div>
+        {sortedSelected.length > 1 && (
+          <div className="flex justify-between text-[#a8ccf5]"><span>Days</span><span>× {sortedSelected.length}</span></div>
+        )}
         <div className="flex justify-between text-[#a8ccf5]"><span>Delivery</span><span className="text-[#bcf679] font-bold">Free · partner</span></div>
         <div className="flex justify-between items-baseline mt-1.5 pt-2.5 border-t border-[#12275e]">
           <span className="font-bold text-[15px]">Total</span>
-          <span className="text-[23px]" style={AB}>AED {fmtAED(subtotal)}</span>
+          <span className="text-[23px]" style={AB}>AED {fmtAED(subtotal * sortedSelected.length)}</span>
         </div>
       </div>
 
@@ -639,7 +706,9 @@ const PartnerPortal = () => {
       <button onClick={placeOrder} disabled={placing}
         className="w-full mt-4 bg-[#bcf679] text-[#051747] rounded-full py-4 text-[15px] font-bold hover:opacity-90 transition-opacity disabled:opacity-60 flex items-center justify-center gap-2">
         {placing && <Loader2 className="w-4 h-4 animate-spin" />}
-        {placing ? 'Placing…' : `Place order · AED ${fmtAED(subtotal)}`}
+        {placing
+          ? 'Placing…'
+          : `Place ${sortedSelected.length > 1 ? `${sortedSelected.length} orders` : 'order'} · AED ${fmtAED(subtotal * sortedSelected.length)}`}
       </button>
     </>
   );
@@ -655,10 +724,14 @@ const PartnerPortal = () => {
               <path d="M5 12.5l4.5 4.5L19 7" />
             </svg>
           </motion.div>
-          <div className="text-[28px] mt-5" style={AB}>Order placed</div>
+          <div className="text-[28px] mt-5" style={AB}>{done.count > 1 ? `${done.count} orders placed` : 'Order placed'}</div>
           <div className="text-[14.5px] text-[#a8ccf5] mt-2 leading-relaxed">
-            {done.id} · {done.date}<br />{done.win} · AED {fmtAED(done.total)}
+            {done.days.join(', ')}<br />
+            {done.win} · {done.count > 1 ? `AED ${fmtAED(done.perDay)}/day · AED ${fmtAED(done.total)} total` : `AED ${fmtAED(done.total)}`}
           </div>
+          {done.failed?.length > 0 && (
+            <div className="mt-3 text-[12px] text-[#ff8a66] leading-relaxed">Couldn’t place for: {done.failed.join(' · ')}</div>
+          )}
           <div className="flex gap-2.5 mt-8 w-full max-w-[360px]">
             <button onClick={() => { setDone(null); setTab('orders'); setOrdersView('up'); }}
               className="flex-1 border-[1.5px] border-[#12275e] text-[#ede5de] rounded-full py-3.5 text-sm font-bold hover:border-[#bcf679] transition-colors">
@@ -681,11 +754,10 @@ const PartnerPortal = () => {
         {/* sidebar */}
         <aside className="flex-none w-[236px] bg-[#051747] border-r border-[#12275e] flex flex-col px-4 py-[22px]">
           <div className="flex items-center gap-2.5 px-1.5">
-            <div className="w-9 h-9 rounded-[11px] bg-[#bcf679] text-[#051747] flex items-center justify-center flex-none text-[18px]" style={AB}>M</div>
-            <div className="min-w-0 flex-1">
-              <div className="text-[13.5px] truncate" style={AB}>MATTER Partner</div>
-              <div className="text-[11px] text-[#a8ccf5] mt-px truncate">{partner?.businessName || 'Partner'}</div>
-            </div>
+            {partner?.profilePicture
+              ? <img src={partner.profilePicture} alt="" className="w-9 h-9 rounded-[11px] object-cover flex-none" />
+              : <div className="w-9 h-9 rounded-[11px] bg-[#bcf679] text-[#051747] flex items-center justify-center flex-none text-[18px]" style={AB}>{initials(partner?.businessName)}</div>}
+            <div className="min-w-0 flex-1 truncate" style={AB}>{partner?.businessName || 'Partner'}</div>
           </div>
 
           <nav className="flex flex-col gap-[3px] mt-[30px]">
@@ -703,17 +775,6 @@ const PartnerPortal = () => {
               );
             })}
           </nav>
-
-          <button onClick={() => setTab('profile')}
-            className="mt-auto flex items-center gap-2.5 bg-[#0a1230] border-[1.5px] border-[#12275e] rounded-[16px] px-3 py-[11px] text-left hover:border-[#bcf679] transition-colors">
-            <div className="w-8 h-8 rounded-full bg-[#12275e] text-[#bcf679] flex items-center justify-center flex-none text-[12.5px]" style={AB}>
-              {initials(partner?.businessName)}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-[12.5px] font-bold text-[#ede5de] truncate">{partner?.contactName || partner?.businessName}</div>
-              <div className="text-[10.5px] text-[#a8ccf5]">Min order · AED {fmtAED(minOrder)}</div>
-            </div>
-          </button>
         </aside>
 
         {/* content-wrap */}
@@ -730,6 +791,7 @@ const PartnerPortal = () => {
                 </div>
                 <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-[22px] mt-[22px] items-start">
                   <div className="bg-[#051747] border-[1.5px] border-[#12275e] rounded-[22px] p-[18px]">
+                    {renderDayModeSwitch()}
                     {renderCalendar({ cellH: 36, radius: 11 })}
                     <div className="mt-4">{renderDeliverOn({ dark: true })}</div>
                     {renderExistingBanner()}
@@ -774,7 +836,9 @@ const PartnerPortal = () => {
               count > 0 ? (
                 <>
                   <div className="text-[19px]" style={AB}>Checkout</div>
-                  <div className="text-[12px] text-[#a8ccf5] mt-1">{fmtDay(sel)} · {DELIVERY_WINDOW}</div>
+                  <div className="text-[12px] text-[#a8ccf5] mt-1">
+                    {sortedSelected.length > 1 ? `${sortedSelected.length} days` : fmtDay(anchorDate)} · {DELIVERY_WINDOW}
+                  </div>
                   <div className="mt-4">{renderCheckoutBody()}</div>
                 </>
               ) : (
@@ -827,7 +891,9 @@ const PartnerPortal = () => {
 
         {/* header */}
         <header className="flex-none bg-[#051747] px-[18px] pt-3 pb-3.5 border-b border-[#12275e] flex items-center gap-3">
-          <div className="w-[34px] h-[34px] rounded-[11px] bg-[#bcf679] text-[#051747] flex items-center justify-center flex-none text-[17px]" style={AB}>M</div>
+          {partner?.profilePicture
+            ? <img src={partner.profilePicture} alt="" className="w-[34px] h-[34px] rounded-[11px] object-cover flex-none" />
+            : <div className="w-[34px] h-[34px] rounded-[11px] bg-[#bcf679] text-[#051747] flex items-center justify-center flex-none text-[17px]" style={AB}>{initials(partner?.businessName)}</div>}
           <div className="min-w-0">
             <div className="text-[15.5px] leading-tight truncate" style={AB}>{TITLE[tab]}</div>
             <div className="text-[11.5px] text-[#a8ccf5] mt-0.5 truncate">{partner?.businessName || 'Partner'} · Partner</div>
@@ -843,6 +909,7 @@ const PartnerPortal = () => {
         {/* ORDER */}
         {tab === 'order' && (
           <div className="flex-1 min-h-0 overflow-y-auto px-[18px] pt-4 pb-[210px]">
+            {renderDayModeSwitch()}
             {renderCalendar({ cellH: 46, radius: 14 })}
             <div className="mt-3.5">{renderDeliverOn()}</div>
             {renderExistingBanner()}
@@ -863,9 +930,9 @@ const PartnerPortal = () => {
             <div className="bg-[#bcf679] text-[#051747] rounded-[24px] pl-[18px] pr-3 py-3 flex items-center gap-3 shadow-[0_18px_40px_rgba(0,0,0,.5)]">
               <div className="min-w-0 flex-1">
                 <div className="text-[11px] font-bold tracking-[0.1em] uppercase opacity-75">
-                  {count} item{count > 1 ? 's' : ''} · {fmtDay(sel)}
+                  {count} item{count > 1 ? 's' : ''} · {sortedSelected.length > 1 ? `${sortedSelected.length} days` : fmtDay(anchorDate)}
                 </div>
-                <div className="text-[19px] mt-px" style={AB}>AED {fmtAED(subtotal)}</div>
+                <div className="text-[19px] mt-px" style={AB}>AED {fmtAED(subtotal * sortedSelected.length)}</div>
               </div>
               <button onClick={openCheckout}
                 className="flex-none bg-[#051747] text-[#ede5de] rounded-full px-5 py-3.5 text-sm font-bold hover:opacity-90 transition-opacity">
@@ -937,7 +1004,9 @@ const PartnerPortal = () => {
                   <button onClick={() => setSheet(null)} aria-label="Close"
                     className="ml-auto w-9 h-9 rounded-full bg-[#0a1230] text-[#a8ccf5] hover:text-[#ff3b00] transition-colors">✕</button>
                 </div>
-                <div className="text-[12.5px] text-[#a8ccf5] mt-1">{fmtDay(sel)} · {DELIVERY_WINDOW}</div>
+                <div className="text-[12.5px] text-[#a8ccf5] mt-1">
+                  {sortedSelected.length > 1 ? `${sortedSelected.length} days` : fmtDay(anchorDate)} · {DELIVERY_WINDOW}
+                </div>
                 <div className="mt-3.5">{renderCheckoutBody()}</div>
               </div>
             </motion.div>

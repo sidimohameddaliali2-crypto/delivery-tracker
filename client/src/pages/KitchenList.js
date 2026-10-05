@@ -196,6 +196,15 @@ const getAttentionReasons = (meal) => {
   return reasons;
 };
 
+// true/false = Matter does / doesn't show a delivery for this customer on
+// the checked date. Matched by linked subscription id first, then email.
+const hasDeliveryOnCheckedDate = (entry, deliveryCheck) => {
+  const subId = String(entry?.matterSubscriptionId || '').trim();
+  if (subId && deliveryCheck.subscriptionIds.has(subId)) return true;
+  const email = String(entry?.email || '').trim().toLowerCase();
+  return !!email && deliveryCheck.emails.has(email);
+};
+
 // Remark column text for the kitchen paper PDF/Excel.
 const mealRemarkText = (meal) => [
   meal?.remark ? `Change ${meal.remark}` : '',
@@ -252,6 +261,9 @@ const KitchenList = () => {
   const [breakfastPreset, setBreakfastPreset] = useState(emptyBreakfast);
   const [snackPreset, setSnackPreset] = useState({ presetsByName: {} });
   const [snackPresetForm, setSnackPresetForm] = useState({ name: '', C: '', P: '', F: '' });
+  // The global snack macro table is ~80 rows long, so it lives in a dropdown
+  // that starts closed instead of pushing the rest of the panel down.
+  const [snackMacrosOpen, setSnackMacrosOpen] = useState(false);
   const [savingSnackPreset, setSavingSnackPreset] = useState(false);
   const [importName, setImportName] = useState('');
   const [mealTypeOverrides, setMealTypeOverrides] = useState({});
@@ -269,6 +281,9 @@ const KitchenList = () => {
   const [missingSelectionEntries, setMissingSelectionEntries] = useState([]);
   const [showOnlyMissing, setShowOnlyMissing] = useState(false);
   const [planFilter, setPlanFilter] = useState('');
+  // Who Matter says has a delivery on the last-checked date (filled by
+  // "Check Missing Selections"): { dateKey, emails: Set, subscriptionIds: Set }.
+  const [deliveryCheck, setDeliveryCheck] = useState(null);
   const [showOnlyAttention, setShowOnlyAttention] = useState(false);
   const [missingCheckDate, setMissingCheckDate] = useState('');
   const [checkingMissing, setCheckingMissing] = useState(false);
@@ -326,6 +341,7 @@ const KitchenList = () => {
     setPdfDate('');
     setMenuSelections([]);
     setMissingSelectionEntries([]);
+    setDeliveryCheck(null);
     setMainMealOptionsByDate({});
     setSnackOptionsByDate({});
     setBreakfastOptionsByDate({});
@@ -497,6 +513,11 @@ const KitchenList = () => {
         params: { date: dateKey }
       });
       const subs = res.data?.data || [];
+      setDeliveryCheck({
+        dateKey,
+        emails: new Set(subs.map((sub) => String(sub.email || '').trim().toLowerCase()).filter(Boolean)),
+        subscriptionIds: new Set(subs.map((sub) => String(sub.subscription_id || '').trim()).filter(Boolean))
+      });
 
       // Use freshly-fetched selections when passed in (e.g. right after an
       // assignment) instead of `menuSelections`, which won't reflect a
@@ -939,7 +960,7 @@ const KitchenList = () => {
   // it just means one click covers everything a missing customer needs.
   const runAutoAssign = async () => {
     if (!selectedMenuId || !missingCheckDate) return;
-    if (missingSelectionEntries.length === 0) {
+    if (deliveryCheck?.dateKey !== missingCheckDate) {
       setError('Run "Check Missing Selections" for this date first.');
       return;
     }
@@ -982,10 +1003,39 @@ const KitchenList = () => {
         });
       }
 
+      // Customers who picked their own meals never go through the "missing"
+      // path above, so their snacks (never customer-selectable) used to
+      // depend entirely on the background job. Top them up here too — only
+      // those Matter shows a delivery for on this date.
+      let selectedSnacksRes = null;
+      if (deliveryCheck?.dateKey === missingCheckDate) {
+        const withSelection = menuSelections.filter((entry) =>
+          (entry.selectedMeals || []).some((m) => getDateKey(m?.date) === missingCheckDate)
+          && hasDeliveryOnCheckedDate(entry, deliveryCheck));
+        const isCore = (entry) => String(entry.planName || '').trim().toLowerCase() === 'matter core';
+        const standard = withSelection.filter((e) => !isCore(e)).map((e) => ({ email: e.email }));
+        const core = withSelection.filter(isCore)
+          .map((e) => ({ email: e.email, subscriptionId: e.matterSubscriptionId }));
+        if (standard.length > 0) {
+          selectedSnacksRes = await api.post(`/menus/${selectedMenuId}/assign-snacks`, {
+            date: missingCheckDate,
+            customers: standard
+          });
+        }
+        if (core.length > 0) {
+          await api.post(`/menus/${selectedMenuId}/assign-matter-core-meals`, {
+            date: missingCheckDate,
+            customers: core,
+            snackOnly: true
+          });
+        }
+      }
+
       setAutoAssignResult({
         mainMeals: mainMealsRes?.data?.data || null,
         snacks: snacksRes?.data?.data || null,
-        matterCore: matterCoreRes?.data?.data || null
+        matterCore: matterCoreRes?.data?.data || null,
+        selectedSnacks: selectedSnacksRes?.data?.data || null
       });
 
       const freshSelections = await loadSelections();
@@ -1101,17 +1151,29 @@ const KitchenList = () => {
         // still having real meals for other dates. Only show the placeholder
         // when they truly have nothing at all.
         const hasNoMealsAtAll = !calculated.selectedMeals || calculated.selectedMeals.length === 0;
+        const noDeliveryDate = deliveryCheck
+          && !entry.partner
+          && hasDeliveryOnCheckedDate(entry, deliveryCheck) === false
+          && (calculated.selectedMeals || []).some((meal) => getDateKey(meal?.date) === deliveryCheck.dateKey)
+          ? deliveryCheck.dateKey
+          : null;
         return {
           ...calculated,
           mealsByDay: groupMealsByDay(calculated.selectedMeals),
           showMissingPlaceholder: calculated.missingSelection && hasNoMealsAtAll,
-          needsAttention: (calculated.selectedMeals || []).some((meal) => getAttentionReasons(meal).length > 0),
+          needsAttention: noDeliveryDate
+            || (calculated.selectedMeals || []).some((meal) => getAttentionReasons(meal).length > 0),
+          // Set when this customer has meals on the checked date but Matter
+          // shows no delivery for them that day (paused / not scheduled /
+          // subscription not started) — the kitchen shouldn't cook these
+          // without confirming first.
+          noDeliveryDate,
           // Kitchen-only per-day notes — not part of calculateKitchenListEntry's
           // return shape, carried through separately from the raw selection record.
           dayNotes: entry.dayNotes || []
         };
       });
-  }, [menuSelections, missingSelectionEntries, breakfastPreset, snackPreset, mealTypeOverrides]);
+  }, [menuSelections, missingSelectionEntries, breakfastPreset, snackPreset, mealTypeOverrides, deliveryCheck]);
 
   // Cheap: just filters the already-computed rows above. This is the only
   // part that re-runs while typing in the search box.
@@ -1599,6 +1661,15 @@ const KitchenList = () => {
         doc.setFontSize(9);
         doc.text(subLine, 14, y, { maxWidth: pageWidth - 28 });
         y += 5;
+
+        if (entry.noDeliveryDate === dateKey) {
+          doc.setFont(undefined, 'bold');
+          doc.setTextColor(190, 18, 60);
+          doc.text('NO MATTER DELIVERY ON THIS DATE - confirm before cooking', 14, y, { maxWidth: pageWidth - 28 });
+          doc.setTextColor(0);
+          doc.setFont(undefined, 'normal');
+          y += 5;
+        }
 
         // The customer's plan entitlement per day (not what they picked).
         const orDash = (v) => (v === null || v === undefined || v === '' ? 'N/A' : v);
@@ -2236,9 +2307,22 @@ const KitchenList = () => {
             </div>
 
             <div className="mt-6 pt-4 border-t border-slate-100">
-              <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
-                Snack Macros (PCF)
-              </h4>
+              <button
+                type="button"
+                onClick={() => setSnackMacrosOpen((open) => !open)}
+                aria-expanded={snackMacrosOpen}
+                className="flex w-full items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-left hover:bg-slate-100"
+              >
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Snack Macros (PCF)
+                  <span className="ml-2 font-normal normal-case tracking-normal text-slate-400">
+                    {Object.keys(snackPreset.presetsByName || {}).length} snacks
+                  </span>
+                </span>
+                {snackMacrosOpen ? <ChevronUp size={16} className="text-slate-500" /> : <ChevronDown size={16} className="text-slate-500" />}
+              </button>
+              {snackMacrosOpen && (
+              <div className="mt-3">
               <p className="text-[11px] text-slate-400 mb-3">
                 Global, not tied to a date or menu — each snack's own fixed macros, used directly (never divided by
                 snacksPerDay) whenever that name is assigned to a customer. Falls back to the per-date Snack Rotation
@@ -2282,7 +2366,7 @@ const KitchenList = () => {
                   Add
                 </button>
               </div>
-              <div className="space-y-2">
+              <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
                 {Object.keys(snackPreset.presetsByName || {}).length === 0 && (
                   <p className="text-sm text-slate-400">No snack macros uploaded yet.</p>
                 )}
@@ -2300,13 +2384,15 @@ const KitchenList = () => {
                   </div>
                 ))}
               </div>
+              </div>
+              )}
             </div>
 
             <div className="mt-6 pt-4 border-t border-slate-100">
               <button
                 type="button"
                 onClick={runAutoAssign}
-                disabled={assigningAll || missingSelectionEntries.length === 0}
+                disabled={assigningAll || deliveryCheck?.dateKey !== missingCheckDate}
                 className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 disabled:opacity-50"
               >
                 <Shuffle size={14} className={assigningAll ? 'animate-spin' : ''} />
@@ -2315,7 +2401,7 @@ const KitchenList = () => {
               <p className="mt-1 text-[11px] text-slate-400">
                 Fills main meals, breakfast (if the customer's profile has Breakfast Include on), and their full snack count — for every customer flagged missing on {formatDateLabel(missingCheckDate)} above. Everything stays within each option's own exclusion list.
               </p>
-              {missingSelectionEntries.length === 0 && (
+              {deliveryCheck?.dateKey !== missingCheckDate && (
                 <p className="mt-1 text-[11px] text-slate-400">Run "Check Missing Selections" above first to load the customer list to assign.</p>
               )}
 
@@ -2336,6 +2422,11 @@ const KitchenList = () => {
                       Snacks: assigned {autoAssignResult.snacks.assigned} snack slot(s) across {autoAssignResult.snacks.customersProcessed} customer(s) checked.
                       {autoAssignResult.snacks.skippedNoSnacksNeeded > 0 && ` ${autoAssignResult.snacks.skippedNoSnacksNeeded} customer(s) skipped — no snacks in their website subscription.`}
                       {autoAssignResult.snacks.skippedNoOptions > 0 && ` ${autoAssignResult.snacks.skippedNoOptions} slot(s) skipped — no eligible snack options for this date.`}
+                    </p>
+                  )}
+                  {autoAssignResult.selectedSnacks && (
+                    <p className="text-emerald-700">
+                      Customers with their own selection: added {autoAssignResult.selectedSnacks.assigned} missing snack(s) across {autoAssignResult.selectedSnacks.customersProcessed} customer(s) checked.
                     </p>
                   )}
                   {autoAssignResult.matterCore && (
@@ -2426,6 +2517,14 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, savingOverrid
             {entry.missingSelection && (
               <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
                 No Meal Selection — {formatDateLabel(entry.missingSelectionDate)}
+              </span>
+            )}
+            {entry.noDeliveryDate && (
+              <span
+                title="This customer has meals on this date, but Matter shows no delivery for them that day (paused, not in their schedule, or subscription not started). Confirm before cooking."
+                className="text-xs font-semibold px-2 py-0.5 rounded-full bg-rose-100 text-rose-700"
+              >
+                No Matter delivery — {formatDateLabel(entry.noDeliveryDate)}
               </span>
             )}
             {entry.hasMacroShortfall && (

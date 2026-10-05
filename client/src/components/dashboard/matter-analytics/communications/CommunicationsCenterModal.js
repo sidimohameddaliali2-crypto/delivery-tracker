@@ -1,20 +1,24 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import DeliveryIssuesTab from './DeliveryIssuesTab';
 
 function CommunicationsCenterModal({ onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[200] p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+    <div className="mo-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="mo-modal mo-modal-skin" style={{ width: 'min(1152px, 100%)' }} role="dialog" aria-modal="true" aria-label="Communications center">
+        <div className="mo-modal-head">
           <div>
-            <h2 className="text-lg font-bold text-gray-900">Communications Center</h2>
-            <p className="text-sm text-gray-500 mt-0.5">Report and track delivery issues per customer</p>
+            <h2>Communications center</h2>
+            <p>Report and track delivery issues per customer</p>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-            <span className="material-symbols-outlined">close</span>
-          </button>
+          <button type="button" className="mo-btn" onClick={onClose}>Close</button>
         </div>
-        <div className="overflow-y-auto flex-1">
+        <div style={{ marginTop: 12 }}>
           <DeliveryIssuesTab />
         </div>
       </div>

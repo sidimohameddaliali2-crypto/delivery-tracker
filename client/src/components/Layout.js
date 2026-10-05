@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { logout } from '../store/slices/authSlice';
 import UserAvatar from './users/UserAvatar';
+import '../styles/matterChrome.css';
 
 const GROUP_ORDER = ['Overview', 'Operations', 'Customers', 'Kitchen & Menus', 'Partners', 'Admin', 'Store Keeper'];
 
@@ -104,8 +105,12 @@ const Layout = ({ children }) => {
     navigate('/login');
   };
 
+  const currentPageName = navigationGroups
+    .flatMap((group) => group.items)
+    .find((item) => item.href === location.pathname)?.name;
+
   const renderGroups = (onLinkClick) => (
-    <nav className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-1">
+    <nav className="mo-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-1">
       {navigationGroups.map((group) => {
         const isCollapsed = !!collapsedGroups[group.label];
         return (
@@ -113,12 +118,12 @@ const Layout = ({ children }) => {
             <button
               type="button"
               onClick={() => toggleGroup(group.label)}
-              className="w-full flex items-center gap-1.5 px-2 py-2 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors"
+              className="w-full flex items-center gap-1.5 px-2 py-2 rounded-lg text-white/60 hover:bg-white/10 transition-colors"
               aria-expanded={!isCollapsed}
             >
               <ChevronDown className={`w-3.5 h-3.5 flex-shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
               <span className="flex-1 text-left text-[10.5px] font-bold uppercase tracking-wider">{group.label}</span>
-              <span className="text-[10.5px] text-gray-400 bg-gray-100 rounded-full px-1.5">{group.items.length}</span>
+              <span className="text-[10.5px] text-white/70 bg-white/10 rounded-full px-1.5">{group.items.length}</span>
             </button>
 
             {!isCollapsed && (
@@ -130,10 +135,10 @@ const Layout = ({ children }) => {
                     <Link
                       key={item.name}
                       to={item.href}
-                      className={`flex items-center pl-6 pr-3 py-2 text-sm font-medium rounded-lg transition-colors ${
+                      className={`flex items-center pl-6 pr-3 py-2 text-sm font-medium rounded-full transition-colors ${
                         isActive
-                          ? 'bg-blue-100 text-blue-700'
-                          : 'text-gray-700 hover:bg-gray-100'
+                          ? 'bg-[#bdf477] text-[#0b1630] font-semibold'
+                          : 'text-white/85 hover:bg-white/10'
                       }`}
                       onClick={onLinkClick}
                     >
@@ -154,15 +159,16 @@ const Layout = ({ children }) => {
     <div className="flex h-screen bg-gray-50 overflow-x-hidden">
       {/* Desktop persistent sidebar */}
       <div
-        className={`hidden lg:block h-screen flex-shrink-0 overflow-hidden border-gray-200 transition-all duration-200 ease-in-out ${
+        className={`hidden lg:block h-screen flex-shrink-0 overflow-hidden border-transparent transition-all duration-200 ease-in-out ${
           desktopSidebarOpen ? 'lg:w-64 border-r' : 'lg:w-0 border-r-0'
         }`}
       >
-        <div className="flex flex-col w-64 h-full bg-white">
-          <div className="flex items-center justify-between flex-shrink-0 px-4 py-4 border-b border-gray-200">
+        <div className="mo-chrome-font flex flex-col w-64 h-full bg-[#0b1630]">
+          <div className="flex items-center justify-between flex-shrink-0 px-4 py-4">
+            <img src="/images/matter-logo24-white.png" alt="MATTER" className="h-6 w-auto" />
             <button
               onClick={() => setDesktopSidebarOpen(false)}
-              className="p-1 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+              className="p-1 rounded-md text-white/70 hover:bg-white/10 hover:text-white"
               title="Collapse menu"
             >
               <Menu className="w-6 h-6" />
@@ -191,13 +197,13 @@ const Layout = ({ children }) => {
               animate={{ x: 0 }}
               exit={{ x: -256 }}
               transition={{ type: "spring", bounce: 0, duration: 0.3 }}
-              className="fixed inset-y-0 left-0 z-[1001] w-64 bg-white shadow-xl flex flex-col lg:hidden"
+              className="mo-chrome-font fixed inset-y-0 left-0 z-[1001] w-64 bg-[#0b1630] shadow-xl flex flex-col lg:hidden"
             >
-              <div className="flex items-center justify-between flex-shrink-0 px-4 py-4 border-b border-gray-200">
-                <Menu className="w-6 h-6 text-gray-700" />
+              <div className="flex items-center justify-between flex-shrink-0 px-4 py-4">
+                <img src="/images/matter-logo24-white.png" alt="MATTER" className="h-6 w-auto" />
                 <button
                   onClick={() => setSidebarOpen(false)}
-                  className="p-1 rounded-md"
+                  className="p-1 rounded-md text-white"
                 >
                   <X className="w-6 h-6" />
                 </button>
@@ -212,11 +218,11 @@ const Layout = ({ children }) => {
       {/* Main content */}
       <div className="flex flex-col flex-1 overflow-hidden">
         {/* Header */}
-        <header className="flex items-center justify-between flex-shrink-0 px-6 py-4 bg-white border-b border-gray-200">
+        <header className="mo-chrome-font flex items-center justify-between flex-shrink-0 px-6 py-4 bg-[#0b1630] border-b border-white/10 text-white">
           <div className="flex items-center">
             <button
               onClick={() => setSidebarOpen(true)}
-              className="p-1 rounded-md lg:hidden"
+              className="p-1 rounded-md lg:hidden text-white"
               title="Open menu"
             >
               <Menu className="w-6 h-6" />
@@ -224,22 +230,27 @@ const Layout = ({ children }) => {
             {!desktopSidebarOpen && (
               <button
                 onClick={() => setDesktopSidebarOpen(true)}
-                className="hidden lg:block p-1 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+                className="hidden lg:block p-1 rounded-md text-white/70 hover:bg-white/10 hover:text-white"
                 title="Open menu"
               >
                 <Menu className="w-6 h-6" />
               </button>
             )}
+            {currentPageName && (
+              <span className="ml-3 pl-3 border-l border-white/20 text-[11px] tracking-[0.18em] uppercase text-white/80">
+                {currentPageName}
+              </span>
+            )}
           </div>
 
           <div className="flex items-center space-x-4">
             {/* Date would go here */}
-            <div className="flex items-center space-x-3">
+            <div className="mo-user-chip flex items-center space-x-3">
               <div className="text-right hidden sm:block">
-                <p className="text-sm font-medium text-gray-900">
+                <p className="mo-user-name">
                   {user?.profile?.firstName} {user?.profile?.lastName}
                 </p>
-                <p className="text-xs text-gray-500 capitalize">{user?.role}</p>
+                <p className="mo-user-role">{user?.role}</p>
               </div>
               <div className="relative">
                 <button className="flex items-center text-sm rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -254,7 +265,7 @@ const Layout = ({ children }) => {
               </div>
               <button
                 onClick={handleLogout}
-                className="p-2 text-gray-500 hover:text-gray-700"
+                className="p-2 text-white/70 hover:text-white"
                 title="Logout"
               >
                 <LogOut className="w-5 h-5" />

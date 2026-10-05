@@ -325,12 +325,12 @@ const buildDayMealMeta = (dayMeals) => {
   const hasChicken = chickenMeals.length > 0;
   const hasBeef = beefMeals.length > 0;
   const hasFish = fishMeals.length > 0;
-  // Owner (2026-09-28): "only Beef / only Fish" means the day's beef/fish
-  // meals are all one type — chicken meals on the same day don't change that
-  // (a chicken + beef day still uses the only-beef rule for its beef meals).
-  const onlyBeefDay = hasBeef && !hasFish;
-  const onlyFishDay = hasFish && !hasBeef;
-  const allBeefOrFishSingleTypeDay = onlyBeefDay || onlyFishDay;
+  // Owner (2026-10-05): match FileMaker. Its output (verified against the Oct 5
+  // comparison PDF — all-beef, beef+fish and chicken+beef days alike) never uses
+  // the "only beef / only fish" variant (protein -5.234%): beef always takes
+  // -7.98% carbs / +6% protein / +10.3% fat and fish -10.98% / -6% / +13.3%,
+  // with the 5% repeat penalty counted within the same type.
+  const allBeefOrFishSingleTypeDay = false;
 
   const positionMap = new Map();
   chickenMeals.forEach((item, index) => positionMap.set(item.meal, { group: 'chicken', index }));
@@ -446,7 +446,6 @@ const calculateByProteinRule = ({
 // (Kitchen Counting) don't count it twice. Copies keep the original
 // _overrideKey so a protein-type override on the dish applies to both.
 const expandMealQuantities = (meals) => meals.flatMap((meal) => {
-  const type = normalizeText(meal?.mealType);
   const qty = Math.max(1, Math.floor(Number(meal?.quantity) || 1));
   if (qty === 1) return [meal];
   return Array.from({ length: qty }, (_, copy) => ({
@@ -497,12 +496,43 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
   // any other plan are untouched.
   // Owner (2026-09-29): partner members get the same fixed macros as Lean
   // Plan 1/2, whatever plan name (if any) their record carries.
-  const fixedPlanMealMacros = customer?.partner
-    ? { ...FIXED_PLAN_MEAL_MACROS.lean }
-    : getFixedPlanMealMacros(customer?.planName);
+  const fixedPlanMealMacros = customer?.partner ? { ...FIXED_PLAN_MEAL_MACROS.lean } : null;
+  // Owner (2026-10-05): Lean/Thrive/Perform use the same daily-total budget formula as
+  // Custom (matches FileMaker). The one difference: FileMaker's printed total for these
+  // plans already includes the snacks, so snacks are NOT subtracted from the meals again.
+  const planTotalIncludesSnacks = !!getFixedPlanMealMacros(customer?.planName);
+  // FileMaker's printed daily total for these plans is the plan PLUS a
+  // standard 15/10/6 allowance per snack (checked on ~15 customers, Oct 5);
+  // it then subtracts the snack actually picked. Net effect on the meals'
+  // budget: allowance - actual (a muffin with F8 leaves 2 less fat than a
+  // truffle with F6). Other plans subtract the actual snack as before.
+  const FIXED_PLAN_SNACK_ALLOWANCE = { C: 15, P: 10, F: 6 };
+  const netSnackTotals = (totals, count) => (planTotalIncludesSnacks
+    ? {
+        C: totals.C - count * FIXED_PLAN_SNACK_ALLOWANCE.C,
+        P: totals.P - count * FIXED_PLAN_SNACK_ALLOWANCE.P,
+        F: totals.F - count * FIXED_PLAN_SNACK_ALLOWANCE.F
+      }
+    : totals);
 
   const sortedDayKeys = Array.from(new Set(selectedMeals.map((m) => getDateKey(m?.date)))).sort();
-  const deliveryNumberByDay = new Map(sortedDayKeys.map((key, idx) => [key, idx + 1]));
+  // Owner (2026-10-05): FileMaker's "delivery number" (the +1% / -1% / +2% /
+  // -2% macro adjustment) is the delivery's position within the customer's
+  // CURRENT plan (a 20-delivery plan restarts on Renew), counted from the
+  // start. Matter's schedule ends where that plan ends, so counting back from
+  // the end gives the same cycle position: N = planLength - remaining, and
+  // plan lengths are multiples of 4, so N mod 4 = (-remaining) mod 4.
+  // Checked against FileMaker for 11 of 12 customers on Oct 5. Falls back to
+  // the day's position in the selected week when Matter dates aren't loaded.
+  const matterDeliveryDates = Array.isArray(customer?.deliveryDates) ? customer.deliveryDates : null;
+  const getDeliveryNumber = (dayKey, fallbackIndex) => {
+    if (matterDeliveryDates && matterDeliveryDates.length > 0 && dayKey) {
+      const remaining = matterDeliveryDates.filter((d) => d > dayKey).length;
+      return ((4 - (remaining % 4)) % 4) || 4;
+    }
+    return fallbackIndex + 1;
+  };
+  const deliveryNumberByDay = new Map(sortedDayKeys.map((key, idx) => [key, getDeliveryNumber(key, idx)]));
 
   const mealsByDay = selectedMeals.reduce((acc, meal) => {
     const key = getDateKey(meal?.date);
@@ -537,7 +567,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     const macroAdjustment = getMacroAdjustment(deliveryNumber);
 
     const daySnackMeals = dayMeals.filter((m) => normalizeText(m?.mealType) === 'snack');
-    const daySnackTotals = daySnackMeals.reduce((acc, m) => {
+    const daySnackTotalsRaw = daySnackMeals.reduce((acc, m) => {
       const preset = resolveSnackPresetForMeal(m, snackPresetsByName);
       const snackMacros = preset || {
         C: Number(m?.snackMacros?.C) || 0,
@@ -550,6 +580,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
         F: acc.F + snackMacros.F
       };
     }, { C: 0, P: 0, F: 0 });
+    const daySnackTotals = netSnackTotals(daySnackTotalsRaw, daySnackMeals.length);
 
     const carbsDefault = Math.max(0, normalizedMacros.C - breakfastMacros.C - daySnackTotals.C);
     const proteinDefault = Math.max(0, normalizedMacros.P - breakfastMacros.P - daySnackTotals.P);
@@ -643,8 +674,8 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
       // fixed, not the physical portion size. See scaleToLargeBreakfast below.
       const proteinWeight = isLarge ? 150 : 100;
       const carbWeight = isLarge ? 200 : 100;
-      // Breakfast never includes a veg portion, for every plan.
-      const vegWeight = 0;
+      // FileMaker prints 80g of veg on every breakfast (owner, 2026-10-05).
+      const vegWeight = 80;
       const totalWeight = proteinWeight + carbWeight + vegWeight;
       const baseBreakfastMacros = {
         C: Number(mealBreakfastPreset.C) || 0,
@@ -653,9 +684,14 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
       };
       // Auto-escalated days scale this SAME item's macros by 1.5x (never a
       // fixed value) — see scaleToLargeBreakfast above for why.
+      // Owner (2026-10-05): FileMaker's kitchen list prints the breakfast's
+      // OWN preset protein (e.g. 24g, kcal 420) — the 30g floor only applies
+      // to what's deducted from the day's budget (sumDayBreakfastMacros), not
+      // to what the card/paper show. Auto-large days keep the floored value
+      // since that's what the scaled deduction is built from.
       const breakfastMacros = autoLarge
         ? scaleToLargeBreakfast(baseBreakfastMacros)
-        : baseBreakfastMacros;
+        : { ...baseBreakfastMacros, P: Number(mealBreakfastPreset.P) || 0 };
       return {
         ...meal,
         category: 'breakfast',
@@ -749,15 +785,37 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     }
 
     if (fixedPlanMealMacros) {
-      const fixedProteinWeight = getProteinMealWeight(fixedPlanMealMacros.P);
-      const fixedCarbWeight = getCarbMealWeight(fixedPlanMealMacros.C);
+      // Owner (2026-10-02): same protein-type adjustment as Custom
+      // (chicken/beef/fish percentages + the 5% same-type repeat reduction),
+      // but starting from the plan's own per-meal macros instead of the
+      // customer's daily total split across meals. Breakfast and snacks keep
+      // their preset macros and take nothing off these meals. No
+      // delivery-number adjustment (that one is based on the daily total).
+      // The 65g protein / 75g carb per-meal cap still applies.
+      const adjusted = calculateByProteinRule({
+        type,
+        carbsBase: fixedPlanMealMacros.C,
+        proteinBase: fixedPlanMealMacros.P,
+        fatsBase: fixedPlanMealMacros.F,
+        meta: dayMeta,
+        meal
+      });
+      const fixedCarbsRaw = Math.round(adjusted.C);
+      const fixedProteinRaw = Math.round(adjusted.P);
+      const fixedPlanMacros = {
+        C: Math.min(fixedCarbsRaw, MEAL_CARB_CAP),
+        P: Math.min(fixedProteinRaw, MEAL_PROTEIN_CAP),
+        F: Math.round(adjusted.F)
+      };
+      const fixedProteinWeight = getProteinMealWeight(fixedPlanMacros.P);
+      const fixedCarbWeight = getCarbMealWeight(fixedPlanMacros.C);
       const fixedVegWeight = 80;
       return {
         ...meal,
         category: 'meal',
         macros: {
-          ...fixedPlanMealMacros,
-          calories: calculateCalories(fixedPlanMealMacros)
+          ...fixedPlanMacros,
+          calories: calculateCalories(fixedPlanMacros)
         },
         weight: fixedProteinWeight + fixedCarbWeight + fixedVegWeight,
         proteinWeight: fixedProteinWeight,
@@ -769,7 +827,8 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
           isBeef: type === 'beef',
           isFish: type === 'fish',
           manualProteinType: normalizeText(meal.manualProteinType || '') || null,
-          fixedPlanMacros: true
+          fixedPlanMacros: true,
+          macroCapped: fixedProteinRaw > MEAL_PROTEIN_CAP || fixedCarbsRaw > MEAL_CARB_CAP
         }
       };
     }
@@ -800,7 +859,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     // above): whatever a customer's snack actually contains comes out of
     // their day's total before the rest is split across main meals.
     const daySnackMeals = dayMeals.filter((m) => normalizeText(m?.mealType) === 'snack');
-    const daySnackTotals = daySnackMeals.reduce((acc, m) => {
+    const daySnackTotalsRaw = daySnackMeals.reduce((acc, m) => {
       const preset = resolveSnackPresetForMeal(m, snackPresetsByName);
       const snackMacros = preset || {
         C: Number(m?.snackMacros?.C) || 0,
@@ -813,6 +872,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
         F: acc.F + snackMacros.F
       };
     }, { C: 0, P: 0, F: 0 });
+    const daySnackTotals = netSnackTotals(daySnackTotalsRaw, daySnackMeals.length);
 
     const carbsDefault = Math.max(0, normalizedMacros.C - breakfastCarbsForDefault - daySnackTotals.C);
     const proteinDefault = Math.max(0, normalizedMacros.P - breakfastProteinForDefault - daySnackTotals.P);

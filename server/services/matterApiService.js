@@ -61,6 +61,43 @@ export function selectBestAddress(addresses) {
   return pool.reduce((best, a) => (addressCompleteness(a) > addressCompleteness(best) ? a : best), pool[0]);
 }
 
+
+// Sorted YYYY-MM-DD dates of the subscription's active (not paused) deliveries.
+// The Kitchen List derives FileMaker's "delivery number" from how many of
+// these remain after a given day (see getDeliveryNumberFromRemaining in
+// client kitchenListCalculations.js).
+const activeDeliveryDates = (subscription) => (subscription?.delivery_schedule || [])
+  .filter((entry) => entry?.status === 'active' && entry?.date)
+  .map((entry) => String(entry.date).slice(0, 10))
+  .sort();
+
+// One shape for every nutrition lookup (by email, subscription id, or Matter
+// customer id), so the Kitchen List gets the same fields whichever path found
+// the subscription. customer_id is Matter's permanent id for the customer.
+const buildNutritionResult = (subscription) => ({
+  subscription_id: subscription.subscription_id,
+  customer_id: subscription.customer_id ?? null,
+  macros: subscription.macros || null,
+  total_calories: subscription.total_calories ?? null,
+  snacks_per_day: subscription.snacks_per_day ?? null,
+  plan_name: subscription.plan?.name ?? null,
+  // Per-day meal count — total_meals on the subscription is for the whole
+  // cycle, not a daily figure (see WebsiteSubscription.js).
+  meal_frequency: subscription.plan?.meal_frequency ?? null,
+  breakfast_included: !!subscription.breakfast_included,
+  active_delivery_dates: activeDeliveryDates(subscription),
+  customer_addresses: subscription.customer_addresses || [],
+  delivery_window: subscription.delivery_window || null,
+  // Dietary restrictions — surfaced so the Kitchen List customer card can
+  // display them.
+  exclusions: (subscription.exclusions || []).map((ex) => ex.title).filter(Boolean),
+  // Used to cross-reference this subscription against internal Customer
+  // records (customerMatchService) when the subscription's own email
+  // doesn't match anything internally.
+  customer_name: subscription.name || null,
+  phone: subscription.phone || null
+});
+
 class MatterApiService {
   constructor() {
     this.baseURL = process.env.MATTER_API_BASE_URL;
@@ -112,7 +149,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionByEmail(email) {
     const normalizedEmail = String(email || '').trim().toLowerCase();
-    const cacheKey = `matter:nutrition:email:${normalizedEmail}`;
+    const cacheKey = `matter:nutrition:v2:email:${normalizedEmail}`;
     const cached = normalizedEmail ? await cacheGet(cacheKey) : null;
     if (cached) return cached;
 
@@ -124,28 +161,7 @@ class MatterApiService {
     const subscription = detail?.data;
     if (!subscription) return null;
 
-    const result = {
-      subscription_id: subscription.subscription_id,
-      macros: subscription.macros || null,
-      total_calories: subscription.total_calories ?? null,
-      snacks_per_day: subscription.snacks_per_day ?? null,
-      plan_name: subscription.plan?.name ?? null,
-      // Per-day meal count — total_meals on the subscription is for the
-      // whole cycle, not a daily figure (see WebsiteSubscription.js).
-      meal_frequency: subscription.plan?.meal_frequency ?? null,
-      breakfast_included: !!subscription.breakfast_included,
-      customer_addresses: subscription.customer_addresses || [],
-      delivery_window: subscription.delivery_window || null,
-      // Dietary restrictions — same field findSubscriptionsWithDeliveryInRange
-      // already pulls for exclusion filtering; surfaced here too so the
-      // Kitchen List customer card can display them.
-      exclusions: (subscription.exclusions || []).map((ex) => ex.title).filter(Boolean),
-      // Used to cross-reference this subscription against internal Customer
-      // records (customerMatchService) when the subscription's own email
-      // doesn't match anything internally.
-      customer_name: subscription.name || null,
-      phone: subscription.phone || null
-    };
+    const result = buildNutritionResult(subscription);
 
     if (normalizedEmail) await cacheSet(cacheKey, result, NUTRITION_CACHE_TTL_SECONDS);
     return result;
@@ -161,7 +177,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionBySubscriptionId(subscriptionId) {
     if (!subscriptionId) return null;
-    const cacheKey = `matter:nutrition:sub:${subscriptionId}`;
+    const cacheKey = `matter:nutrition:v2:sub:${subscriptionId}`;
     const cached = await cacheGet(cacheKey);
     if (cached) return cached;
 
@@ -169,19 +185,33 @@ class MatterApiService {
     const subscription = detail?.data;
     if (!subscription) return null;
 
-    const result = {
-      subscription_id: subscription.subscription_id,
-      macros: subscription.macros || null,
-      total_calories: subscription.total_calories ?? null,
-      snacks_per_day: subscription.snacks_per_day ?? null,
-      plan_name: subscription.plan?.name ?? null,
-      meal_frequency: subscription.plan?.meal_frequency ?? null,
-      breakfast_included: !!subscription.breakfast_included,
-      customer_addresses: subscription.customer_addresses || [],
-      delivery_window: subscription.delivery_window || null,
-      exclusions: (subscription.exclusions || []).map((ex) => ex.title).filter(Boolean)
-    };
+    const result = buildNutritionResult(subscription);
 
+    await cacheSet(cacheKey, result, NUTRITION_CACHE_TTL_SECONDS);
+    return result;
+  }
+
+  /**
+   * Same shape again, but keyed by Matter's customer id — the link that
+   * survives renewals. A customer has one subscription at a time in Matter;
+   * if there were ever several, the active one wins.
+   */
+  async getSubscriptionNutritionByCustomerId(customerId) {
+    if (!customerId) return null;
+    const cacheKey = `matter:nutrition:v2:cust:${customerId}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return cached;
+
+    const list = await this.listSubscriptions({ customerId, pageSize: 10 });
+    const rows = list?.data || [];
+    const match = rows.find((row) => row.subscription_status === 'active') || rows[0];
+    if (!match) return null;
+
+    const detail = await this.getSubscription(match.subscription_id);
+    const subscription = detail?.data;
+    if (!subscription) return null;
+
+    const result = buildNutritionResult(subscription);
     await cacheSet(cacheKey, result, NUTRITION_CACHE_TTL_SECONDS);
     return result;
   }

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Search, Eye, Download, RefreshCw, MapPin, Phone, Mail, Calendar, Package, CheckCircle, Clock, AlertCircle, TrendingUp, Upload, DollarSign, UserPlus, X, Send, ChevronLeft, ChevronRight } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { useLocation } from 'react-router-dom';
 import api from '../utils/api';
 import MealPreferences from '../components/MealPreferences';
 import { EXCLUSION_LIST } from '../constants/exclusionList';
@@ -296,9 +297,11 @@ const EditCustomerModal = ({ customer, onClose, onSubmit, isSubmitting, submitEr
 };
 
 const Customers = () => {
+  const location = useLocation();
   const [customers, setCustomers] = useState([]);
   const [filteredCustomers, setFilteredCustomers] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
+  // The Dashboard's "Find account" link passes a name via router state.
+  const [searchTerm, setSearchTerm] = useState(location.state?.search || '');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedCustomer, setSelectedCustomer] = useState(null);

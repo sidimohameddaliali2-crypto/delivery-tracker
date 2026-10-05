@@ -1,0 +1,22 @@
+@font-face{font-family:'Matter Gothic';src:url('../assets/matter-fonts/ATLangGothic-Regular.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'Matter Gothic';src:url('../assets/matter-fonts/ATLangGothic-SemiBold.woff2') format('woff2');font-weight:500 600;font-style:normal;font-display:swap}
+@font-face{font-family:'Matter Gothic';src:url('../assets/matter-fonts/ATLangGothic-Bold.woff2') format('woff2');font-weight:700 900;font-style:normal;font-display:swap}
+@font-face{font-family:'Matter Loretta';src:url('../assets/matter-fonts/Loretta-Light.woff2') format('woff2');font-weight:300;font-style:normal;font-display:swap}
+@font-face{font-family:'Matter Loretta';src:url('../assets/matter-fonts/Loretta-Regular.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}
+
+/* AT Lang Gothic in the navy sidebar and header, as in the design. */
+.mo-chrome-font{font-family:'Matter Gothic',Arial,sans-serif}
+/* Navy header user chip, matching the Matter operations design. Scoped so the shared
+   UserAvatar looks unchanged everywhere else (driver lists, profile pages, ...). */
+.mo-user-chip .MuiAvatar-root{background:#2e91f5!important;color:#fff!important;font-weight:600;font-size:15px}
+.mo-user-chip .MuiBadge-badge{box-shadow:0 0 0 2px #0b1630!important;background:#79d36b!important;color:#79d36b!important}
+.mo-user-chip .mo-user-name{font-size:14px;font-weight:600;color:#fff;line-height:1.2}
+.mo-user-chip .mo-user-role{font-size:12px;color:rgba(255,255,255,.6);text-transform:capitalize}
+
+/* Sidebar scrollbar: navy track with a white thumb, so it blends into the navy frame. */
+.mo-sidebar-scroll{scrollbar-width:thin;scrollbar-color:#fff #0b1630}
+.mo-sidebar-scroll::-webkit-scrollbar{width:10px}
+.mo-sidebar-scroll::-webkit-scrollbar-track{background:#0b1630}
+.mo-sidebar-scroll::-webkit-scrollbar-thumb{background:#fff;border-radius:10px;border:2px solid #0b1630}
+.mo-sidebar-scroll::-webkit-scrollbar-thumb:hover{background:#bdf477}
+.mo-sidebar-scroll::-webkit-scrollbar-button{display:none}

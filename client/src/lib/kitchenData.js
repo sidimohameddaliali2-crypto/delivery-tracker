@@ -264,12 +264,14 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
 } = {}) => mapWithConcurrency(rawSelections, concurrency, async (entry) => {
   const email = String(entry?.email || '').trim();
   const subscriptionId = String(entry?.matterSubscriptionId || '').trim();
-  if (!email && !subscriptionId) {
+  // Matter's permanent customer id — survives renewals, unlike subscriptionId.
+  const matterCustomerId = String(entry?.matterCustomerId || '').trim();
+  if (!email && !subscriptionId && !matterCustomerId) {
     onEach?.();
     return entry;
   }
 
-  const cacheKey = subscriptionId ? `sub:${subscriptionId}` : email.toLowerCase();
+  const cacheKey = matterCustomerId ? `cust:${matterCustomerId}` : (subscriptionId ? `sub:${subscriptionId}` : email.toLowerCase());
   const cached = nutritionCacheRef.current.get(cacheKey);
   if (cached) {
     onEach?.();
@@ -281,8 +283,8 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     // mapWithConcurrency's Promise.all waits for every worker to finish — a
     // single slow/hung Matter API call for one customer would otherwise
     // block the entire page's load indefinitely.
-    const nutritionResponse = subscriptionId
-      ? await api.get('/matter/subscriptions/nutrition-by-subscription-id', { params: { subscriptionId, email }, timeout: 20000 })
+    const nutritionResponse = (subscriptionId || matterCustomerId)
+      ? await api.get('/matter/subscriptions/nutrition-by-subscription-id', { params: { subscriptionId, customerId: matterCustomerId, email }, timeout: 20000 })
       : await api.get('/matter/subscriptions/nutrition-by-email', { params: { email }, timeout: 20000 });
     const nutrition = nutritionResponse.data?.data;
     const websiteMacros = nutrition?.macros
@@ -296,6 +298,7 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       planName: nutrition?.plan_name ?? null,
       mealsPerDay: nutrition?.meal_frequency ?? null,
       breakfastIncluded: typeof nutrition?.breakfast_included === 'boolean' ? nutrition.breakfast_included : null,
+      deliveryDates: Array.isArray(nutrition?.active_delivery_dates) ? nutrition.active_delivery_dates : null,
       ...(extended ? {
         deliveryAddress: nutrition?.customer_addresses?.[0] || null,
         deliveryWindow: nutrition?.delivery_window || null,

@@ -1,14 +1,18 @@
 import express from 'express';
 import Incident from '../models/Incident.js';
-import { protect } from '../middleware/auth.js';
+import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // GET /api/incidents?startDate=...&endDate=...
 router.get('/', protect, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, status } = req.query;
     const filter = {};
+
+    if (['open', 'resolved'].includes(status)) {
+      filter.status = status;
+    }
 
     if (startDate || endDate) {
       filter.date = {};
@@ -57,6 +61,24 @@ router.post('/', protect, async (req, res) => {
   } catch (error) {
     console.error('Create incident error:', error);
     res.status(500).json({ error: error.message || 'Failed to create incident' });
+  }
+});
+
+// PATCH /api/incidents/:id  { status: 'open' | 'resolved' }
+router.patch('/:id', protect, authorize(['super_admin', 'admin', 'manager', 'dispatcher']), async (req, res) => {
+  try {
+    const { status } = req.body || {};
+    if (!['open', 'resolved'].includes(status)) {
+      return res.status(400).json({ error: "status must be 'open' or 'resolved'" });
+    }
+    const incident = await Incident.findByIdAndUpdate(req.params.id, { status }, { new: true });
+    if (!incident) {
+      return res.status(404).json({ error: 'Incident not found' });
+    }
+    res.json({ success: true, incident });
+  } catch (error) {
+    console.error('Update incident error:', error);
+    res.status(500).json({ error: error.message || 'Failed to update incident' });
   }
 });
 

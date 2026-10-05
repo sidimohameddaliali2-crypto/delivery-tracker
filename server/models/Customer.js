@@ -39,6 +39,19 @@ const customerSchema = new mongoose.Schema({
     sparse: true
   },
 
+  // Matter's own customer id. Unlike the subscription id (which changes every
+  // time a customer renews or re-subscribes, leaving the link above dead),
+  // this stays the same for the life of the customer, so lookups go through
+  // it first and re-point matterSubscriptionId at the current subscription
+  // automatically (see services/matterNutritionLookup.js). Not unique: a
+  // customer who exists twice internally shares one Matter customer id.
+  matterCustomerId: {
+    type: String,
+    default: null,
+    index: true,
+    sparse: true
+  },
+
   // Geocoded location, cached here (not just per-delivery) so a customer's
   // address is only ever sent to Google Geocoding once. Every delivery for
   // this customer — past, present, and future — and every Optimize Routes

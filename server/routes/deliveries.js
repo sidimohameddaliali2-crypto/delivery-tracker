@@ -16,6 +16,7 @@ import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { syncDeliveryToSheet, syncDeliveriesToSheet } from '../services/googleSheetSync.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
+import { businessRangeBounds, getDailyTimingCounts, getLatenessStats, getTimingRecords } from '../services/deliveryTimingHistory.js';
 import {
   optimizeRoutes,
   applyRoutePlan,
@@ -1473,6 +1474,42 @@ router.get('/late-early',  async (req, res) => {
   } catch (error) {
     console.error('Late/early deliveries error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Dashboard delivery-history chart: per-day early / on-time / late / awaiting
+// counts for an inclusive business-day range (YYYY-MM-DD). Must stay above '/:id'.
+router.get('/timing-history', async (req, res) => {
+  try {
+    const range = businessRangeBounds(req.query.start, req.query.end);
+    const [days, lateness] = await Promise.all([getDailyTimingCounts(range), getLatenessStats(range)]);
+    res.json({ success: true, data: { days, lateness, updatedAt: new Date().toISOString() } });
+  } catch (error) {
+    if (/YYYY-MM-DD|End date/.test(error.message)) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
+    console.error('Timing history error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Records behind a chart segment (also used, with a large limit, for CSV export).
+router.get('/timing-records', async (req, res) => {
+  try {
+    const range = businessRangeBounds(req.query.start, req.query.end);
+    const data = await getTimingRecords(range, {
+      timing: req.query.timing,
+      search: req.query.search,
+      page: req.query.page,
+      limit: req.query.limit,
+    });
+    res.json({ success: true, data });
+  } catch (error) {
+    if (/YYYY-MM-DD|End date/.test(error.message)) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
+    console.error('Timing records error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 

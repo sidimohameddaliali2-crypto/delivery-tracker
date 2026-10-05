@@ -2,7 +2,7 @@ import express from 'express';
 import { protect } from '../middleware/auth.js';
 import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
-import { getNutritionForLinkedSubscription } from '../services/matterNutritionLookup.js';
+import { getNutritionForCustomerLink } from '../services/matterNutritionLookup.js';
 
 const router = express.Router();
 
@@ -41,12 +41,17 @@ router.get('/subscriptions/nutrition-by-email', protect, async (req, res) => {
 // Customer Management's "Internal Customer Match" panel).
 router.get('/subscriptions/nutrition-by-subscription-id', protect, async (req, res) => {
   try {
-    const { subscriptionId, email } = req.query;
-    if (!subscriptionId) {
-      return res.status(400).json({ success: false, message: 'subscriptionId is required' });
+    const { subscriptionId, customerId, email } = req.query;
+    if (!subscriptionId && !customerId) {
+      return res.status(400).json({ success: false, message: 'subscriptionId or customerId is required' });
     }
-    // Falls back to `email` (and relinks) when the linked id no longer exists.
-    const data = await getNutritionForLinkedSubscription(subscriptionId, email);
+    // customerId (Matter's permanent id) is tried first, then the subscription
+    // id, then email; whatever is found is saved back onto the Customer.
+    const data = await getNutritionForCustomerLink({
+      matterCustomerId: customerId,
+      matterSubscriptionId: subscriptionId,
+      email
+    });
     res.json({ success: true, data });
   } catch (error) {
     const status = error?.response?.status || 500;

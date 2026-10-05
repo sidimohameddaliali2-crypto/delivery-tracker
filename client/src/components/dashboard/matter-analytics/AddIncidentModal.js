@@ -1,77 +1,56 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 
 function AddIncidentModal({ form, onChange, onSubmit, submitting, error, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-[210] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-lg p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-bold text-gray-900">Add Incident</h3>
-          <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-600">
-            <span className="material-symbols-outlined">close</span>
-          </button>
+    <div className="mo-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="mo-modal mo-modal-narrow" role="dialog" aria-modal="true" aria-label="Report incident">
+        <div className="mo-modal-head">
+          <div><h2>Report incident</h2><p>Log an accident or a vehicle that is not working.</p></div>
+          <button type="button" className="mo-btn" onClick={onClose}>Close</button>
         </div>
 
-        {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
+        {error && <p className="mo-error" role="alert">{error}</p>}
 
-        <form onSubmit={onSubmit} className="space-y-3">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Incident Date</label>
-            <input
-              type="date"
-              value={form.date}
-              onChange={(e) => onChange({ ...form, date: e.target.value })}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
-            />
-          </div>
+        <form onSubmit={onSubmit} className="mo-form">
+          <label className="mo-field">Incident date
+            <input type="date" value={form.date} onChange={(e) => onChange({ ...form, date: e.target.value })} />
+          </label>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Vehicle</label>
-              <select
-                value={form.vehicleType}
-                onChange={(e) => onChange({ ...form, vehicleType: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
-              >
+          <div className="mo-form-grid">
+            <label className="mo-field">Vehicle
+              <select value={form.vehicleType} onChange={(e) => onChange({ ...form, vehicleType: e.target.value })}>
                 <option value="bike">Bike</option>
                 <option value="van">Van</option>
               </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Incident Type</label>
-              <select
-                value={form.incidentType}
-                onChange={(e) => onChange({ ...form, incidentType: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
-              >
+            </label>
+            <label className="mo-field">Incident type
+              <select value={form.incidentType} onChange={(e) => onChange({ ...form, incidentType: e.target.value })}>
                 <option value="accident">Accident</option>
-                <option value="not_working">Not Working</option>
+                <option value="not_working">Not working</option>
               </select>
-            </div>
+            </label>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Details (optional)</label>
+          <label className="mo-field">Details (optional)
             <textarea
               value={form.description}
               onChange={(e) => onChange({ ...form, description: e.target.value })}
               rows={3}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-transparent"
+              maxLength={500}
               placeholder="Add details about the incident..."
             />
-          </div>
+          </label>
 
-          <div className="flex items-center justify-end gap-3">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-semibold text-gray-600 hover:text-gray-800">
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="bg-red-600 text-white text-sm font-semibold px-4 py-2 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-60"
-            >
-              {submitting ? 'Saving...' : 'Save Incident'}
+          <div className="mo-form-actions">
+            <button type="button" className="mo-btn" onClick={onClose}>Cancel</button>
+            <button type="submit" className="mo-btn mo-primary" disabled={submitting}>
+              {submitting ? 'Saving…' : 'Save incident'}
             </button>
           </div>
         </form>

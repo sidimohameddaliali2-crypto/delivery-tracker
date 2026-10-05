@@ -43,7 +43,8 @@ router.post('/login', async (req, res) => {
           address: partner.address,
           minimumOrder: partner.minimumOrder ?? 0,
           defaultDeliveryTime: partner.defaultDeliveryTime || null,
-          profilePicture: partner.profilePicture || ''
+          profilePicture: partner.profilePicture || '',
+          accountCategory: partner.accountCategory || 'partner'
         }
       }
     });

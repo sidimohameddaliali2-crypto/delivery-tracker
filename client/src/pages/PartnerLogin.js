@@ -41,10 +41,9 @@ const PartnerLogin = () => {
         transition={{ duration: 0.45 }}
         className="w-full max-w-[400px] bg-[#050f2b] border border-[#12275e] rounded-[28px] p-7"
       >
-        <div className="flex items-center gap-3">
-          <div className="w-11 h-11 rounded-[13px] bg-[#bcf679] text-[#051747] flex items-center justify-center text-xl"
-            style={{ fontFamily: "'Archivo Black', sans-serif" }}>M</div>
-          <div>
+        <div className="flex flex-col items-center gap-4">
+          <img src="/images/matter-logo-navy.svg" alt="MATTER" className="h-16 w-auto" style={{ filter: 'brightness(0) invert(1)' }} />
+          <div className="text-center">
             <div className="text-[#ede5de] text-[19px] leading-tight" style={{ fontFamily: "'Archivo Black', sans-serif" }}>
               Partner portal
             </div>

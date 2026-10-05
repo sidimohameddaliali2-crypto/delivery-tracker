@@ -89,7 +89,7 @@ router.get('/menu', async (req, res) => {
       })
       .map(a => ({
         ...a.menuItem.toObject(),
-        price: priceMap[String(a.menuItem._id)] ?? null
+        price: priceMap[String(a.menuItem._id)] ?? a.menuItem.sellingPrice ?? null
       }));
 
     res.json({ success: true, data: items });

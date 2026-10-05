@@ -3,6 +3,8 @@ import bcrypt from 'bcryptjs';
 
 const partnerSchema = new mongoose.Schema({
   businessName: { type: String, required: true, trim: true },
+  // Label shown in the partner app header: MATTER RETAIL / MEMBER / PARTNER.
+  accountCategory: { type: String, enum: ['retail', 'member', 'partner'], default: 'partner' },
   businessType: {
     type: String,
     enum: ['cafe', 'gym', 'restaurant', 'other'],

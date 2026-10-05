@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Loader2 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
+import jsPDF from 'jspdf';
 import { partnerLogout } from '../store/slices/partnerAuthSlice';
 import partnerApi from '../utils/partnerApi';
 import { groupExclusions } from '../constants/exclusionList';
@@ -78,6 +79,7 @@ const NAV_ICON = {
   profile: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0',
 };
 const TABS = ['order', 'orders', 'members', 'profile'];
+const CATEGORY_LABEL = { retail: 'MATTER RETAIL', member: 'MATTER MEMBER', partner: 'MATTER PARTNER' };
 const TITLE = { order: 'New Order', orders: 'My Orders', members: 'Members', profile: 'Profile' };
 const NAV_LABEL = { order: 'New Order', orders: 'My Orders', members: 'Members', profile: 'Profile' };
 
@@ -110,6 +112,7 @@ const PartnerPortal = () => {
   const [selMode, setSelMode] = useState('single'); // 'single' | 'multi'
   const [selectedDates, setSelectedDates] = useState(() => new Set([firstOrderableISO()]));
   const [cart, setCart] = useState({}); // { [menuItemId]: qty } — same cart applied to every selected day
+  const [editing, setEditing] = useState(null); // { id, date, ref, originalIds } while editing an existing order
   const [sheet, setSheet] = useState(null); // null | 'checkout'  (mobile only)
   const [placing, setPlacing] = useState(false);
   const [orderErr, setOrderErr] = useState('');
@@ -244,6 +247,7 @@ const PartnerPortal = () => {
     if (mode === 'single') setSelectedDates((prev) => new Set([Array.from(prev).sort()[0] || firstOrderableISO()]));
   };
   const toggleDay = (iso) => {
+    if (editing) return; // an existing order is edited on its own day
     setOrderErr('');
     if (selMode === 'single') { setSelectedDates(new Set([iso])); return; }
     setSelectedDates((prev) => {
@@ -262,6 +266,87 @@ const PartnerPortal = () => {
       return next;
     });
 
+  // Load an existing order's meals into the cart so the partner can change them
+  const startEdit = (o) => {
+    const date = toISO(new Date(o.deliveryDate));
+    const next = {};
+    (o.lines || []).forEach((l) => {
+      const id = l.menuItem?._id || l.menuItem;
+      if (id && l.quantity > 0) next[id] = l.quantity;
+    });
+    setEditing({ id: o._id, date, ref: `PO-${String(o._id).slice(-4).toUpperCase()}`, originalIds: Object.keys(next) });
+    setSelMode('single');
+    setSelectedDates(new Set([date]));
+    setCart(next);
+    setOrderErr('');
+    setSheet(null);
+    setTab('order');
+  };
+  const cancelEdit = () => {
+    setEditing(null);
+    setCart({});
+    setOrderErr('');
+  };
+  const cancelOrder = async (o) => {
+    if (!window.confirm(`Cancel order PO-${String(o._id).slice(-4).toUpperCase()}?`)) return;
+    try {
+      await partnerApi.post(`/partner/orders/${o._id}/cancel`);
+      if (editing?.id === o._id) cancelEdit();
+      loadOrders();
+      setReports(null);
+    } catch (e) {
+      window.alert(e.response?.data?.message || 'Could not cancel the order.');
+    }
+  };
+
+  // Client-side invoice PDF from the partner invoice detail
+  const downloadInvoice = async (o) => {
+    try {
+      const res = await partnerApi.get(`/partner/invoices/${o.invoice._id}`);
+      const inv = res.data.data;
+      const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+      const right = 555;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(22);
+      doc.text('MATTER', 40, 56);
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'normal');
+      doc.text('Partner invoice', 40, 72);
+      doc.text(`Invoice no: ${inv.invoiceNumber}`, right, 56, { align: 'right' });
+      doc.text(`Order: PO-${String(o._id).slice(-4).toUpperCase()}`, right, 72, { align: 'right' });
+      doc.text(`Delivery date: ${fmtDay(toISO(new Date(o.deliveryDate)))}`, right, 88, { align: 'right' });
+      doc.text(`Billed to: ${partner?.businessName || ''}`, 40, 120);
+
+      let y = 160;
+      doc.setFont('helvetica', 'bold');
+      doc.text('Item', 40, y);
+      doc.text('Qty', 360, y, { align: 'right' });
+      doc.text('Unit (AED)', 440, y, { align: 'right' });
+      doc.text('Amount (AED)', right, y, { align: 'right' });
+      y += 8;
+      doc.line(40, y, right, y);
+      y += 18;
+      doc.setFont('helvetica', 'normal');
+      (inv.lines || []).forEach((l) => {
+        doc.text(String(l.itemName || 'Item'), 40, y);
+        doc.text(String(l.quantity), 360, y, { align: 'right' });
+        doc.text(fmtAED(l.unitPrice), 440, y, { align: 'right' });
+        doc.text(fmtAED(l.lineRevenue), right, y, { align: 'right' });
+        y += 18;
+      });
+      y += 6;
+      doc.line(40, y, right, y);
+      y += 20;
+      doc.setFont('helvetica', 'bold');
+      doc.text('Total', 440, y, { align: 'right' });
+      doc.text(`AED ${fmtAED(inv.totalRevenue)}`, right, y, { align: 'right' });
+
+      doc.save(`${inv.invoiceNumber}.pdf`);
+    } catch (e) {
+      window.alert(e.response?.data?.message || 'Could not download the invoice.');
+    }
+  };
+
   const openCheckout = () => {
     if (subtotal < minOrder) {
       setOrderErr(`Minimum order is AED ${fmtAED(minOrder)} — you're at AED ${fmtAED(subtotal)}.`);
@@ -279,8 +364,15 @@ const PartnerPortal = () => {
     setPlacing(true);
     setOrderErr('');
     const lines = menu.filter((m) => cart[m._id]).map((m) => ({ menuItemId: m._id, quantity: cart[m._id] }));
+    // Meals removed while editing are sent as quantity 0 so the server drops them
+    if (editing) {
+      editing.originalIds.forEach((id) => {
+        if (!cart[id] && !lines.some((l) => l.menuItemId === id)) lines.push({ menuItemId: id, quantity: 0 });
+      });
+    }
     const results = [];
-    for (const date of sortedSelected) {
+    const dates = editing ? [editing.date] : sortedSelected;
+    for (const date of dates) {
       try {
         const r = await partnerApi.post('/partner/orders', {
           deliveryDate: date,
@@ -313,6 +405,7 @@ const PartnerPortal = () => {
         failed: failResults.map((r) => `${fmtDay(r.date)}: ${r.message}`),
       });
       setCart({});
+      setEditing(null);
       setSheet(null);
       loadOrders();
       setReports(null);
@@ -408,7 +501,14 @@ const PartnerPortal = () => {
   );
 
   const renderExistingBanner = () =>
-    existingDays.length > 0 ? (
+    editing ? (
+      <div className="mt-2.5 flex items-center gap-2.5 rounded-[14px] px-3 py-2.5 text-[11.5px] leading-snug"
+        style={{ background: 'rgba(188,246,121,.1)', border: '1.5px solid #bcf679' }}>
+        <span className="w-[7px] h-[7px] rounded-full bg-[#bcf679] flex-none" />
+        <span className="flex-1">Editing {editing.ref} on {fmtDay(editing.date)}. Save to update it.</span>
+        <button onClick={cancelEdit} className="font-bold text-[#bcf679] underline">Stop editing</button>
+      </div>
+    ) : existingDays.length > 0 ? (
       <div className="mt-2.5 flex items-start gap-2.5 rounded-[14px] px-3 py-2.5 text-[11.5px] leading-snug"
         style={{ background: 'rgba(188,246,121,.1)', border: '1.5px solid #bcf679' }}>
         <span className="w-[7px] h-[7px] rounded-full bg-[#bcf679] flex-none mt-1" />
@@ -470,6 +570,28 @@ const PartnerPortal = () => {
           <span>AED {fmtAED(orderTotal(o))}</span>
           <span className="text-[#a8ccf5] font-medium">· {o.lines?.length || 0} line{(o.lines?.length || 0) !== 1 ? 's' : ''}</span>
         </div>
+        {(o.editable || o.invoice) && (
+          <div className="flex flex-wrap gap-2 mt-3">
+            {o.editable && (
+              <button onClick={() => startEdit(o)}
+                className="rounded-full px-3.5 py-2 text-[12px] font-bold border-[1.5px] border-[#bcf679] text-[#bcf679] hover:bg-[#bcf679]/10 transition-colors">
+                Edit meals
+              </button>
+            )}
+            {o.editable && (
+              <button onClick={() => cancelOrder(o)}
+                className="rounded-full px-3.5 py-2 text-[12px] font-bold border-[1.5px] border-[#ff3b00] text-[#ff8a66] hover:bg-[#ff3b00]/10 transition-colors">
+                Cancel order
+              </button>
+            )}
+            {o.invoice && (
+              <button onClick={() => downloadInvoice(o)}
+                className="rounded-full px-3.5 py-2 text-[12px] font-bold bg-[#bcf679] text-[#051747] hover:opacity-90 transition-opacity">
+                Download invoice · {o.invoice.invoiceNumber}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     );
   };
@@ -757,7 +879,7 @@ const PartnerPortal = () => {
             {partner?.profilePicture
               ? <img src={partner.profilePicture} alt="" className="w-9 h-9 rounded-[11px] object-cover flex-none" />
               : <div className="w-9 h-9 rounded-[11px] bg-[#bcf679] text-[#051747] flex items-center justify-center flex-none text-[18px]" style={AB}>{initials(partner?.businessName)}</div>}
-            <div className="min-w-0 flex-1 truncate" style={AB}>{partner?.businessName || 'Partner'}</div>
+            <div className="min-w-0 flex-1"><div className="truncate" style={AB}>{partner?.businessName || 'Partner'}</div><div className="text-[10px] font-bold tracking-[0.1em] text-[#bcf679] mt-0.5">{CATEGORY_LABEL[partner?.accountCategory] || 'MATTER PARTNER'}</div></div>
           </div>
 
           <nav className="flex flex-col gap-[3px] mt-[30px]">
@@ -896,7 +1018,7 @@ const PartnerPortal = () => {
             : <div className="w-[34px] h-[34px] rounded-[11px] bg-[#bcf679] text-[#051747] flex items-center justify-center flex-none text-[17px]" style={AB}>{initials(partner?.businessName)}</div>}
           <div className="min-w-0">
             <div className="text-[15.5px] leading-tight truncate" style={AB}>{TITLE[tab]}</div>
-            <div className="text-[11.5px] text-[#a8ccf5] mt-0.5 truncate">{partner?.businessName || 'Partner'} · Partner</div>
+            <div className="text-[11.5px] text-[#a8ccf5] mt-0.5 truncate">{partner?.businessName || 'Partner'} · {CATEGORY_LABEL[partner?.accountCategory] || 'MATTER PARTNER'}</div>
           </div>
           <button onClick={() => setTab('profile')} aria-label="Profile"
             className="ml-auto w-[38px] h-[38px] rounded-full bg-[#0a1230] border-[1.5px] border-[#12275e] text-[#a8ccf5] flex items-center justify-center hover:border-[#bcf679] transition-colors">

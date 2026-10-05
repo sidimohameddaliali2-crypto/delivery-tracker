@@ -9,6 +9,9 @@ const partnerMenuItemSchema = new mongoose.Schema({
   },
   description: { type: String, default: '' },
   price: { type: Number, required: true, min: 0 },
+  // Selling price applied to every partner unless that partner has its own
+  // SpacePrice override (sub-menu price). Falls back to base price if unset.
+  sellingPrice: { type: Number, default: null, min: 0 },
   isAvailable: { type: Boolean, default: true },
   availableFrom: { type: Date, default: null },
   availableTo: { type: Date, default: null },

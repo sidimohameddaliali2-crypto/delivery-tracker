@@ -42,11 +42,11 @@ router.get('/menu', async (req, res) => {
 
 router.post('/menu', async (req, res) => {
   try {
-    const { name, mealType, description, price, isAvailable, category, sortOrder, availableFrom, availableTo, ingredients } = req.body;
+    const { name, mealType, description, price, sellingPrice, isAvailable, category, sortOrder, availableFrom, availableTo, ingredients } = req.body;
     if (!name || !mealType || price === undefined) {
       return res.status(400).json({ success: false, message: 'name, mealType and price are required' });
     }
-    const item = await PartnerMenuItem.create({ name, mealType, description, price, isAvailable, category, sortOrder, availableFrom: availableFrom || null, availableTo: availableTo || null, ingredients: Array.isArray(ingredients) ? ingredients : [] });
+    const item = await PartnerMenuItem.create({ name, mealType, description, price, sellingPrice: sellingPrice === '' || sellingPrice == null ? null : Number(sellingPrice), isAvailable, category, sortOrder, availableFrom: availableFrom || null, availableTo: availableTo || null, ingredients: Array.isArray(ingredients) ? ingredients : [] });
     res.status(201).json({ success: true, data: item });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -55,14 +55,15 @@ router.post('/menu', async (req, res) => {
 
 router.patch('/menu/:itemId', admin, async (req, res) => {
   try {
-    const allowed = ['name', 'mealType', 'description', 'price', 'isAvailable', 'category', 'sortOrder', 'availableFrom', 'availableTo', 'ingredients'];
+    const allowed = ['name', 'mealType', 'description', 'price', 'sellingPrice', 'isAvailable', 'category', 'sortOrder', 'availableFrom', 'availableTo', 'ingredients'];
     const updates = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
     const item = await PartnerMenuItem.findByIdAndUpdate(req.params.itemId, { $set: updates }, { new: true, runValidators: true });
     if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
     res.json({ success: true, data: item });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Server error' });
+    console.error('Menu item update failed:', err);
+    res.status(400).json({ success: false, message: err.message || 'Server error' });
   }
 });
 
@@ -248,7 +249,7 @@ router.patch('/orders/:orderId/lock', admin, async (req, res) => {
     // Build snapshots
     let totalRevenue = 0, totalCost = 0;
     const snapshots = lines.map(l => {
-      const unitPrice = priceMap[String(l.menuItem._id)] ?? 0;
+      const unitPrice = priceMap[String(l.menuItem._id)] ?? l.menuItem.sellingPrice ?? l.menuItem.price ?? 0;
       const unitCost = costMap[String(l.menuItem._id)] ?? 0;
       const lineRevenue = l.quantity * unitPrice;
       const lineCost = l.quantity * unitCost;
@@ -589,6 +590,7 @@ router.post('/', admin, async (req, res) => {
       phone: phone || '', address: address || '', createdBy: req.user._id,
       menuSelectionEnabled: !!menuSelectionEnabled,
       presetMacros: presetMacros || undefined,
+      accountCategory: ['retail','member','partner'].includes(req.body.accountCategory) ? req.body.accountCategory : 'partner',
       profilePicture: profilePicture || ''
     });
     partner.password = undefined;
@@ -611,7 +613,7 @@ router.get('/:id', async (req, res) => {
 
 router.patch('/:id', admin, async (req, res) => {
   try {
-    const allowed = ['businessName', 'businessType', 'contactName', 'phone', 'address', 'isActive', 'minimumOrder', 'menuSelectionEnabled', 'presetMacros', 'profilePicture'];
+    const allowed = ['businessName', 'businessType', 'contactName', 'phone', 'address', 'isActive', 'minimumOrder', 'menuSelectionEnabled', 'presetMacros', 'profilePicture', 'accountCategory'];
     const updates = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
     const partner = await Partner.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true, runValidators: true });
@@ -658,7 +660,7 @@ router.get('/:id/menu', async (req, res) => {
       _id: a._id,
       isActive: a.isActive,
       menuItem: a.menuItem,
-      price: priceMap[String(a.menuItem?._id)] ?? null,
+      price: priceMap[String(a.menuItem?._id)] ?? a.menuItem?.sellingPrice ?? null,
       cost: costMap[String(a.menuItem?._id)] ?? null
     }));
 

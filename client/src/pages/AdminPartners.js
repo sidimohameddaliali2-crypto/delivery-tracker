@@ -74,11 +74,11 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
         phone: initial.phone || '', address: initial.address || '', minimumOrder: initial.minimumOrder ?? 0,
         menuSelectionEnabled: !!initial.menuSelectionEnabled,
         presetMacros: { C: initial.presetMacros?.C ?? 0, P: initial.presetMacros?.P ?? 0, F: initial.presetMacros?.F ?? 0 },
-        profilePicture: initial.profilePicture || ''
+        profilePicture: initial.profilePicture || '', accountCategory: initial.accountCategory || 'partner'
       }
     : {
         businessName: '', businessType: 'cafe', contactName: '', email: '', password: '', phone: '', address: '', minimumOrder: 0,
-        menuSelectionEnabled: false, presetMacros: { C: 0, P: 0, F: 0 }, profilePicture: ''
+        menuSelectionEnabled: false, presetMacros: { C: 0, P: 0, F: 0 }, profilePicture: '', accountCategory: 'partner'
       }
   );
   const [saving, setSaving] = useState(false);
@@ -137,6 +137,14 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
                 </button>
               )}
             </div>
+          </div>
+          <div className="col-span-2">
+            <label className="block text-sm font-medium text-[#0b1a3f] mb-1">Account category *</label>
+            <select name="accountCategory" value={form.accountCategory} onChange={set} className={inputCls}>
+              <option value="retail">MATTER RETAIL</option>
+              <option value="member">MATTER MEMBER</option>
+              <option value="partner">MATTER PARTNER</option>
+            </select>
           </div>
           <div className="col-span-2">
             <label className="block text-sm font-medium text-[#0b1a3f] mb-1">Business Name *</label>
@@ -219,8 +227,8 @@ const toDateInput = (d) => (d ? new Date(d).toISOString().split('T')[0] : '');
 const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
   const isEdit = !!initial;
   const [form, setForm] = useState(isEdit
-    ? { name: initial.name, mealType: initial.mealType, description: initial.description || '', price: initial.price, category: initial.category || '', isAvailable: initial.isAvailable, availableFrom: toDateInput(initial.availableFrom), availableTo: toDateInput(initial.availableTo), ingredients: (initial.ingredients || []).join(', ') }
-    : { name: '', mealType: 'main', description: '', price: '', category: '', isAvailable: true, availableFrom: '', availableTo: '', ingredients: '' }
+    ? { name: initial.name, mealType: initial.mealType, description: initial.description || '', price: initial.price, category: initial.category || '', isAvailable: initial.isAvailable, availableFrom: toDateInput(initial.availableFrom), availableTo: toDateInput(initial.availableTo), ingredients: (initial.ingredients || []).join(', '), sellingPrice: initial.sellingPrice ?? '' }
+    : { name: '', mealType: 'main', description: '', price: '', category: '', isAvailable: true, availableFrom: '', availableTo: '', ingredients: '', sellingPrice: '' }
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -233,6 +241,7 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
       const payload = {
         ...form,
         price: Number(form.price),
+        sellingPrice: form.sellingPrice === '' ? null : Number(form.sellingPrice),
         availableFrom: form.availableFrom || null,
         availableTo: form.availableTo || null,
         ingredients: form.ingredients ? form.ingredients.split(',').map((s) => s.trim()).filter(Boolean) : [],
@@ -256,6 +265,9 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
             <select name="mealType" value={form.mealType} onChange={set} className={inputCls}>
               {MEAL_TYPES.map((t) => <option key={t} value={t}>{MEAL_TYPE_LABEL[t]}</option>)}
             </select></div>
+          <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Selling price (AED)</label>
+            <input name="sellingPrice" type="number" min="0" step="0.01" value={form.sellingPrice} onChange={set} className={inputCls} placeholder="Applies to all partners" />
+            <p className="text-[11px] text-[#6b7894] mt-1">Used for every partner unless that partner has its own price in their sub-menu.</p></div>
           <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Base price (AED) *</label>
             <input name="price" type="number" required min="0" step="0.01" value={form.price} onChange={set} className={inputCls} placeholder="25.00" /></div>
         </div>
@@ -712,6 +724,7 @@ const AdminPartners = () => {
                         <div className="min-w-0">
                           <div className="text-[17px] truncate" style={AB}>{sel.businessName}</div>
                           <div className="text-xs text-[#6b7894] mt-0.5 truncate">{sel.address || 'No address on file'}</div>
+                          <span className="inline-block mt-1.5 rounded-full px-2.5 py-0.5 text-[10.5px] font-bold tracking-[0.06em]" style={{ background: sel.accountCategory === 'retail' ? '#fff2d9' : sel.accountCategory === 'member' ? '#e3edff' : '#bcf679', color: '#051747' }}>{({ retail: 'MATTER RETAIL', member: 'MATTER MEMBER', partner: 'MATTER PARTNER' })[sel.accountCategory] || 'MATTER PARTNER'}</span>
                         </div>
                       </div>
 
@@ -883,7 +896,7 @@ const AdminPartners = () => {
                             </div>
                           </div>
                           <div><span className="bg-[#f1ebe2] rounded-full px-2.5 py-1 text-[11px] font-bold text-[#6b7894] capitalize">{MEAL_TYPE_LABEL[it.mealType] || it.mealType}</span></div>
-                          <div className="font-bold">AED {fmt(it.price)}</div>
+                          <div><div className="font-bold">AED {fmt(it.sellingPrice ?? it.price)}</div><div className="text-[10.5px] text-[#6b7894]">{it.sellingPrice != null ? `base ${fmt(it.price)}` : "selling = base"}</div></div>
                           <div className="flex items-center gap-1.5 justify-end">
                             {!isKitchen && (
                               <>

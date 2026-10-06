@@ -555,7 +555,19 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
       });
     }
 
-    const customer = await Customer.findOne({ email: buildEmailRegex(resolvedEmail) });
+    // Owner (2026-10-06): match the internal customer through the same
+    // "Internal Customer Match" cascade (manual link -> email -> phone -> name),
+    // not only an exact email. The customer types their Matter email, which is
+    // often different from the internal one — an email-only lookup found nothing,
+    // so allergies and the internal customerId/name were lost for them.
+    const { customer: matchedCustomer } = await resolveCustomerMatch({
+      email: resolvedEmail,
+      phone: nutrition.phone,
+      name: nutrition.customer_name,
+      subscriptionId: nutrition.subscription_id ? String(nutrition.subscription_id) : undefined
+    });
+    // resolveCustomerMatch returns a trimmed projection; load the full record.
+    const customer = matchedCustomer ? await Customer.findById(matchedCustomer._id) : null;
     if (customer?.partner) {
       await customer.populate('partner', 'businessName businessType menuSelectionEnabled');
     }
@@ -643,6 +655,9 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
         mealSnack: (nutrition.snacks_per_day || 0) > 0,
         snackCount: nutrition.snacks_per_day || 0,
         mealPlan: nutrition.plan_name || customer?.mealPlan || '',
+        // The customer's active Matter delivery calendar (YYYY-MM-DD). The
+        // selection screen only shows menu days on this list; null = unknown.
+        deliveryDates: Array.isArray(nutrition.active_delivery_dates) ? nutrition.active_delivery_dates : null,
         // Owner (2026-10-05): exclusions (dietary restrictions, e.g. "Dairy-Free")
         // now come straight from the Matter subscription instead of the internal
         // Customer's mealExclusion field, which went stale when a customer
@@ -1344,6 +1359,38 @@ const toDateKey = (value) => {
 const normalizeSnackPools = (value) => {
   if (Array.isArray(value)) return { first: value, second: [] };
   return { first: value?.first || [], second: value?.second || [] };
+};
+
+// Owner (2026-10-06): snacks uploaded with a menu are added to that day's snack
+// pool, so the kitchen's snack auto-assign can draw them. Additive only: options
+// already in the pool keep their kitchen-set macros and exclusions, and a name
+// already present is not duplicated. New names go to whichever of first/second is
+// smaller, so the slot alternation stays balanced. Uploaded snacks carry no
+// macros, so they start at 0 until the kitchen sets them. The item's
+// INTOLERANCES are used as the snack's exclusions.
+const mergeUploadedSnackPools = (menu, days) => {
+  for (const day of days) {
+    const dateKey = toDateKey(day?.date);
+    if (!dateKey || !Array.isArray(day.items)) continue;
+
+    const uploaded = day.items.filter((item) => item?.mealType === 'snack' && String(item.mealName || '').trim());
+    if (uploaded.length === 0) continue;
+
+    const current = normalizeSnackPools(menu.snackOptionsByDate.get(dateKey));
+    const first = [...current.first];
+    const second = [...current.second];
+    const known = new Set([...first, ...second].map((opt) => String(opt.name).trim().toLowerCase()));
+
+    for (const item of uploaded) {
+      const name = String(item.mealName).trim();
+      if (known.has(name.toLowerCase())) continue;
+      known.add(name.toLowerCase());
+      const exclusions = String(item.intolerances || '').split(/[,;|]/).map((e) => e.trim()).filter(Boolean);
+      (first.length <= second.length ? first : second).push({ name, exclusions, C: 0, P: 0, F: 0 });
+    }
+
+    menu.snackOptionsByDate.set(dateKey, { first, second });
+  }
 };
 
 /**
@@ -3108,6 +3155,7 @@ router.post('/', protect, async (req, res) => {
       }
 
       menu.meals = Array.from(mealMap.values());
+      mergeUploadedSnackPools(menu, days);
       await menu.save();
     }
 
@@ -3316,6 +3364,7 @@ router.put('/:id', protect, async (req, res) => {
       }
 
       menu.meals = Array.from(mealMap.values());
+      mergeUploadedSnackPools(menu, days);
     }
 
     await menu.save();
@@ -3901,10 +3950,34 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // (the exact case fixed via mergeUnnamedCustomerIntoRealRecord.js,
     // 2026-09-29) would immediately spawn a new throwaway duplicate again on
     // their very next selection.
-    let { customer } = await resolveCustomerMatch({ email: cleanEmail, subscriptionId: cleanSubscriptionId });
+    // Matter subscription for the typed email — one lookup, reused for the
+    // match (phone/name/id), a brand-new customer's name, and the exclusions
+    // stored on the record below. Null if Matter can't be reached.
+    let matterSub = null;
+    try {
+      matterSub = await matterApiService.getSubscriptionNutritionByEmail(cleanEmail);
+    } catch (matterError) {
+      console.error('select-meals: Matter lookup failed for', cleanEmail, '-', matterError.message);
+    }
+
+    let { customer } = await resolveCustomerMatch({
+      email: cleanEmail,
+      phone: matterSub?.phone,
+      name: matterSub?.customer_name,
+      subscriptionId: matterSub?.subscription_id ? String(matterSub.subscription_id) : cleanSubscriptionId
+    });
 
     if (!customer) {
-      customer = new Customer({ email: cleanEmail, customerId: cleanEmail.split('@')[0] });
+      // Brand-new customer: take the name from Matter so the selection isn't
+      // saved as "Unnamed Customer" (the Matter lookup above already has it).
+      const [matterFirst, ...matterRest] = String(matterSub?.customer_name || '').trim().split(/\s+/).filter(Boolean);
+      customer = new Customer({
+        email: cleanEmail,
+        customerId: cleanEmail.split('@')[0],
+        firstName: matterFirst || undefined,
+        lastName: matterRest.join(' ') || undefined,
+        phone: matterSub?.phone || undefined
+      });
     }
 
     // Capture previous menu id AND selections before overwriting them.
@@ -4010,13 +4083,9 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // the kitchen list flags the exact same meal because the internal field
     // was stale. Falls back to the internal field if Matter can't be reached,
     // rather than silently wiping a conflict warning kitchen staff rely on.
-    let matterExclusion = customer.mealExclusion;
-    try {
-      const nutrition = await matterApiService.getSubscriptionNutritionByEmail(cleanEmail);
-      if (nutrition) matterExclusion = (nutrition.exclusions || []).join(', ');
-    } catch (matterError) {
-      console.error('select-meals: Matter exclusion lookup failed for', cleanEmail, '-', matterError.message);
-    }
+    const matterExclusion = matterSub
+      ? (matterSub.exclusions || []).join(', ')
+      : customer.mealExclusion;
 
     // Upsert a MenuSelectionRecord so historical selections per menu are preserved
     // even after the customer moves on to a newer menu week.

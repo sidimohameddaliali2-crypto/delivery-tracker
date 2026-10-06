@@ -85,7 +85,11 @@ const buildNutritionResult = (subscription) => ({
   // cycle, not a daily figure (see WebsiteSubscription.js).
   meal_frequency: subscription.plan?.meal_frequency ?? null,
   breakfast_included: !!subscription.breakfast_included,
-  active_delivery_dates: activeDeliveryDates(subscription),
+  // null when Matter sent no calendar at all, so "no deliveries" (empty list)
+  // and "unknown" stay distinct for callers.
+  active_delivery_dates: Array.isArray(subscription.delivery_schedule)
+    ? activeDeliveryDates(subscription)
+    : null,
   customer_addresses: subscription.customer_addresses || [],
   delivery_window: subscription.delivery_window || null,
   // Dietary restrictions — surfaced so the Kitchen List customer card can

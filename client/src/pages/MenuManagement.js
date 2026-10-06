@@ -129,6 +129,7 @@ const MenuManagement = () => {
   const [isDownloadingPDF, setIsDownloadingPDF] = useState(false);
   const [isDownloadingKitchenPaper, setIsDownloadingKitchenPaper] = useState(false);
   const [isDownloadingMenuPDF, setIsDownloadingMenuPDF] = useState(false);
+  const [isDownloadingMenuExcel, setIsDownloadingMenuExcel] = useState(false);
   const [isEditingSelections, setIsEditingSelections] = useState(false);
   const [editDraft, setEditDraft] = useState([]);
   const [editSaving, setEditSaving] = useState(false);
@@ -424,17 +425,87 @@ const MenuManagement = () => {
     return -1;
   };
 
-  const handleDownloadMenuTemplate = () => {
-    const rows = [
-      ['MEAL TYPE', 'INTOLERANCES', 'DAY', 'MEAL NAME', 'CARB', 'VEG'],
-      ['main', 'nuts, dairy', 1, 'Chicken Bowl', 'rice', 'broccoli'],
-      ['main', 'gluten', 2, 'Salad Plate', 'quinoa', 'spinach']
-    ];
+  // Column layout shared by the blank template and the "Download Excel" of an
+  // existing menu. SLOT and PROTEIN TYPE sit at the end so files made before
+  // they existed still parse by position (see the fallback order in upload).
+  const MENU_EXCEL_HEADERS = [
+    'MEAL TYPE', 'INTOLERANCES', 'DAY', 'MEAL NAME', 'CARB', 'VEG', 'SLOT', 'PROTEIN TYPE'
+  ];
+  const SLOT_VALUES = ['main', 'sub'];
+  const PROTEIN_TYPE_VALUES = ['chicken', 'beef', 'fish'];
+  const normalizeSlot = (value) => {
+    const v = String(value || '').trim().toLowerCase();
+    return SLOT_VALUES.includes(v) ? v : '';
+  };
+  const normalizeProteinType = (value) => {
+    const v = String(value || '').trim().toLowerCase();
+    return PROTEIN_TYPE_VALUES.includes(v) ? v : '';
+  };
 
+  const writeMenuExcel = (rows, fileName) => {
     const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet(rows);
+    const ws = XLSX.utils.aoa_to_sheet([MENU_EXCEL_HEADERS, ...rows]);
     XLSX.utils.book_append_sheet(wb, ws, 'Menu Upload');
-    XLSX.writeFile(wb, 'menu_upload_template.xlsx');
+    XLSX.writeFile(wb, fileName);
+  };
+
+  const handleDownloadMenuTemplate = () => {
+    writeMenuExcel(
+      [
+        ['main', 'nuts, dairy', 1, 'Chicken Bowl', 'rice', 'broccoli', 'main', 'chicken'],
+        ['main', 'gluten', 2, 'Beef Stew', 'quinoa', 'spinach', 'sub', 'beef'],
+        ['snack', '', 1, 'Mixed Nuts Pack', '', '', '', '']
+      ],
+      'menu_upload_template.xlsx'
+    );
+  };
+
+  // Excel copy of an existing menu, in the same layout as the upload template,
+  // so it can be edited offline and re-uploaded. Snacks are included here
+  // because they are part of the menu's data (kitchen), even though they are
+  // not shown on the printed/customer menu.
+  const handleDownloadMenuExcel = async (menu) => {
+    if (!menu) return;
+    try {
+      setIsDownloadingMenuExcel(true);
+      const response = await api.get(`/menus/${menu._id}`);
+      if (!response.data?.success) {
+        throw new Error(response.data?.message || 'Failed to load menu details');
+      }
+      const menuData = response.data.data;
+      const startKey = menuData.startDate ? getDateKey(menuData.startDate) : null;
+      const startMs = startKey ? new Date(`${startKey}T00:00:00`).getTime() : null;
+
+      const rows = [];
+      buildWeeklyItemsFromMenu(menuData).forEach((day) => {
+        const dayMs = new Date(`${day.date}T00:00:00`).getTime();
+        const dayNumber = startMs !== null ? Math.round((dayMs - startMs) / 86400000) + 1 : '';
+        day.items.forEach((item) => {
+          rows.push([
+            item.mealType,
+            item.intolerances,
+            dayNumber,
+            item.mealName,
+            item.carbs,
+            item.veg,
+            normalizeSlot(item.rotationCategory),
+            normalizeProteinType(item.portionType)
+          ]);
+        });
+      });
+
+      if (!rows.length) {
+        alert('No menu items found to download.');
+        return;
+      }
+      const safeTitle = String(menuData.title || 'menu').replace(/[^a-z0-9-_]+/gi, '_');
+      writeMenuExcel(rows, `${safeTitle}-menu.xlsx`);
+    } catch (error) {
+      console.error('Menu Excel download error:', error);
+      alert(error.message || 'Failed to download menu Excel.');
+    } finally {
+      setIsDownloadingMenuExcel(false);
+    }
   };
 
   const handleMenuUpload = async (event) => {
@@ -467,7 +538,9 @@ const MenuManagement = () => {
         day: getHeaderIndex(headerRow, ['DAY', 'DAY NUMBER', 'DAY#']),
         mealName: getHeaderIndex(headerRow, ['MEAL NAME', 'MEAL', 'NAME', 'MEALNAME']),
         carb: getHeaderIndex(headerRow, ['CARB', 'CARBS']),
-        veg: getHeaderIndex(headerRow, ['VEG', 'VEGETABLE', 'VEGGIE'])
+        veg: getHeaderIndex(headerRow, ['VEG', 'VEGETABLE', 'VEGGIE']),
+        slot: getHeaderIndex(headerRow, ['SLOT']),
+        proteinType: getHeaderIndex(headerRow, ['PROTEIN TYPE', 'PROTEIN', 'PORTION TYPE'])
       };
 
       const useFallbackOrder =
@@ -491,6 +564,11 @@ const MenuManagement = () => {
         const mealName = useFallbackOrder ? values[3] : values[headerIndexes.mealName];
         const carb = useFallbackOrder ? values[4] : values[headerIndexes.carb];
         const veg = useFallbackOrder ? values[5] : values[headerIndexes.veg];
+        // Positional fallback is only safe for the original 6 columns; the new
+        // ones are read by header, or by position 6/7 in a headed file that
+        // doesn't name them.
+        const slot = headerIndexes.slot !== -1 ? values[headerIndexes.slot] : values[6];
+        const proteinType = headerIndexes.proteinType !== -1 ? values[headerIndexes.proteinType] : values[7];
 
         const dayNumber = Number.parseInt(String(dayValue || '').trim(), 10);
         if (!mealName || Number.isNaN(dayNumber) || dayNumber <= 0) {
@@ -508,14 +586,20 @@ const MenuManagement = () => {
           });
         }
 
+        const mealTypeNormalized = normalizeMealType(mealType);
+        // Slot (main/sub) and protein type (chicken/beef/fish) drive the main-meal
+        // rotation; snacks don't take part in it, so they're saved without them.
+        const isSnack = mealTypeNormalized === 'snack';
         dayMap.get(dateKey).items.push({
-          mealType: normalizeMealType(mealType),
+          mealType: mealTypeNormalized,
           mealName: String(mealName).trim(),
           ingredients: '',
           intolerances: String(intolerances || '').trim(),
           allergens: '',
           carbs: String(carb || '').trim(),
-          veg: String(veg || '').trim()
+          veg: String(veg || '').trim(),
+          rotationCategory: isSnack ? '' : normalizeSlot(slot),
+          portionType: isSnack ? '' : normalizeProteinType(proteinType)
         });
       });
 
@@ -537,12 +621,16 @@ const MenuManagement = () => {
     }
   };
 
+  // Re-initialise the empty week only when the dates change. Depending on
+  // weeklyItems.length here meant that uploading a file covering fewer days than
+  // the range (e.g. only day 1 of a 2-day range) changed the length and wiped the
+  // uploaded items straight after the upload.
   useEffect(() => {
     if (formData.startDate && formData.endDate) {
       if (editingMenuId && weeklyItems.length > 0) return;
       setWeeklyItems(initializeWeeklyItems(formData.startDate, formData.endDate));
     }
-  }, [formData.startDate, formData.endDate, editingMenuId, weeklyItems.length]);
+  }, [formData.startDate, formData.endDate, editingMenuId]);
 
   const closeCreateForm = () => {
     setShowCreateForm(false);
@@ -861,13 +949,16 @@ const MenuManagement = () => {
         pdf.text(formatMenuDayLabel(day.date), margin, currentY);
         currentY += 8;
 
-        if (!Array.isArray(day.items) || day.items.length === 0) {
+        // Snacks stay in the database for the kitchen list only — they are not
+        // part of the menu the customer/printed menu shows.
+        const menuFacingItems = (day.items || []).filter((item) => item.mealType !== 'snack');
+        if (menuFacingItems.length === 0) {
           pdf.setFontSize(10);
           pdf.setFont('helvetica', 'normal');
           pdf.text('No items listed for this day.', margin + 2, currentY);
           currentY += 8;
         } else {
-          day.items.forEach((item) => {
+          menuFacingItems.forEach((item) => {
             if (currentY > pageHeight - margin - 40) {
               pdf.addPage();
               currentY = margin;
@@ -2302,6 +2393,13 @@ const MenuManagement = () => {
                             className="w-full text-left px-3.5 py-2 text-sm text-matter-neutral-800 hover:bg-matter-neutral-100 disabled:opacity-50"
                           >
                             {isDownloadingMenuPDF ? 'Downloading…' : 'Download menu PDF'}
+                          </button>
+                          <button
+                            onClick={() => { handleDownloadMenuExcel(menu); setOpenActionsMenuId(null); }}
+                            disabled={isDownloadingMenuExcel}
+                            className="w-full text-left px-3.5 py-2 text-sm text-matter-neutral-800 hover:bg-matter-neutral-100 disabled:opacity-50"
+                          >
+                            {isDownloadingMenuExcel ? 'Downloading…' : 'Download menu Excel'}
                           </button>
                           <div className="my-1 border-t border-matter-neutral-200" />
                           <button

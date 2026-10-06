@@ -169,11 +169,18 @@ function buildRealModel(weeklyMenu, profile) {
   const weekendOk = !!profile?.weekend;
   const rows = Array.isArray(weeklyMenu?.meals) ? weeklyMenu.meals : [];
 
+  // The customer's own Matter delivery calendar decides which days they see
+  // (paused / skipped days are not in it). Only when Matter sent no calendar
+  // do we fall back to the weekend rule.
+  const matterDays = Array.isArray(profile?.deliveryDates) ? new Set(profile.deliveryDates) : null;
+
   const keySet = new Set();
   rows.forEach((row) => {
     const k = toDateKey(row?.date);
     if (!k) return;
-    if (!weekendOk) {
+    if (matterDays) {
+      if (!matterDays.has(k)) return;
+    } else if (!weekendOk) {
       const wd = dateFromKey(k).getDay();
       if (wd === 0 || wd === 6) return;
     }

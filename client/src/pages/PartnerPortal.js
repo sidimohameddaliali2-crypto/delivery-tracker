@@ -33,6 +33,12 @@ const fmtDay = (iso) =>
   new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
 const initials = (s = '') =>
   s.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || 'M';
+// Menu item name display: only the first letter capitalised, everything else lowercase
+const sentenceCase = (s = '') => {
+  const lower = String(s).trim().toLowerCase();
+  return lower ? lower.charAt(0).toUpperCase() + lower.slice(1) : '';
+};
+const MEAL_TYPE_LABEL = { main: 'Main', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats', snack: 'Snack' };
 const abbr = (s = '') => {
   const parts = s.trim().split(/\s+/).filter(Boolean);
   return ((parts[0]?.[0] || '') + (parts[1]?.[0] || parts[0]?.[1] || '')).toUpperCase() || '·';
@@ -51,11 +57,16 @@ const buildCalendar = (year, month) => {
   return cells;
 };
 
+// No deliveries on Sunday
+const isSunday = (iso) => new Date(iso + 'T00:00:00').getDay() === 0;
+
 // earliest orderable date — server locks anything inside a ~2-day advance window
 const firstOrderableISO = () => {
   const d = new Date();
   d.setDate(d.getDate() + 3);
-  return toISO(d);
+  let iso = toISO(d);
+  while (isSunday(iso)) { d.setDate(d.getDate() + 1); iso = toISO(d); }
+  return iso;
 };
 
 const STATUS = {
@@ -70,7 +81,7 @@ const statusOf = (s) => STATUS[s] || { label: s || '—', bg: '#12275e', color: 
 const orderTotal = (o) =>
   (o.lines || []).reduce((s, l) => s + (Number(l.unitPrice ?? l.menuItem?.price) || 0) * l.quantity, 0);
 const orderItemsLine = (o) =>
-  (o.lines || []).map((l) => `${l.quantity}× ${l.menuItem?.name || l.itemName || 'Item'}`).join(', ') || 'No items';
+  (o.lines || []).map((l) => `${l.quantity}× ${sentenceCase(l.menuItem?.name || l.itemName) || 'Item'}`).join(', ') || 'No items';
 
 const NAV_ICON = {
   order: 'M3 5h18v16H3zM3 10h18M8 3v4M16 3v4',
@@ -248,6 +259,7 @@ const PartnerPortal = () => {
   };
   const toggleDay = (iso) => {
     if (editing) return; // an existing order is edited on its own day
+    if (isSunday(iso)) return; // no deliveries on Sunday
     setOrderErr('');
     if (selMode === 'single') { setSelectedDates(new Set([iso])); return; }
     setSelectedDates((prev) => {
@@ -328,7 +340,7 @@ const PartnerPortal = () => {
       y += 18;
       doc.setFont('helvetica', 'normal');
       (inv.lines || []).forEach((l) => {
-        doc.text(String(l.itemName || 'Item'), 40, y);
+        doc.text(sentenceCase(l.itemName) || 'Item', 40, y);
         doc.text(String(l.quantity), 360, y, { align: 'right' });
         doc.text(fmtAED(l.unitPrice), 440, y, { align: 'right' });
         doc.text(fmtAED(l.lineRevenue), right, y, { align: 'right' });
@@ -456,7 +468,7 @@ const PartnerPortal = () => {
         {buildCalendar(calY, calM).map((d, i) => {
           if (!d) return <div key={i} style={{ height: cellH }} />;
           const iso = toISO(d);
-          const disabled = iso < minISO;
+          const disabled = iso < minISO || isSunday(iso);
           const isSel = selectedDates.has(iso);
           const isToday = iso === todayISO;
           const has = !!ordersByDate[iso];
@@ -528,7 +540,13 @@ const PartnerPortal = () => {
           {abbr(m.name)}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[13.5px] font-bold truncate">{m.name}</div>
+          <div className="text-[13.5px] font-bold truncate">{sentenceCase(m.name)}</div>
+          {m.mealType && (
+            <div className="inline-block mt-1 rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wide"
+              style={{ background: '#12275e', color: '#a8ccf5' }}>
+              {MEAL_TYPE_LABEL[m.mealType] || m.mealType}
+            </div>
+          )}
           {(m.description || m.category) && (
             <div className="text-[11px] text-[#a8ccf5] mt-0.5 line-clamp-2">{m.description || m.category}</div>
           )}

@@ -29,20 +29,28 @@ const fmtLong = (iso) => {
 };
 const initials = (s = '') =>
   s.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || 'M';
+// Menu item name display: only the first letter capitalised, everything else lowercase
+const sentenceCase = (s = '') => {
+  const lower = String(s).trim().toLowerCase();
+  return lower ? lower.charAt(0).toUpperCase() + lower.slice(1) : '';
+};
 
 const DELIVERY_WINDOW = 'Morning · 5–6am';
+// No deliveries on Sunday — firstOrderableISO/weekTabs below skip it
 const firstOrderableISO = () => {
   const d = new Date();
   d.setDate(d.getDate() + 3);
+  while (d.getDay() === 0) d.setDate(d.getDate() + 1);
   return toISO(d);
 };
 const weekTabs = () => {
-  const first = new Date(firstOrderableISO() + 'T00:00:00');
-  return Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(first);
-    d.setDate(d.getDate() + i);
-    return toISO(d);
-  });
+  const d = new Date(firstOrderableISO() + 'T00:00:00');
+  const out = [];
+  while (out.length < 7) {
+    if (d.getDay() !== 0) out.push(toISO(d));
+    d.setDate(d.getDate() + 1);
+  }
+  return out;
 };
 
 const COURSE_ORDER = ['main', 'bowl', 'wraps-buns', 'oats', 'snack'];
@@ -66,7 +74,7 @@ const statusOf = (s) => STATUS[s] || { label: s || '—', bg: '#eef2f9', color: 
 const orderTotal = (o) =>
   (o.lines || []).reduce((s, l) => s + (Number(l.unitPrice ?? l.menuItem?.price) || 0) * l.quantity, 0);
 const orderItemsLine = (o) =>
-  (o.lines || []).map((l) => `${l.quantity}× ${l.menuItem?.name || l.itemName || 'Item'}`).join(', ') || 'No items';
+  (o.lines || []).map((l) => `${l.quantity}× ${sentenceCase(l.menuItem?.name || l.itemName) || 'Item'}`).join(', ') || 'No items';
 
 // ════════════════════════════════════════════════════════════════════════════
 const MemberPortal = () => {
@@ -454,7 +462,7 @@ const MemberPortal = () => {
                             </div>
                             <div className="px-4 py-3.5">
                               <div className="flex items-baseline justify-between gap-2.5 mb-1.5">
-                                <div className="text-[15.5px] font-semibold leading-tight">{m.name}</div>
+                                <div className="text-[15.5px] font-semibold leading-tight">{sentenceCase(m.name)}</div>
                                 <div className="flex-none text-[14.5px] font-semibold" style={{ color: '#1b60b4' }}>
                                   {m.price != null ? `AED ${fmtAED(m.price)}` : 'TBD'}
                                 </div>
@@ -553,7 +561,7 @@ const MemberPortal = () => {
               <div className={`${card} p-[18px]`}>
                 {done.lines.map((l) => (
                   <div key={l._id} className="flex items-baseline justify-between gap-3 py-2 border-b border-[#eef2f9] text-[13.5px]">
-                    <span>{l.name} × {l.qty}</span>
+                    <span>{sentenceCase(l.name)} × {l.qty}</span>
                     <span className="text-[#6b7a9b]">AED {fmtAED(l.line)}</span>
                   </div>
                 ))}

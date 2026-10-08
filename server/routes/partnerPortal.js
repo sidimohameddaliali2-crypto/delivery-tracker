@@ -240,6 +240,9 @@ router.post('/orders', async (req, res) => {
     if (!Array.isArray(lines)) return res.status(400).json({ success: false, message: 'lines must be an array' });
 
     const spaceId = req.partner._id;
+    if (new Date(deliveryDate).getUTCDay() === 0) {
+      return res.status(400).json({ success: false, message: 'There is no delivery on Sunday — pick another date.' });
+    }
     if (isInLockWindow(deliveryDate)) {
       return res.status(400).json({ success: false, message: 'This delivery date is within the 2-day advance lock window and cannot be ordered for.' });
     }

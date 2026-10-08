@@ -181,6 +181,7 @@ import xeroRoutes from './routes/xero.js';
 import vehicleRoutes from './routes/vehicles.js';
 import yellowblockRoutes from './routes/yellowblock.js';
 import externalDeliveryApiRoutes from './routes/externalDeliveryApi.js';
+import externalDriverLocationApiRoutes from './routes/externalDriverLocationApi.js';
 
 // Import cache initialization
 import { initRedis, getRedisClient } from './config/cache.js';
@@ -223,6 +224,9 @@ app.use('/api/yellowblock', yellowblockRoutes);
 // API key (DELIVERY_API_KEYS), not the app's own JWT login. See
 // middleware/apiKeyAuth.js and docs/EXTERNAL_DELIVERY_API.md.
 app.use('/api/external/deliveries', externalDeliveryApiRoutes);
+// Same static API key, for live driver/vehicle GPS instead of delivery
+// records — see docs/EXTERNAL_DELIVERY_API.md.
+app.use('/api/external/drivers', externalDriverLocationApiRoutes);
 
 
 // Health check endpoint (supports both GET and HEAD methods)

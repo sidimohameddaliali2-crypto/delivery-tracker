@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { createRoot } from 'react-dom/client';
 import { useDispatch, useSelector } from 'react-redux';
 import { motion } from 'framer-motion';
 import { useNavigate, useLocation } from 'react-router-dom';
@@ -8,6 +9,89 @@ import api from '../utils/api';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
+import { QRCodeCanvas } from 'qrcode.react';
+
+// Batch QR label sheet (owner, 2026-10-07) — mirrors the "QR Setting.pdf"
+// reference layout: a 9-column grid of cut-apart cells, each holding one
+// bag's code + QR, filled left-to-right then top-to-bottom. The QR payload
+// is the plain bagId string, same convention as the search bar above (a
+// handheld scanner just types the decoded text in, no URL/JSON wrapper).
+const QR_PDF_COLUMNS = 9;
+const QR_PDF_ROW_HEIGHT_MM = 24;
+const QR_PDF_MARGIN_MM = 10;
+const QR_PDF_PAGE_W_MM = 210; // A4
+const QR_PDF_PAGE_H_MM = 297;
+
+// Renders one QRCodeCanvas per id into a detached, off-screen container so
+// each canvas's pixel data (toDataURL) can be read for jsPDF's addImage —
+// jsPDF can't embed a live React component, only an image data URL.
+async function renderQrDataUrls(ids, pxSize = 240) {
+  const container = document.createElement('div');
+  container.style.position = 'fixed';
+  container.style.left = '-99999px';
+  container.style.top = '0';
+  document.body.appendChild(container);
+  const root = createRoot(container);
+
+  await new Promise((resolve) => {
+    root.render(
+      <>
+        {ids.map((id) => (
+          <div key={id} data-bagid={id}>
+            <QRCodeCanvas value={id} size={pxSize} includeMargin={false} level="M" />
+          </div>
+        ))}
+      </>
+    );
+    // Two frames: one to commit the render, one to be sure each canvas has painted.
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+
+  const dataUrlById = new Map();
+  ids.forEach((id) => {
+    const wrapper = container.querySelector(`[data-bagid="${CSS.escape(id)}"]`);
+    const canvas = wrapper?.querySelector('canvas');
+    if (canvas) dataUrlById.set(id, canvas.toDataURL('image/png'));
+  });
+
+  root.unmount();
+  document.body.removeChild(container);
+  return dataUrlById;
+}
+
+async function downloadBulkQrPdf(bagIds) {
+  if (bagIds.length === 0) return;
+  const dataUrlById = await renderQrDataUrls(bagIds);
+
+  const colW = (QR_PDF_PAGE_W_MM - QR_PDF_MARGIN_MM * 2) / QR_PDF_COLUMNS;
+  const rowsPerPage = Math.floor((QR_PDF_PAGE_H_MM - QR_PDF_MARGIN_MM * 2) / QR_PDF_ROW_HEIGHT_MM);
+  const perPage = QR_PDF_COLUMNS * rowsPerPage;
+  const qrSize = Math.min(colW, QR_PDF_ROW_HEIGHT_MM) - 6;
+
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  bagIds.forEach((id, i) => {
+    const onPage = i % perPage;
+    if (i > 0 && onPage === 0) doc.addPage();
+    const col = onPage % QR_PDF_COLUMNS;
+    const row = Math.floor(onPage / QR_PDF_COLUMNS);
+    const x = QR_PDF_MARGIN_MM + col * colW;
+    const y = QR_PDF_MARGIN_MM + row * QR_PDF_ROW_HEIGHT_MM;
+
+    doc.setDrawColor(180);
+    doc.rect(x, y, colW, QR_PDF_ROW_HEIGHT_MM); // cut guide
+
+    doc.setFontSize(7);
+    doc.setFont('courier', 'bold');
+    doc.text(id, x + 1.5, y + 4);
+
+    const dataUrl = dataUrlById.get(id);
+    if (dataUrl) {
+      doc.addImage(dataUrl, 'PNG', x + 1.5, y + 5.5, qrSize, qrSize);
+    }
+  });
+
+  doc.save(`bag-qr-codes-${bagIds[0]}-to-${bagIds[bagIds.length - 1]}.pdf`);
+}
 
 const FLAGGED_BAG_THRESHOLD = 3;
 
@@ -653,12 +737,38 @@ const FlaggedCustomerCard = ({ customer, onOpenDetails, onDismiss }) => (
 const AddBagModal = ({ onClose, onCreateSingle, onCreateBulk }) => {
   const [mode, setMode] = useState('single');
   const [saving, setSaving] = useState(false);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
   const [error, setError] = useState('');
 
   const [singleForm, setSingleForm] = useState({ bagId: '', condition: 'good', location: 'warehouse', bagType: 'standard', notes: '' });
   const [bulkForm, setBulkForm] = useState({ prefix: 'BAG-', startNumber: 1, endNumber: 10, padLength: 5, condition: 'good', location: 'warehouse', bagType: 'standard' });
 
   const totalBulkBags = Math.max(0, bulkForm.endNumber - bulkForm.startNumber + 1);
+
+  const buildBulkBagIds = () => {
+    const { prefix, startNumber, endNumber, padLength } = bulkForm;
+    const ids = [];
+    for (let i = startNumber; i <= endNumber; i++) {
+      ids.push(`${prefix}${i.toString().padStart(padLength, '0')}`);
+    }
+    return ids;
+  };
+
+  const handleDownloadQrPdf = async () => {
+    setError('');
+    if (totalBulkBags > 5000) {
+      setError('Please generate 5000 or fewer bags at a time.');
+      return;
+    }
+    setGeneratingPdf(true);
+    try {
+      await downloadBulkQrPdf(buildBulkBagIds());
+    } catch (err) {
+      setError(err?.message || 'Failed to generate QR PDF');
+    } finally {
+      setGeneratingPdf(false);
+    }
+  };
 
   const handleSingleSubmit = async (e) => {
     e.preventDefault();
@@ -893,6 +1003,14 @@ const AddBagModal = ({ onClose, onCreateSingle, onCreateBulk }) => {
             </div>
             <div className="flex justify-end gap-3 pt-2">
               <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+              <button
+                type="button"
+                onClick={handleDownloadQrPdf}
+                disabled={generatingPdf || totalBulkBags === 0}
+                className="px-4 py-2 text-sm font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 disabled:opacity-50"
+              >
+                {generatingPdf ? 'Generating…' : 'Download QR PDF'}
+              </button>
               <button type="submit" disabled={saving} className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:opacity-90 disabled:opacity-50">
                 {saving ? 'Creating…' : `Create ${totalBulkBags} Bags`}
               </button>

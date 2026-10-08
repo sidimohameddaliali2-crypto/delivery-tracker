@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
 import api from '../utils/api';
-import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
+import { calculateKitchenListEntry, breakfastNameHasMacros, snackNameHasMacros } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
 import {
   emptyBreakfast,
@@ -204,6 +204,28 @@ const hasDeliveryOnCheckedDate = (entry, deliveryCheck) => {
   const email = String(entry?.email || '').trim().toLowerCase();
   return !!email && deliveryCheck.emails.has(email);
 };
+
+// Meal-card "Change ..." options. A meal's remark is one string ("carb" or
+// "carb + sauce"); free text from Upload Meal Remarks that isn't one of
+// these is kept untouched as an extra when the boxes are toggled.
+const REMARK_CHANGE_OPTIONS = [
+  { key: 'carb', label: 'Carb' },
+  { key: 'veg', label: 'Veg' },
+  { key: 'garnish', label: 'Garnish' },
+  { key: 'sauce', label: 'Sauce' }
+];
+const parseRemarkParts = (remark) => {
+  const parts = String(remark || '').split(/\s*(?:\+|,|&|\/|\band\b)\s*/i).map((p) => p.trim()).filter(Boolean);
+  const known = new Set(REMARK_CHANGE_OPTIONS.map((o) => o.key));
+  return {
+    checked: parts.filter((p) => known.has(p.toLowerCase())).map((p) => p.toLowerCase()),
+    extras: parts.filter((p) => !known.has(p.toLowerCase()))
+  };
+};
+const buildRemarkFromParts = (checked, extras) => [
+  ...REMARK_CHANGE_OPTIONS.filter((o) => checked.includes(o.key)).map((o) => o.key),
+  ...extras
+].join(' + ');
 
 // Remark column text for the kitchen paper PDF/Excel.
 const mealRemarkText = (meal) => [
@@ -599,7 +621,56 @@ const KitchenList = () => {
   // "breakfast" rows. Breakfast presets are global (keyed by name), not
   // per-date, unlike main/sub meals and snacks. Tries the dedicated endpoint
   // first, then falls back to older per-menu routes for backward compatibility.
-  const persistBreakfastPresets = async (parsedRows, firstRow, presetsByName) => {
+  const persistBreakfastPresets = async (incomingRows, incomingFirstRow, incomingPresetsByName) => {
+    // The save endpoint REPLACES the whole shared table with whatever it is
+    // sent, and a weekly menu file only lists that week's breakfasts — so
+    // sending just those used to wipe every other saved breakfast (128 presets
+    // collapsed to a few zero-macro rows after one upload). Merge into what is
+    // already saved instead:
+    //  - a row with macros adds or updates its dish;
+    //  - a row with no macros never overwrites values already saved (menu files
+    //    often list a dish without its macros), but a name not saved yet is
+    //    still added so it shows up flagged "No macros";
+    //  - the saved default preset is kept.
+    let parsedRows = incomingRows;
+    let firstRow = incomingFirstRow;
+    let presetsByName = incomingPresetsByName;
+    try {
+      const current = await api.get('/menus/kitchen-breakfast-presets');
+      const savedByName = current.data?.data?.presetsByName || {};
+      const savedDefault = current.data?.data?.breakfastPreset;
+      const mergedByName = { ...savedByName };
+      incomingRows.forEach((row) => {
+        const key = normalizeBreakfastKey(row.breakfastName);
+        if (!key) return;
+        const hasMacros = (Number(row.C) || 0) + (Number(row.P) || 0) + (Number(row.F) || 0) > 0;
+        if (!mergedByName[key] || hasMacros) {
+          mergedByName[key] = {
+            breakfastName: row.breakfastName,
+            C: Number(row.C) || 0,
+            P: Number(row.P) || 0,
+            F: Number(row.F) || 0,
+            V: Number(row.V) || 80,
+            isLargeBreakfast: !!row.isLargeBreakfast
+          };
+        }
+      });
+      parsedRows = Object.entries(mergedByName).map(([key, p]) => ({
+        breakfastName: p.breakfastName || key,
+        C: Number(p.C) || 0,
+        P: Number(p.P) || 0,
+        F: Number(p.F) || 0,
+        V: Number(p.V) || 80,
+        isLargeBreakfast: !!p.isLargeBreakfast
+      }));
+      presetsByName = mergedByName;
+      if (savedDefault?.breakfastName) firstRow = savedDefault;
+    } catch (mergeError) {
+      // Older servers without the GET route keep the old behaviour; any other
+      // failure stops here rather than risk overwriting the saved table blind.
+      if (!isRouteNotFound(mergeError)) throw mergeError;
+    }
+
     let savedPreset = firstRow;
     let savedPresetsByName = presetsByName;
 
@@ -950,6 +1021,121 @@ const KitchenList = () => {
     saveSnackPresets(updated);
   };
 
+  // Breakfast / snack options for the checked date whose name has no macros in
+  // the saved presets (missing, or saved as all zeros). Auto-Assign is blocked
+  // until each one has values — otherwise customers are given a meal that
+  // shows 0/0/0 and takes the wrong amount off their day.
+  const [macroDrafts, setMacroDrafts] = useState({});
+  const [savingMacroKey, setSavingMacroKey] = useState('');
+  const breakfastsMissingMacros = useMemo(() => {
+    const names = (breakfastOptionsByDate[missingCheckDate] || [])
+      .map((option) => String(option?.name || '').trim())
+      .filter(Boolean);
+    return Array.from(new Set(names)).filter((name) => !breakfastNameHasMacros(name, breakfastPreset));
+  }, [breakfastOptionsByDate, missingCheckDate, breakfastPreset]);
+  const snacksMissingMacros = useMemo(() => {
+    const pools = snackOptionsByDate[missingCheckDate] || {};
+    const names = [...(pools.first || []), ...(pools.second || [])]
+      .map((option) => String(option?.name || '').trim())
+      .filter(Boolean);
+    return Array.from(new Set(names)).filter((name) => !snackNameHasMacros(name, snackPreset));
+  }, [snackOptionsByDate, missingCheckDate, snackPreset]);
+  const autoAssignBlockedByMacros = breakfastsMissingMacros.length + snacksMissingMacros.length > 0;
+
+  const setMacroDraft = (kind, name, field, value) => {
+    const key = `${kind}:${name}`;
+    setMacroDrafts((drafts) => ({ ...drafts, [key]: { ...(drafts[key] || {}), [field]: value } }));
+  };
+
+  const saveMissingMacros = async (kind, name) => {
+    const key = `${kind}:${name}`;
+    const draft = macroDrafts[key] || {};
+    const C = Number(draft.C) || 0;
+    const P = Number(draft.P) || 0;
+    const F = Number(draft.F) || 0;
+    if (C + P + F <= 0) {
+      setError(`Enter at least one value (C / P / F) for "${name}".`);
+      return;
+    }
+    setError('');
+    setSavingMacroKey(key);
+    try {
+      const mapKey = normalizeBreakfastKey(name);
+      if (kind === 'snack') {
+        await saveSnackPresets({ ...snackPreset.presetsByName, [mapKey]: { snackName: name, C, P, F } });
+      } else {
+        const next = {
+          ...(breakfastPreset?.presetsByName || {}),
+          [mapKey]: { breakfastName: name, C, P, F, V: 80, isLargeBreakfast: false }
+        };
+        // The save endpoint replaces the whole table, so send every existing
+        // entry along with the new one.
+        const rows = Object.values(next).map((p) => ({
+          breakfastName: p.breakfastName,
+          C: p.C,
+          P: p.P,
+          F: p.F,
+          V: p.V ?? 80,
+          isLargeBreakfast: !!p.isLargeBreakfast
+        }));
+        const defaultRow = {
+          breakfastName: breakfastPreset?.breakfastName || rows[0].breakfastName,
+          C: Number(breakfastPreset?.C) || 0,
+          P: Number(breakfastPreset?.P) || 0,
+          F: Number(breakfastPreset?.F) || 0,
+          V: Number(breakfastPreset?.V) || 80,
+          isLargeBreakfast: !!breakfastPreset?.isLargeBreakfast
+        };
+        await persistBreakfastPresets(rows, defaultRow, next);
+      }
+      setMacroDrafts((drafts) => {
+        const rest = { ...drafts };
+        delete rest[key];
+        return rest;
+      });
+    } catch (err) {
+      setError(err.response?.data?.message || `Failed to save macros for "${name}"`);
+    } finally {
+      setSavingMacroKey('');
+    }
+  };
+
+  // Inline "no macros yet" box shown under a flagged breakfast / snack option.
+  const renderMissingMacrosForm = (kind, name) => {
+    const key = `${kind}:${name}`;
+    const draft = macroDrafts[key] || {};
+    const saving = savingMacroKey === key;
+    return (
+      <div className="mt-2 rounded-lg bg-amber-50 p-2 ring-1 ring-amber-300">
+        <p className="flex items-center gap-1 text-[11px] font-semibold text-amber-800">
+          <AlertTriangle size={12} /> No macros saved for this {kind} — Auto-Assign is blocked until you add them
+        </p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          {['C', 'P', 'F'].map((field) => (
+            <input
+              key={field}
+              type="number"
+              min="0"
+              value={draft[field] ?? ''}
+              onChange={(e) => setMacroDraft(kind, name, field, e.target.value)}
+              placeholder={field}
+              disabled={saving}
+              className="w-16 rounded-lg border border-amber-300 bg-white px-2 py-1 text-xs focus:border-slate-900 focus:outline-none"
+            />
+          ))}
+          <button
+            type="button"
+            onClick={() => saveMissingMacros(kind, name)}
+            disabled={saving}
+            className="rounded-lg bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   // One action instead of two: for every customer missing a selection on the
   // checked date, fills their main meals (plus breakfast, if their profile
   // has breakfastInclude on) via assign-main-meals, then fills their full
@@ -962,6 +1148,10 @@ const KitchenList = () => {
     if (!selectedMenuId || !missingCheckDate) return;
     if (deliveryCheck?.dateKey !== missingCheckDate) {
       setError('Run "Check Missing Selections" for this date first.');
+      return;
+    }
+    if (autoAssignBlockedByMacros) {
+      setError('Add macros for the flagged breakfast / snack options first — Auto-Assign is blocked until then.');
       return;
     }
     setAssigningAll(true);
@@ -1263,6 +1453,44 @@ const KitchenList = () => {
     }
   }, [selectedMenuId]);
 
+  // Meal-card "Change" checkboxes (carb / veg / garnish / sauce). Saves the
+  // combined remark string through the same endpoint as Upload Meal Remarks,
+  // so the kitchen paper's Remark column picks it up automatically.
+  const saveMealRemark = useCallback(async ({ entry, meal, remark }) => {
+    const email = entry?.email;
+    if (!email || !selectedMenuId || !meal?.date || !meal?.mealName) return;
+    const key = meal?._overrideKey || buildMealOverrideKey(entry, meal, 0);
+    const nextRemark = String(remark || '').trim();
+    setSavingOverrideKey(`remark:${key}`);
+    try {
+      await api.patch(
+        `/menus/${selectedMenuId}/selections/${encodeURIComponent(email)}/meal-remarks`,
+        { entries: [{ date: getDateKey(meal.date), mealName: meal.mealName, slotNumber: meal.slotNumber, remark: nextRemark }] }
+      );
+      const sameEmail = (row) => String(row?.email || '').trim().toLowerCase() === String(email).trim().toLowerCase();
+      setMenuSelections((prev) => prev.map((row) => {
+        if (!sameEmail(row)) return row;
+        let applied = false;
+        return {
+          ...row,
+          selectedMeals: (row.selectedMeals || []).map((m) => {
+            const match = !applied
+              && getDateKey(m.date) === getDateKey(meal.date)
+              && String(m.mealName || '').trim().toLowerCase() === String(meal.mealName || '').trim().toLowerCase()
+              && (meal.slotNumber === undefined || meal.slotNumber === null || m.slotNumber === meal.slotNumber);
+            if (!match) return m;
+            applied = true;
+            return { ...m, remark: nextRemark };
+          })
+        };
+      }));
+    } catch (saveError) {
+      setError(saveError.response?.data?.message || 'Failed to save meal remark');
+    } finally {
+      setSavingOverrideKey('');
+    }
+  }, [selectedMenuId]);
+
   const downloadMealRemarksTemplate = async () => {
     const XLSX = await loadXLSX();
     const sampleDate = menuDateKeys[0] || getDateKey(new Date());
@@ -1546,6 +1774,13 @@ const KitchenList = () => {
         'Customer ID': entry.customerId || '',
         Name: entry.customerName || entry.email || 'Unknown',
         CPF: entry.cpf || '',
+        'Meal Plan': entry.planName || '',
+        // The customer's daily plan total (what their meals are split from),
+        // repeated on each of their rows. Matter Core's "macros" are daily food
+        // weights rather than macro grams, so those rows show the weights.
+        'Total C': Math.round(Number(entry.macros?.C) || 0),
+        'Total P': Math.round(Number(entry.macros?.P) || 0),
+        'Total F': Math.round(Number(entry.macros?.F) || 0),
         Date: formatDateLabel(meal?.date),
         'Meal Name': meal.mealName || meal.menuItemName || 'Unnamed meal',
         C: Math.round(Number(meal.macros?.C) || 0),
@@ -1604,6 +1839,128 @@ const KitchenList = () => {
   // async: yields to the browser between each delivery-window group so a
   // large PDF builds without freezing the tab, and the button reflects
   // "Generating..." the whole time instead of the page just looking stuck.
+  // Word version of the Day PDF — same sections (emirate → delivery window,
+  // then Partners), same per-customer block (name + time tag, address/partner,
+  // plan line, day note, meal table, total macros). Built as Word-flavoured
+  // HTML saved as .doc, which Word opens natively and keeps the page breaks
+  // per section — no extra dependency needed.
+  const downloadDayKitchenPaperWord = (dateKey) => {
+    if (!dateKey) return;
+    const dayLabel = formatDateLabel(dateKey);
+    const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const orDash = (v) => (v === null || v === undefined || v === '' ? 'N/A' : v);
+    const nameOf = (row) => row.entry.customerName || row.entry.email || '';
+
+    const entriesWithMeals = customerRows
+      .filter((entry) => !paperPlan || entry.planName === paperPlan)
+      .map((entry) => ({
+        entry,
+        dayMeals: (entry.selectedMeals || []).filter((meal) => getDateKey(meal?.date) === dateKey)
+      }))
+      .filter((row) => row.dayMeals.length > 0);
+    const partnerEntries = entriesWithMeals.filter((row) => !!row.entry.partner);
+    const regularEntries = entriesWithMeals.filter((row) => !row.entry.partner);
+
+    const customerBlock = ({ entry, dayMeals }, subLine) => {
+      const windowHour = parseDeliveryHour(entry.deliveryWindow?.label);
+      const hasWindow = windowHour !== 999;
+      const windowHourLabel = formatDeliveryHourLabel(windowHour);
+      const tagText = !hasWindow
+        ? 'No delivery window'
+        : (/^\s*by\b/i.test(String(entry.deliveryWindow?.label || '')) ? `By ${windowHourLabel}` : windowHourLabel);
+      const breakfastLabel = entry.breakfastIncluded === null || entry.breakfastIncluded === undefined
+        ? 'N/A'
+        : (entry.breakfastIncluded ? 'Yes' : 'No');
+      const dayNote = (entry.dayNotes || []).find((n) => n.date === dateKey)?.note;
+      const rows = dayMeals.map((meal) => {
+        const label = getMealLabel(meal);
+        const remark = mealRemarkText(meal);
+        return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}</td>`
+          + `<td style="color:#c2410c;font-weight:bold">${esc(remark)}</td>`
+          + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
+      }).join('');
+      return `
+        <div style="margin-top:14pt">
+          <p style="margin:0;font-size:12pt"><b>${esc(nameOf({ entry }) || 'Unknown customer')}</b>
+            &nbsp;&nbsp;<span style="background:${hasWindow ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:9pt;font-weight:bold">&nbsp;${esc(tagText)}&nbsp;</span></p>
+          <p style="margin:0;font-size:9pt">${esc(subLine)}</p>
+          ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:9pt;color:#be123c"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
+          <p style="margin:0;font-size:9pt"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
+          ${dayNote ? `<p style="margin:0;font-size:9pt;color:#b45309"><b>Note: ${esc(dayNote)}</b></p>` : ''}
+          <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-size:9pt;margin-top:4pt">
+            <tr style="background:#1e293b;color:#ffffff"><th>Type</th><th>Meal</th><th>Remark</th><th>P</th><th>C</th><th>V</th></tr>
+            ${rows}
+          </table>
+          <p style="margin:4pt 0 0 0;font-size:10pt"><b>Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}</b></p>
+        </div>`;
+    };
+
+    const sections = [];
+    const addSection = (kicker, heading, rows, subLineFor) => {
+      sections.push(`
+        <div style="${sections.length > 0 ? 'page-break-before:always' : ''}">
+          <p style="margin:0;font-size:10pt;color:#787878">${esc(kicker)}</p>
+          <h2 style="margin:4pt 0 0 0;font-size:13pt;background:#f1f5f9;padding:3pt">${esc(heading)}</h2>
+          ${rows.map((row) => customerBlock(row, subLineFor(row))).join('')}
+        </div>`);
+    };
+
+    const emirateGroups = new Map();
+    regularEntries.forEach((row) => {
+      const emirate = canonicalizeEmirate(row.entry.deliveryAddress?.emirate);
+      if (!emirateGroups.has(emirate)) emirateGroups.set(emirate, []);
+      emirateGroups.get(emirate).push(row);
+    });
+    Array.from(emirateGroups.keys()).sort((a, b) => a.localeCompare(b)).forEach((emirate) => {
+      const windowGroups = new Map();
+      emirateGroups.get(emirate).forEach((row) => {
+        const hourKey = parseDeliveryHour(row.entry.deliveryWindow?.label);
+        if (!windowGroups.has(hourKey)) windowGroups.set(hourKey, []);
+        windowGroups.get(hourKey).push(row);
+      });
+      Array.from(windowGroups.entries()).sort((a, b) => a[0] - b[0]).forEach(([hourKey, rows]) => {
+        rows.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+        addSection(`${dayLabel} — ${emirate}`, formatDeliveryHourLabel(hourKey), rows,
+          (row) => `Address: ${formatAddress(row.entry.deliveryAddress)}`);
+      });
+    });
+
+    const partnerGroups = new Map();
+    partnerEntries.forEach((row) => {
+      const name = row.entry.partner?.businessName || 'Partner';
+      if (!partnerGroups.has(name)) partnerGroups.set(name, []);
+      partnerGroups.get(name).push(row);
+    });
+    Array.from(partnerGroups.keys()).sort((a, b) => a.localeCompare(b)).forEach((partnerName) => {
+      const rows = partnerGroups.get(partnerName);
+      rows.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+      addSection(`${dayLabel} — Partners`, partnerName, rows, () => `Partner: ${partnerName}`);
+    });
+
+    const body = sections.length > 0
+      ? sections.join('')
+      : '<p>No customers have meals selected for this date.</p>';
+    const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><title>Kitchen Prep Sheet</title>
+<!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View></w:WordDocument></xml><![endif]-->
+<style>body{font-family:Arial,sans-serif} th,td{text-align:left}</style></head>
+<body>
+<h1 style="font-size:16pt;margin:0">Kitchen Prep Sheet — ${esc(dayLabel)}</h1>
+<p style="font-size:9pt;color:#787878;margin:0">Generated: ${esc(new Date().toLocaleString())}</p>
+${body}
+</body></html>`;
+
+    const blob = new Blob(['﻿', html], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `kitchen-paper-${dateKey}${planFileSuffix}.doc`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   const downloadDayKitchenPaper = async (dateKey) => {
     if (!dateKey || generatingPdf) return;
     setGeneratingPdf(true);
@@ -1652,9 +2009,37 @@ const KitchenList = () => {
           y = 20;
         }
 
-        doc.setFontSize(12);
+        // Delivery-time tag, right-aligned on the name line, on EVERY customer
+        // (the section headings group by time, but a printed page often gets
+        // split up and handed around — the tag keeps each customer's time on
+        // their own block). Same parsed hour as the section heading, with the
+        // "By" kept when Matter's window says "By 6 AM".
+        const windowHour = parseDeliveryHour(entry.deliveryWindow?.label);
+        const windowHourLabel = formatDeliveryHourLabel(windowHour);
+        const hasWindow = windowHour !== 999;
+        const tagText = !hasWindow
+          ? 'No delivery window'
+          : (/^\s*by\b/i.test(String(entry.deliveryWindow?.label || '')) ? `By ${windowHourLabel}` : windowHourLabel);
+        doc.setFontSize(9);
         doc.setFont(undefined, 'bold');
-        doc.text(entry.customerName || entry.email || 'Unknown customer', 14, y);
+        const tagWidth = doc.getTextWidth(tagText) + 6;
+        const tagX = pageWidth - 14 - tagWidth;
+
+        doc.setFontSize(12);
+        // Keep a long name from running underneath the tag.
+        const nameLine = doc.splitTextToSize(
+          entry.customerName || entry.email || 'Unknown customer',
+          tagX - 14 - 3
+        )[0];
+        doc.text(nameLine, 14, y);
+
+        doc.setFontSize(9);
+        if (hasWindow) doc.setFillColor(30, 41, 59);
+        else doc.setFillColor(148, 163, 184);
+        doc.roundedRect(tagX, y - 5, tagWidth, 7, 1.5, 1.5, 'F');
+        doc.setTextColor(255);
+        doc.text(tagText, tagX + 3, y - 0.3);
+        doc.setTextColor(0);
         doc.setFont(undefined, 'normal');
         y += 6;
 
@@ -1933,6 +2318,15 @@ const KitchenList = () => {
               </button>
               <button
                 type="button"
+                onClick={() => downloadDayKitchenPaperWord(pdfDate)}
+                disabled={!pdfDate}
+                title="Word version of the Day PDF — same sections, order and per-customer tables"
+                className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
+              >
+                <FileText size={16} /> Download Day Word
+              </button>
+              <button
+                type="button"
                 onClick={() => exportDayKitchenPaperToExcel(pdfDate)}
                 disabled={!pdfDate}
                 title="Excel version of the Day PDF — one row per meal (emirate, delivery window, customer, plan, P/C/V weights, remark, day note), in the same order as the PDF"
@@ -1944,7 +2338,7 @@ const KitchenList = () => {
                 type="button"
                 onClick={() => exportCustomerMacrosToExcel(pdfDate)}
                 disabled={!pdfDate}
-                title="Export customer ID, name, CPF, meal name, and that meal's C/P/F/calories — one row per meal, in the same customer/meal order as the Day PDF above"
+                title="Export customer ID, name, CPF, meal plan, the customer's total daily C/P/F, meal name, and that meal's C/P/F/calories — one row per meal, in the same customer/meal order as the Day PDF above"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
                 <Download size={16} /> Export Customer List (Excel)
@@ -2197,6 +2591,9 @@ const KitchenList = () => {
                       <div key={`breakfast-${item.name}-${index}`} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
                         <div className="min-w-0">
                           <span className="font-medium text-slate-800">{item.name}</span>
+                          {breakfastsMissingMacros.includes(String(item.name || '').trim()) && (
+                            <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-semibold">No macros</span>
+                          )}
                           {item.exclusions?.length > 0 && (
                             <div className="mt-1 flex flex-wrap gap-1">
                               {item.exclusions.map((ex) => (
@@ -2204,6 +2601,7 @@ const KitchenList = () => {
                               ))}
                             </div>
                           )}
+                          {breakfastsMissingMacros.includes(String(item.name || '').trim()) && renderMissingMacrosForm('breakfast', String(item.name || '').trim())}
                         </div>
                         <button type="button" onClick={() => removeBreakfastOption(index)} className="text-red-500 hover:text-red-700 flex-shrink-0 ml-2">
                           <Trash2 size={14} />
@@ -2281,6 +2679,9 @@ const KitchenList = () => {
                           <div key={`${pool}-${opt.name}-${index}`} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
                             <div className="min-w-0">
                               <span className="font-medium text-slate-800">{opt.name}</span>
+                              {snacksMissingMacros.includes(String(opt.name || '').trim()) && (
+                                <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-semibold">No macros</span>
+                              )}
                               {opt.exclusions?.length > 0 && (
                                 <div className="mt-1 flex flex-wrap gap-1">
                                   {opt.exclusions.map((ex) => (
@@ -2288,6 +2689,7 @@ const KitchenList = () => {
                                   ))}
                                 </div>
                               )}
+                              {snacksMissingMacros.includes(String(opt.name || '').trim()) && renderMissingMacrosForm('snack', String(opt.name || '').trim())}
                             </div>
                             <div className="flex items-center gap-3 text-xs text-slate-500 flex-shrink-0">
                               <span>C {opt.C}</span>
@@ -2392,12 +2794,21 @@ const KitchenList = () => {
               <button
                 type="button"
                 onClick={runAutoAssign}
-                disabled={assigningAll || deliveryCheck?.dateKey !== missingCheckDate}
+                disabled={assigningAll || deliveryCheck?.dateKey !== missingCheckDate || autoAssignBlockedByMacros}
                 className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 disabled:opacity-50"
               >
                 <Shuffle size={14} className={assigningAll ? 'animate-spin' : ''} />
                 {assigningAll ? 'Assigning...' : 'Auto-Assign'}
               </button>
+              {autoAssignBlockedByMacros && (
+                <div className="mt-2 rounded-lg bg-amber-50 p-2 text-[11px] text-amber-900 ring-1 ring-amber-300">
+                  <p className="flex items-center gap-1 font-semibold"><AlertTriangle size={12} /> Auto-Assign is blocked — these have no macros yet:</p>
+                  <p className="mt-1">
+                    {[...breakfastsMissingMacros.map((n) => `Breakfast: ${n}`), ...snacksMissingMacros.map((n) => `Snack: ${n}`)].join(' · ')}
+                  </p>
+                  <p className="mt-1">Add their C / P / F in the flagged rows above (Breakfast and Snack Rotation) and it unblocks by itself.</p>
+                </div>
+              )}
               <p className="mt-1 text-[11px] text-slate-400">
                 Fills main meals, breakfast (if the customer's profile has Breakfast Include on), and their full snack count — for every customer flagged missing on {formatDateLabel(missingCheckDate)} above. Everything stays within each option's own exclusion list.
               </p>
@@ -2464,6 +2875,7 @@ const KitchenList = () => {
               key={`${entry.email || entry.customerId}`}
               entry={entry}
               persistMealTypeOverride={persistMealTypeOverride}
+              saveMealRemark={saveMealRemark}
               savingOverrideKey={savingOverrideKey}
               saveDayNote={saveDayNote}
               savingDayNoteKey={savingDayNoteKey}
@@ -2488,7 +2900,7 @@ const KitchenList = () => {
 // here (keyed by date only, since email is fixed per card instance) instead
 // of a shared object in the parent, which is what made every card re-render
 // together before.
-const CustomerCard = React.memo(({ entry, persistMealTypeOverride, savingOverrideKey, saveDayNote, savingDayNoteKey }) => {
+const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey }) => {
   const [localDayNoteDrafts, setLocalDayNoteDrafts] = useState({});
   // Each day's full meal grid starts collapsed — with a realistic customer
   // count (hundreds), rendering every day's meal detail for every customer
@@ -2720,6 +3132,34 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, savingOverrid
                         </p>
                       )}
                       {savingOverrideKey === (meal?._overrideKey || buildMealOverrideKey(entry, meal, index)) && (
+                        <p className="mt-1 text-xs text-slate-500">Saving...</p>
+                      )}
+                    </div>
+                  )}
+                  {String(meal?.mealType || '').toLowerCase() !== 'snack' && (
+                    <div className="mt-2">
+                      <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Change (shows on kitchen paper)</label>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1">
+                        {REMARK_CHANGE_OPTIONS.map((option) => {
+                          const { checked, extras } = parseRemarkParts(meal?.remark);
+                          return (
+                            <label key={option.key} className="inline-flex items-center gap-1.5 text-sm text-slate-700">
+                              <input
+                                type="checkbox"
+                                checked={checked.includes(option.key)}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? [...checked, option.key]
+                                    : checked.filter((k) => k !== option.key);
+                                  saveMealRemark({ entry, meal, remark: buildRemarkFromParts(next, extras) });
+                                }}
+                              />
+                              {option.label}
+                            </label>
+                          );
+                        })}
+                      </div>
+                      {savingOverrideKey === `remark:${meal?._overrideKey || buildMealOverrideKey(entry, meal, index)}` && (
                         <p className="mt-1 text-xs text-slate-500">Saving...</p>
                       )}
                     </div>

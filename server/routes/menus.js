@@ -3729,7 +3729,7 @@ router.get('/:id/selections', protect, async (req, res) => {
         // has manually linked this customer to a Matter subscription whose
         // email doesn't match theirs — the client uses it to fetch nutrition
         // by subscription id instead of guessing by email.
-        matterSubscriptionId: customer?.matterSubscriptionId || null,
+        matterSubscriptionId: customer?.matterSubscriptionId || recObj.matterSubscriptionId || null,
         matterCustomerId: customer?.matterCustomerId || null,
         cpf: customer?.cpf || null,
         // Set when this customer is a B2B Partner's member ordering through
@@ -4361,9 +4361,14 @@ router.patch('/:menuId/selections/:email/meal-remarks', protect, async (req, res
         return;
       }
 
-      const meal = (record.selectedMeals || []).find(
+      const sameDateAndName = (record.selectedMeals || []).filter(
         (m) => toDateKey(m.date) === dateKey && normalizeMealName(m.mealName) === mealNameKey
       );
+      // The Kitchen List meal card also sends slotNumber so two portions of
+      // the same dish on one day can carry different remarks.
+      const meal = (entry?.slotNumber !== undefined && entry?.slotNumber !== null
+        && sameDateAndName.find((m) => m.slotNumber === entry.slotNumber))
+        || sameDateAndName[0];
       if (!meal) {
         unmatched.push({ date: dateKey, mealName: entry.mealName, reason: 'no matching meal on that date' });
         return;

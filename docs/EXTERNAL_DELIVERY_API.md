@@ -129,6 +129,42 @@ by matching `customerId`) — this is "the number of meals this customer is
 having", refreshed on every request, not a snapshot from when the delivery
 was created.
 
+### `GET /api/external/drivers/locations`
+
+Live GPS for every tracked vehicle (same Truckoom "Trace" feed the in-app
+Live Tracking page uses), with the driver mapped to it if any. Same API key
+as the deliveries endpoints above — no separate key needed.
+
+```bash
+curl -H "x-api-key: 9f2a3c..." \
+  "https://matterapp.online/api/external/drivers/locations"
+```
+
+```json
+{
+  "success": true,
+  "fetchedAt": "2026-10-08T06:15:00.000Z",
+  "data": [
+    {
+      "vehicleNo": "VEH-001",
+      "vehicleType": "van",
+      "location": { "lat": 25.11, "lng": 55.20 },
+      "driver": {
+        "id": "...",
+        "name": "...",
+        "phone": "...",
+        "email": "..."
+      }
+    }
+  ]
+}
+```
+
+`location` is `null` for a vehicle not currently reporting a GPS fix.
+`driver` is `null` for a vehicle with no driver mapped to it
+(`User.profile.truckoomVehicleNo`). Polled the same way the deliveries
+endpoint is — there's no history, only the current position.
+
 ## Notes
 
 - Read-only: there is no write/update endpoint on this API. Delivery updates

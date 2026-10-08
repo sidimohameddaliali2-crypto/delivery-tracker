@@ -256,6 +256,27 @@ const resolveSnackPresetForMeal = (meal, snackPresetsByName = {}) => {
   };
 };
 
+// Used by the Kitchen List to hold Auto-Assign back: does this breakfast /
+// snack name resolve to a saved preset that actually carries macros? A name
+// with no preset (or one saved as all zeros) would show 0/0/0 and take the
+// wrong amount off the customer's day, so it must get values first. Uses the
+// exact same matching as the calculation itself, so "has macros here" always
+// agrees with what the kitchen list will show.
+export const breakfastNameHasMacros = (name, breakfastPreset) => {
+  // No default preset passed in on purpose: an unmatched name then comes back
+  // with an empty name instead of silently borrowing the default's macros.
+  const resolved = resolveBreakfastPresetForMeal(
+    { breakfastName: name },
+    { presetsByName: breakfastPreset?.presetsByName || {} }
+  );
+  return !!resolved.name && (resolved.C + resolved.P + resolved.F) > 0;
+};
+
+export const snackNameHasMacros = (name, snackPreset) => {
+  const resolved = resolveSnackPresetForMeal({ mealName: name }, snackPreset?.presetsByName || {});
+  return !!resolved && (resolved.C + resolved.P + resolved.F) > 0;
+};
+
 // Matter Core plan customers skip the proportional macro-split entirely.
 // Their Matter API macros.carbohydrates/protein aren't a macro-nutrient
 // budget — they're the customer's TOTAL DAILY WEIGHT (grams of food) for
@@ -279,11 +300,11 @@ const lookupMatterCoreMacros = (carbWeight, proteinWeight) => {
   ) || null;
 };
 
-const getMacroAdjustment = (deliveryNumber) => {
-  const pattern = [0.01, -0.01, 0.02, -0.02];
-  const index = Math.max(0, Number(deliveryNumber || 1) - 1) % pattern.length;
-  return pattern[index];
-};
+// Owner (2026-10-07): the delivery-number adjustment (+1% / -1% / +2% / -2%
+// by position in the plan's cycle) is switched off — FileMaker's Thursday
+// kitchen paper applies none. To bring it back, restore the pattern below.
+const getMacroAdjustment = () => 0;
+// const MACRO_ADJUSTMENT_PATTERN = [0.01, -0.01, 0.02, -0.02];
 
 const resolveProteinType = (meal) => {
   // manualProteinType is a kitchen staffer's explicit override (highest

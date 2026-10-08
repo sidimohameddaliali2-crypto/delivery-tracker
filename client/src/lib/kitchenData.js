@@ -154,6 +154,8 @@ export const fetchBreakfastPresets = async (api, menuId) => {
 };
 
 export const getCustomerName = (entry) => {
+  const matterName = String(entry?.matterName || '').trim();
+  if (matterName) return matterName;
   const first = String(entry?.firstName || '').trim();
   const last = String(entry?.lastName || '').trim();
   const combined = [first, last].filter(Boolean).join(' ').trim();
@@ -296,6 +298,9 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       customerMacros: hasNonZeroMacros(websiteMacros) ? websiteMacros : entry?.customerMacros,
       snacksPerDay: nutrition?.snacks_per_day ?? null,
       planName: nutrition?.plan_name ?? null,
+      // Owner (2026-10-07): show the Matter name, not the internal record's
+      // (which can be misspelled, differ, or be blank for auto-created ones).
+      matterName: String(nutrition?.customer_name || '').trim() || null,
       mealsPerDay: nutrition?.meal_frequency ?? null,
       breakfastIncluded: typeof nutrition?.breakfast_included === 'boolean' ? nutrition.breakfast_included : null,
       deliveryDates: Array.isArray(nutrition?.active_delivery_dates) ? nutrition.active_delivery_dates : null,

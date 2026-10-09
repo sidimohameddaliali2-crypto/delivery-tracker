@@ -17,7 +17,8 @@ import {
   CalendarDays,
   Briefcase,
   Route,
-  Package
+  Package,
+  ListOrdered
 } from 'lucide-react';
 import { fetchEvents } from '../store/slices/eventSlice';
 import { setSelectedEvent } from '../store/slices/eventSlice';
@@ -26,6 +27,7 @@ import EventDetailModal from '../components/events/EventDetailModal';
 import api from '../utils/api';
 import DispatcherMapAssignModal from '../components/DispatcherMapAssignModal';
 import RouteOptimizationModal from '../components/RouteOptimizationModal';
+import ManualOrderModal from '../components/ManualOrderModal';
 import { fetchDeliveries } from '../store/slices/deliverySlice';
 import { fetchDrivers } from '../store/slices/driverSlice';
 import { logout } from '../store/slices/authSlice';
@@ -102,6 +104,7 @@ const DispatcherDesktop = () => {
   const [printMode, setPrintMode] = useState(false);
   const [mapModalOpen, setMapModalOpen] = useState(false);
   const [routeModalOpen, setRouteModalOpen] = useState(false);
+  const [manualOrderModalOpen, setManualOrderModalOpen] = useState(false);
   const [printDriverFilter, setPrintDriverFilter] = useState(null);
   const [selectedDeliveryDetail, setSelectedDeliveryDetail] = useState(null);
   const [selectedDate, setSelectedDate] = useState(() => getTomorrowDate());
@@ -1006,6 +1009,14 @@ const DispatcherDesktop = () => {
           >
             <Route className="w-4 h-4" />
             Driver Routes
+          </button>
+          <button
+            onClick={() => setManualOrderModalOpen(true)}
+            className="w-full sm:w-auto px-4 py-2 rounded-lg font-semibold text-sm bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+            title="Manually choose which delivery is first/last for a driver"
+          >
+            <ListOrdered className="w-4 h-4" />
+            Arrange Order
           </button>
         </div>
 
@@ -1949,6 +1960,23 @@ const DispatcherDesktop = () => {
           setFeedback({ message: 'Routes applied', error: false });
           refreshDeliveriesForSelectedDate();
           setSelectedDeliveryIds([]);
+        }}
+      />
+
+      {/* Manual delivery order (owner, 2026-10-09) */}
+      <ManualOrderModal
+        open={manualOrderModalOpen}
+        onClose={() => setManualOrderModalOpen(false)}
+        deliveries={filteredDeliveries}
+        drivers={drivers}
+        defaultDriverId={
+          selectedDeliveries.length > 0 && selectedDeliveries.every((d) => d.driver?._id === selectedDeliveries[0].driver?._id)
+            ? selectedDeliveries[0].driver?._id
+            : null
+        }
+        onSaved={() => {
+          setFeedback({ message: 'Delivery order saved', error: false });
+          refreshDeliveriesForSelectedDate();
         }}
       />
 

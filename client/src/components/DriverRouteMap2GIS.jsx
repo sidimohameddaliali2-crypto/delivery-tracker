@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { load } from '@2gis/mapgl';
-import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft, ChevronDown, Search as SearchIcon, UserPlus } from 'lucide-react';
+import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft, ChevronDown, ChevronUp, Search as SearchIcon, UserPlus, ListOrdered } from 'lucide-react';
 import api from '../utils/api';
 import { getDeliveryLatLng, haversineKm, MAX_PLAUSIBLE_DISTANCE_KM } from '../utils/deliveryCoords';
 import { formatBusinessTime, formatClockFromSecondsSinceMidnight, toBusinessComponents } from '../utils/businessTime';
@@ -361,6 +361,17 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const [assignDriverId, setAssignDriverId] = useState('');
   const [assigning, setAssigning] = useState(false);
   const [assignMsg, setAssignMsg] = useState(null); // { text, error }
+
+  // Manual stop ordering (owner, 2026-10-09: "choose which delivery should
+  // be first, which should be last"), for one driver at a time — feeds the
+  // same `routeOrder` field Optimize Routes writes, via the same
+  // /optimize-routes/apply endpoint (no handoffs/kitchenReturns, just driver
+  // + routeOrder per stop), so this list is exactly what the driver app and
+  // this same map's ordering/ETA logic already read.
+  const [reorderMode, setReorderMode] = useState(false);
+  const [reorderIds, setReorderIds] = useState([]); // delivery ids, in the order being edited
+  const [savingOrder, setSavingOrder] = useState(false);
+  const [reorderMsg, setReorderMsg] = useState(null); // { text, error }
 
   // "What if" simulation (owner, 2026-09-09): set rules — kitchen departure
   // time, a van as hub with a ready-by time, bike trip capacity — and preview
@@ -760,10 +771,79 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     return () => clearTimeout(t);
   }, [assignMsg]);
 
+  const startReorder = () => {
+    if (!listGroup || listGroup.id === UNASSIGNED) return;
+    setReorderIds(listGroup.stops.map((s) => s._id));
+    setReorderMsg(null);
+    setReorderMode(true);
+  };
+
+  const cancelReorder = () => {
+    setReorderMode(false);
+    setReorderIds([]);
+    setReorderMsg(null);
+  };
+
+  const moveStop = (deliveryId, direction) => {
+    setReorderIds((prev) => {
+      const idx = prev.indexOf(deliveryId);
+      const next = idx + direction;
+      if (idx === -1 || next < 0 || next >= prev.length) return prev;
+      const copy = [...prev];
+      [copy[idx], copy[next]] = [copy[next], copy[idx]];
+      return copy;
+    });
+  };
+
+  // Lets a dispatcher type the exact position they want a stop to land at
+  // (1 = first, N = last) instead of only nudging it up/down one at a time.
+  const setStopPosition = (deliveryId, oneBasedPosition) => {
+    setReorderIds((prev) => {
+      const idx = prev.indexOf(deliveryId);
+      if (idx === -1) return prev;
+      const clamped = Math.min(Math.max(1, Math.round(oneBasedPosition)), prev.length) - 1;
+      if (clamped === idx) return prev;
+      const copy = [...prev];
+      const [item] = copy.splice(idx, 1);
+      copy.splice(clamped, 0, item);
+      return copy;
+    });
+  };
+
+  const saveReorder = async () => {
+    if (!listGroup || listGroup.id === UNASSIGNED || reorderIds.length === 0) return;
+    setSavingOrder(true);
+    setReorderMsg(null);
+    try {
+      await api.post('/deliveries/optimize-routes/apply', {
+        routes: [{
+          driverId: listGroup.id,
+          stops: reorderIds.map((deliveryId, i) => ({ deliveryId, routeOrder: i }))
+        }]
+      });
+      setReorderMsg({ text: `Saved the order for ${reorderIds.length} ${reorderIds.length === 1 ? 'stop' : 'stops'}.`, error: false });
+      setReorderMode(false);
+      setReorderIds([]);
+      onAssigned?.();
+    } catch (err) {
+      setReorderMsg({ text: err?.response?.data?.message || 'Could not save the order — nothing was changed.', error: true });
+    } finally {
+      setSavingOrder(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!reorderMsg) return undefined;
+    const t = setTimeout(() => setReorderMsg(null), 5000);
+    return () => clearTimeout(t);
+  }, [reorderMsg]);
+
   // A stale selection from a different driver's list is just confusing —
   // clear it whenever the visible list changes.
   useEffect(() => {
     setSelectedStopIds([]);
+    setReorderMode(false);
+    setReorderIds([]);
   }, [selected]);
 
   // If the selected driver drops out of the list (filters changed), fall back to all.
@@ -1336,6 +1416,13 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const approxCount = visibleGroups.reduce((n, g) => n + g.stops.filter((s) => s.approx).length, 0);
   const assignedTotal = groups.assigned.reduce((n, g) => n + g.stops.length + g.missing.length, 0);
   const hasOptimizedOrder = listGroup ? listGroup.stops.some((s) => s.routeOrder != null) : false;
+
+  // While reordering, show the stops in the order being edited rather than
+  // their stored order — same stop objects (for coords/address/etc.), just
+  // resequenced by reorderIds.
+  const displayStops = reorderMode && listGroup
+    ? reorderIds.map((id) => listGroup.stops.find((s) => s._id === id)).filter(Boolean)
+    : (listGroup?.stops || []);
 
   // A full page (owner, 2026-09-09: "it should not be a window but another
   // page") drops the modal overlay/backdrop/centered-card chrome in favor of
@@ -2124,6 +2211,52 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
               ) : null}
             </div>
 
+            {/* Manually choose which delivery is first/last for this driver
+                (owner, 2026-10-09) — writes routeOrder via the same
+                /optimize-routes/apply endpoint Optimize Routes itself uses,
+                so this order is exactly what the driver app and this map's
+                own ETA logic read. Real write, so hidden during a simulation. */}
+            {listGroup && listGroup.id !== UNASSIGNED && listGroup.stops.length > 1 && !simulating ? (
+              <div className="px-4 py-2 border-b border-gray-200 bg-gray-50 space-y-1.5">
+                {!reorderMode ? (
+                  <button
+                    type="button"
+                    onClick={startReorder}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-gray-300 text-xs font-medium text-gray-700 hover:bg-gray-100"
+                  >
+                    <ListOrdered className="w-3.5 h-3.5" />
+                    Set delivery order manually
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-600 flex-1">
+                      Reorder {listGroup.name}'s stops — use the arrows or type a number (1 = first).
+                    </span>
+                    <button
+                      type="button"
+                      onClick={saveReorder}
+                      disabled={savingOrder}
+                      className="flex-shrink-0 inline-flex items-center gap-1 px-2.5 py-1 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      {savingOrder ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                      Save order
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelReorder}
+                      disabled={savingOrder}
+                      className="flex-shrink-0 text-xs text-gray-500 hover:underline"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+                {reorderMsg ? (
+                  <p className={`text-[11px] ${reorderMsg.error ? 'text-red-600' : 'text-emerald-600'}`}>{reorderMsg.text}</p>
+                ) : null}
+              </div>
+            ) : null}
+
             {/* Assign selected stops straight from Driver Routes (owner,
                 2026-09-11) — a real write, so unavailable while previewing a
                 simulated plan. Sits outside the scrollable list so it's
@@ -2245,7 +2378,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
               ) : listGroup ? (
                 <>
                   <ol className="divide-y divide-gray-100">
-                    {listGroup.stops.map((stop, idx) => {
+                    {displayStops.map((stop, idx) => {
                       const isActive = activeId === stop._id;
                       const stopEta = eta.status === 'ok' ? eta.byId[stop._id] : null;
                       const earlyLate = stopStatusLabel(stopEta);
@@ -2283,7 +2416,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                           onClick={() => setActiveId(stop._id)}
                           className={`p-3 flex items-start gap-3 cursor-pointer ${isActive ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                         >
-                          {!simulating ? (
+                          {!simulating && !reorderMode ? (
                             <input
                               type="checkbox"
                               checked={selectedStopIds.includes(stop._id)}
@@ -2293,12 +2426,44 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                               title="Select to assign to a driver"
                             />
                           ) : null}
-                          <span
-                            className="w-6 h-6 rounded-full text-white text-[11px] font-bold flex items-center justify-center flex-shrink-0"
-                            style={{ backgroundColor: stop.timeColor, opacity: stop.status === 'delivered' ? 0.55 : 1 }}
-                          >
-                            {idx + 1}
-                          </span>
+                          {reorderMode ? (
+                            <span className="flex flex-col items-center flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                type="button"
+                                onClick={() => moveStop(stop._id, -1)}
+                                disabled={idx === 0}
+                                className="text-gray-400 hover:text-gray-700 disabled:opacity-30 disabled:cursor-not-allowed leading-none"
+                                title="Move earlier"
+                              >
+                                <ChevronUp className="w-3.5 h-3.5" />
+                              </button>
+                              <input
+                                type="number"
+                                min={1}
+                                max={displayStops.length}
+                                value={idx + 1}
+                                onChange={(e) => setStopPosition(stop._id, Number(e.target.value))}
+                                className="w-10 text-center text-xs border border-gray-300 rounded"
+                                title="Type the stop number — 1 = first"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => moveStop(stop._id, 1)}
+                                disabled={idx === displayStops.length - 1}
+                                className="text-gray-400 hover:text-gray-700 disabled:opacity-30 disabled:cursor-not-allowed leading-none"
+                                title="Move later"
+                              >
+                                <ChevronDown className="w-3.5 h-3.5" />
+                              </button>
+                            </span>
+                          ) : (
+                            <span
+                              className="w-6 h-6 rounded-full text-white text-[11px] font-bold flex items-center justify-center flex-shrink-0"
+                              style={{ backgroundColor: stop.timeColor, opacity: stop.status === 'delivered' ? 0.55 : 1 }}
+                            >
+                              {idx + 1}
+                            </span>
+                          )}
                           <span className="flex-1 min-w-0">
                             <span className="block text-sm font-medium text-gray-900 truncate">{stop.customerName || 'Customer'}</span>
                             {stop.address ? (

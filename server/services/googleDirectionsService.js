@@ -13,7 +13,7 @@ const DIRECTIONS_URL = 'https://maps.googleapis.com/maps/api/directions/json';
 // Strips Google's `html_instructions` (e.g. "Turn <b>left</b> onto <b>Palm
 // Grove St</b>") down to plain text for display in the app's instruction
 // banner.
-function stripHtml(html) {
+export function stripHtml(html) {
   return String(html || '')
     .replace(/<[^>]+>/g, '')
     .replace(/&amp;/g, '&')
@@ -26,7 +26,7 @@ function stripHtml(html) {
 // (https://developers.google.com/maps/documentation/utilities/polylinealgorithm) —
 // char code offset by 63, continuation flagged by bit 0x20, each 5-bit chunk
 // masked with 0x1f before shifting into the running value.
-function decodePolyline(encoded) {
+export function decodePolyline(encoded) {
   const points = [];
   let index = 0, lat = 0, lng = 0;
 
@@ -112,6 +112,11 @@ export async function getDirections(points) {
     steps: (leg.steps || []).map((step) => ({
       text: stripHtml(step.html_instructions),
       distanceMeters: step.distance?.value ?? 0,
+      // Google's own maneuver code (e.g. "turn-left", "turn-slight-right",
+      // "uturn-right", "roundabout-left") — not every step has one (the
+      // first step of a leg usually doesn't), so the client falls back to
+      // a generic "continue straight" icon when it's absent.
+      maneuver: step.maneuver || null,
       startLocation: { latitude: step.start_location.lat, longitude: step.start_location.lng }
     }))
   }));

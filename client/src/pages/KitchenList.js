@@ -201,6 +201,9 @@ const getAttentionReasons = (meal) => {
 const hasDeliveryOnCheckedDate = (entry, deliveryCheck) => {
   const subId = String(entry?.matterSubscriptionId || '').trim();
   if (subId && deliveryCheck.subscriptionIds.has(subId)) return true;
+  // Matter's permanent customer id survives renewals and email changes.
+  const custId = String(entry?.matterCustomerId || '').trim();
+  if (custId && deliveryCheck.customerIds?.has(custId)) return true;
   const email = String(entry?.email || '').trim().toLowerCase();
   return !!email && deliveryCheck.emails.has(email);
 };
@@ -538,7 +541,8 @@ const KitchenList = () => {
       setDeliveryCheck({
         dateKey,
         emails: new Set(subs.map((sub) => String(sub.email || '').trim().toLowerCase()).filter(Boolean)),
-        subscriptionIds: new Set(subs.map((sub) => String(sub.subscription_id || '').trim()).filter(Boolean))
+        subscriptionIds: new Set(subs.map((sub) => String(sub.subscription_id || '').trim()).filter(Boolean)),
+        customerIds: new Set(subs.map((sub) => String(sub.customer_id ?? '').trim()).filter(Boolean))
       });
 
       // Use freshly-fetched selections when passed in (e.g. right after an
@@ -563,7 +567,8 @@ const KitchenList = () => {
 
       const coveredEmails = new Set();
       activeSelections.forEach((entry) => {
-        const hasSelectionThatDay = (entry.selectedMeals || []).some((m) => getDateKey(m?.date) === dateKey);
+        // A snack alone (snacks are topped up for everyone) isn't a selection.
+        const hasSelectionThatDay = (entry.selectedMeals || []).some((m) => getDateKey(m?.date) === dateKey && String(m?.mealType || '').toLowerCase() !== 'snack');
         if (hasSelectionThatDay) coveredEmails.add(String(entry.email || '').trim().toLowerCase());
       });
 
@@ -1710,8 +1715,52 @@ const KitchenList = () => {
   // filtered to this date), matching each row of their table on the PDF.
   const planFileSuffix = paperPlan ? `-${paperPlan.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}` : '';
 
-  const buildKitchenPaperOrder = (dateKey) => {
-    const entriesWithMeals = customerRows
+  // Owner (2026-10-09): a customer who has a saved selection for a date but no
+  // active Matter delivery that day (paused / skipped / not started / ended)
+  // is left out of the kitchen paper (PDF, Word, Excel) and the customer-list
+  // export. Partner members have no Matter subscription of their own, so they
+  // are always kept. The Matter delivery list is fetched for the date here
+  // (reusing the "Check Missing Selections" result when it is for the same
+  // date); if Matter can't be reached nothing is generated, rather than
+  // printing a paper that may include customers who aren't being delivered.
+  const deliveryListCacheRef = useRef(new Map());
+  const getDeliveryList = async (dateKey) => {
+    if (deliveryCheck?.dateKey === dateKey) return deliveryCheck;
+    const cached = deliveryListCacheRef.current.get(dateKey);
+    if (cached && Date.now() - cached.at < 10 * 60 * 1000) return cached.list;
+    const res = await api.get('/matter/subscriptions/delivery-on-date', { params: { date: dateKey }, timeout: 180000 });
+    const subs = res.data?.data || [];
+    const list = {
+      dateKey,
+      emails: new Set(subs.map((sub) => String(sub.email || '').trim().toLowerCase()).filter(Boolean)),
+      subscriptionIds: new Set(subs.map((sub) => String(sub.subscription_id || '').trim()).filter(Boolean)),
+      customerIds: new Set(subs.map((sub) => String(sub.customer_id ?? '').trim()).filter(Boolean))
+    };
+    deliveryListCacheRef.current.set(dateKey, { at: Date.now(), list });
+    return list;
+  };
+  const [paperExcluded, setPaperExcluded] = useState(null);
+  const getDeliverableRows = async (dateKey) => {
+    let list;
+    try {
+      list = await getDeliveryList(dateKey);
+    } catch (err) {
+      setError(err.response?.data?.message || "Couldn't check Matter deliveries for this date, so nothing was generated. Try again.");
+      return null;
+    }
+    const hasMeals = (entry) => (entry.selectedMeals || []).some((meal) => getDateKey(meal?.date) === dateKey);
+    const rows = [];
+    const excluded = [];
+    customerRows.forEach((entry) => {
+      if (entry.partner || hasDeliveryOnCheckedDate(entry, list)) rows.push(entry);
+      else if (hasMeals(entry)) excluded.push(entry.customerName || entry.email || 'Unknown');
+    });
+    setPaperExcluded({ dateKey, names: excluded.sort((a, b) => a.localeCompare(b)) });
+    return rows;
+  };
+
+  const buildKitchenPaperOrder = (dateKey, rowsForDate = customerRows) => {
+    const entriesWithMeals = rowsForDate
       .filter((entry) => !paperPlan || entry.planName === paperPlan)
       .map((entry) => ({
         entry,
@@ -1766,7 +1815,9 @@ const KitchenList = () => {
 
   const exportCustomerMacrosToExcel = async (dateKey) => {
     if (!dateKey) return;
-    const orderedEntries = buildKitchenPaperOrder(dateKey);
+    const deliverableRows = await getDeliverableRows(dateKey);
+    if (!deliverableRows) return;
+    const orderedEntries = buildKitchenPaperOrder(dateKey, deliverableRows);
     if (orderedEntries.length === 0) return;
     const XLSX = await loadXLSX();
     const rows = orderedEntries.flatMap(({ entry, dayMeals }) =>
@@ -1800,7 +1851,9 @@ const KitchenList = () => {
   // remark, and day note the PDF prints per customer.
   const exportDayKitchenPaperToExcel = async (dateKey) => {
     if (!dateKey) return;
-    const orderedEntries = buildKitchenPaperOrder(dateKey);
+    const deliverableRows = await getDeliverableRows(dateKey);
+    if (!deliverableRows) return;
+    const orderedEntries = buildKitchenPaperOrder(dateKey, deliverableRows);
     if (orderedEntries.length === 0) return;
     const XLSX = await loadXLSX();
     const rows = orderedEntries.flatMap(({ entry, dayMeals }) => {
@@ -1844,14 +1897,16 @@ const KitchenList = () => {
   // plan line, day note, meal table, total macros). Built as Word-flavoured
   // HTML saved as .doc, which Word opens natively and keeps the page breaks
   // per section — no extra dependency needed.
-  const downloadDayKitchenPaperWord = (dateKey) => {
+  const downloadDayKitchenPaperWord = async (dateKey) => {
     if (!dateKey) return;
     const dayLabel = formatDateLabel(dateKey);
     const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const orDash = (v) => (v === null || v === undefined || v === '' ? 'N/A' : v);
     const nameOf = (row) => row.entry.customerName || row.entry.email || '';
 
-    const entriesWithMeals = customerRows
+    const deliverableRows = await getDeliverableRows(dateKey);
+    if (!deliverableRows) return;
+    const entriesWithMeals = deliverableRows
       .filter((entry) => !paperPlan || entry.planName === paperPlan)
       .map((entry) => ({
         entry,
@@ -2132,7 +2187,9 @@ ${body}
         return y + 10;
       };
 
-      const entriesWithMeals = customerRows
+      const deliverableRows = await getDeliverableRows(dateKey);
+      if (!deliverableRows) return;
+      const entriesWithMeals = deliverableRows
         .filter((entry) => !paperPlan || entry.planName === paperPlan)
         .map((entry) => ({
           entry,
@@ -2343,6 +2400,16 @@ ${body}
               >
                 <Download size={16} /> Export Customer List (Excel)
               </button>
+              {paperExcluded && paperExcluded.dateKey === pdfDate && (
+                <p
+                  className="w-full text-xs text-amber-200"
+                  title={paperExcluded.names.join(', ')}
+                >
+                  {paperExcluded.names.length === 0
+                    ? 'Every customer with meals on this date has an active Matter delivery.'
+                    : `Left out ${paperExcluded.names.length} customer(s) with meals saved but no active Matter delivery on this date: ${paperExcluded.names.slice(0, 8).join(', ')}${paperExcluded.names.length > 8 ? ', ...' : ''}`}
+                </p>
+              )}
               <button
                 type="button"
                 onClick={downloadMealRemarksTemplate}

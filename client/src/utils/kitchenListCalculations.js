@@ -727,6 +727,9 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
         position: index + 1,
         flags: {
           autoUpgradedToLarge: autoLarge,
+          // Large for ANY reason (auto-upgraded, or the breakfast's own preset
+          // is a large one) — Kitchen Counting lists large breakfasts apart.
+          isLargeBreakfast: isLarge,
           macroShortfall: dayHasMacroShortfall.has(dayKey)
         }
       };
@@ -970,6 +973,10 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     customerId: customer?.customerId,
     customerName: [customer?.firstName, customer?.lastName].filter(Boolean).join(' ').trim(),
     email: customer?.email,
+    // Carried through so callers can match this customer to Matter's delivery
+    // list (kitchen paper / counting leave out customers with no delivery).
+    matterSubscriptionId: customer?.matterSubscriptionId ?? null,
+    matterCustomerId: customer?.matterCustomerId ?? null,
     cpf: customer?.cpf ?? null,
     macros: normalizedMacros,
     snacksPerDay: customer?.snacksPerDay ?? null,

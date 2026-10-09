@@ -44,8 +44,8 @@ const abbr = (s = '') => {
   return ((parts[0]?.[0] || '') + (parts[1]?.[0] || parts[0]?.[1] || '')).toUpperCase() || '·';
 };
 
-// Single fixed delivery window.
-const DELIVERY_WINDOW = 'Morning · 5–6am';
+// Available delivery windows — partner picks one per order.
+const DELIVERY_WINDOWS = ['Morning · 5–6am', 'Morning · 7–10am'];
 
 const buildCalendar = (year, month) => {
   const first = new Date(year, month, 1);
@@ -124,6 +124,9 @@ const PartnerPortal = () => {
   const [selectedDates, setSelectedDates] = useState(() => new Set([firstOrderableISO()]));
   const [cart, setCart] = useState({}); // { [menuItemId]: qty } — same cart applied to every selected day
   const [editing, setEditing] = useState(null); // { id, date, ref, originalIds } while editing an existing order
+  const [deliveryWindow, setDeliveryWindow] = useState(DELIVERY_WINDOWS[0]); // default window for every selected day
+  const [dayWindows, setDayWindows] = useState({}); // { [iso]: window } — per-day overrides on top of deliveryWindow
+  const [perDayOpen, setPerDayOpen] = useState(false); // mobile: per-day window overrides collapsed behind a dropdown
   const [sheet, setSheet] = useState(null); // null | 'checkout'  (mobile only)
   const [placing, setPlacing] = useState(false);
   const [orderErr, setOrderErr] = useState('');
@@ -255,7 +258,11 @@ const PartnerPortal = () => {
   const nextMonth = () => (calM === 11 ? (setCalY(calY + 1), setCalM(0)) : setCalM(calM + 1));
   const setDayMode = (mode) => {
     setSelMode(mode);
-    if (mode === 'single') setSelectedDates((prev) => new Set([Array.from(prev).sort()[0] || firstOrderableISO()]));
+    if (mode === 'single') {
+      setSelectedDates((prev) => new Set([Array.from(prev).sort()[0] || firstOrderableISO()]));
+      setDayWindows({});
+      setPerDayOpen(false);
+    }
   };
   const toggleDay = (iso) => {
     if (editing) return; // an existing order is edited on its own day
@@ -264,11 +271,19 @@ const PartnerPortal = () => {
     if (selMode === 'single') { setSelectedDates(new Set([iso])); return; }
     setSelectedDates((prev) => {
       const next = new Set(prev);
-      if (next.has(iso)) { if (next.size > 1) next.delete(iso); } // keep at least one day selected
-      else next.add(iso);
+      if (next.has(iso)) {
+        if (next.size > 1) {
+          next.delete(iso);
+          setDayWindows((w) => { if (!(iso in w)) return w; const n = { ...w }; delete n[iso]; return n; });
+        }
+      } else next.add(iso);
       return next;
     });
   };
+  // Effective delivery window for a given selected day — its own override, or the default
+  const windowFor = (iso) => dayWindows[iso] || deliveryWindow;
+  const setWindowForDay = (iso, win) => setDayWindows((w) => ({ ...w, [iso]: win }));
+  const mixedWindows = sortedSelected.length > 1 && new Set(sortedSelected.map(windowFor)).size > 1;
   const inc = (id) => { setOrderErr(''); setCart((c) => ({ ...c, [id]: (c[id] || 0) + 1 })); };
   const dec = (id) =>
     setCart((c) => {
@@ -290,6 +305,9 @@ const PartnerPortal = () => {
     setSelMode('single');
     setSelectedDates(new Set([date]));
     setCart(next);
+    setDeliveryWindow(DELIVERY_WINDOWS.includes(o.deliveryTime) ? o.deliveryTime : DELIVERY_WINDOWS[0]);
+    setDayWindows({});
+    setPerDayOpen(false);
     setOrderErr('');
     setSheet(null);
     setTab('order');
@@ -297,6 +315,9 @@ const PartnerPortal = () => {
   const cancelEdit = () => {
     setEditing(null);
     setCart({});
+    setDeliveryWindow(DELIVERY_WINDOWS[0]);
+    setDayWindows({});
+    setPerDayOpen(false);
     setOrderErr('');
   };
   const cancelOrder = async (o) => {
@@ -384,13 +405,16 @@ const PartnerPortal = () => {
     }
     const results = [];
     const dates = editing ? [editing.date] : sortedSelected;
+    const usedWindows = {};
     for (const date of dates) {
+      const win = windowFor(date);
+      usedWindows[date] = win;
       try {
         const r = await partnerApi.post('/partner/orders', {
           deliveryDate: date,
           lines,
           notes: '',
-          deliveryTime: DELIVERY_WINDOW,
+          deliveryTime: win,
         });
         try {
           await partnerApi.post(`/partner/orders/${r.data.data._id}/submit`);
@@ -408,16 +432,22 @@ const PartnerPortal = () => {
     const okResults = results.filter((r) => r.ok);
     const failResults = results.filter((r) => !r.ok);
     if (okResults.length > 0) {
+      const winByDate = okResults.map((r) => ({ day: fmtDay(r.date), win: usedWindows[r.date] }));
       setDone({
         count: okResults.length,
         days: okResults.map((r) => fmtDay(r.date)),
-        win: DELIVERY_WINDOW,
+        winByDate,
+        sameWindow: new Set(winByDate.map((w) => w.win)).size <= 1,
+        win: winByDate[0]?.win || deliveryWindow,
         perDay: subtotal,
         total: subtotal * okResults.length,
         failed: failResults.map((r) => `${fmtDay(r.date)}: ${r.message}`),
       });
       setCart({});
       setEditing(null);
+      setDeliveryWindow(DELIVERY_WINDOWS[0]);
+      setDayWindows({});
+      setPerDayOpen(false);
       setSheet(null);
       loadOrders();
       setReports(null);
@@ -494,7 +524,30 @@ const PartnerPortal = () => {
     </>
   );
 
-  const renderDeliverOn = ({ dark = false } = {}) => (
+  const renderPerDayRows = (dark) =>
+    sortedSelected.map((iso) => (
+      <div key={iso} className="flex items-center gap-2">
+        <span className="text-[11px] text-[#a8ccf5] w-[62px] flex-none truncate">{fmtDay(iso)}</span>
+        <div className="flex gap-1 flex-1">
+          {DELIVERY_WINDOWS.map((w) => {
+            const on = windowFor(iso) === w;
+            return (
+              <button key={w} type="button" onClick={() => setWindowForDay(iso, w)}
+                className="flex-1 rounded-full px-2 py-1.5 text-[10.5px] font-bold border-[1.5px] transition-colors"
+                style={{
+                  borderColor: on ? '#bcf679' : '#12275e',
+                  background: on ? '#bcf679' : (dark ? '#051747' : '#0a1230'),
+                  color: on ? '#051747' : '#ede5de',
+                }}>
+                {w}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    ));
+
+  const renderDeliverOn = ({ dark = false, collapsiblePerDay = false } = {}) => (
     <div className={`flex flex-col gap-2.5 rounded-[16px] px-3.5 py-3 ${dark ? 'bg-[#0a1230] border-[1.5px] border-[#12275e]' : card}`}>
       <div>
         <div className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5]">Deliver on</div>
@@ -505,10 +558,55 @@ const PartnerPortal = () => {
           <div className="text-[10.5px] text-[#a8ccf5] mt-1 leading-snug">{sortedSelected.map(fmtDay).join(' · ')}</div>
         )}
       </div>
-      <div className={`flex items-center gap-1.5 rounded-full px-3 py-2 border-[1.5px] border-[#12275e] ${dark ? 'bg-[#051747]' : 'bg-[#0a1230]'}`}>
-        <span className="text-[11px] text-[#a8ccf5] font-bold">Window</span>
-        <span className="text-[12.5px] font-bold text-[#ede5de]">{DELIVERY_WINDOW}</span>
+      <div>
+        <div className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5] mb-1.5">Window</div>
+        <div className="flex gap-1.5">
+          {DELIVERY_WINDOWS.map((w) => {
+            const on = deliveryWindow === w;
+            return (
+              <button key={w} type="button" onClick={() => setDeliveryWindow(w)}
+                className="flex-1 rounded-full px-3 py-2 text-[12px] font-bold border-[1.5px] transition-colors"
+                style={{
+                  borderColor: on ? '#bcf679' : '#12275e',
+                  background: on ? '#bcf679' : (dark ? '#051747' : '#0a1230'),
+                  color: on ? '#051747' : '#ede5de',
+                }}>
+                {w}
+              </button>
+            );
+          })}
+        </div>
       </div>
+      {sortedSelected.length > 1 && (
+        collapsiblePerDay ? (
+          <div>
+            <button type="button" onClick={() => setPerDayOpen((o) => !o)}
+              className="w-full flex items-center justify-between text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5]">
+              <span>Different window for a day?</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                strokeLinecap="round" strokeLinejoin="round"
+                style={{ transform: perDayOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}>
+                <path d="M6 9l6 6 6-6" />
+              </svg>
+            </button>
+            <AnimatePresence initial={false}>
+              {perDayOpen && (
+                <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+                  className="overflow-hidden">
+                  <div className="flex flex-col gap-1.5 mt-2">{renderPerDayRows(dark)}</div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        ) : (
+          <div>
+            <div className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5] mb-1.5">
+              Different window for a day?
+            </div>
+            <div className="flex flex-col gap-1.5">{renderPerDayRows(dark)}</div>
+          </div>
+        )
+      )}
     </div>
   );
 
@@ -866,8 +964,13 @@ const PartnerPortal = () => {
           </motion.div>
           <div className="text-[28px] mt-5" style={AB}>{done.count > 1 ? `${done.count} orders placed` : 'Order placed'}</div>
           <div className="text-[14.5px] text-[#a8ccf5] mt-2 leading-relaxed">
-            {done.days.join(', ')}<br />
-            {done.win} · {done.count > 1 ? `AED ${fmtAED(done.perDay)}/day · AED ${fmtAED(done.total)} total` : `AED ${fmtAED(done.total)}`}
+            {done.sameWindow ? (
+              <>{done.days.join(', ')}<br />{done.win}</>
+            ) : (
+              done.winByDate.map((d) => <div key={d.day}>{d.day} · {d.win}</div>)
+            )}
+            <br />
+            {done.count > 1 ? `AED ${fmtAED(done.perDay)}/day · AED ${fmtAED(done.total)} total` : `AED ${fmtAED(done.total)}`}
           </div>
           {done.failed?.length > 0 && (
             <div className="mt-3 text-[12px] text-[#ff8a66] leading-relaxed">Couldn’t place for: {done.failed.join(' · ')}</div>
@@ -933,7 +1036,7 @@ const PartnerPortal = () => {
                   <div className="bg-[#051747] border-[1.5px] border-[#12275e] rounded-[22px] p-[18px]">
                     {renderDayModeSwitch()}
                     {renderCalendar({ cellH: 36, radius: 11 })}
-                    <div className="mt-4">{renderDeliverOn({ dark: true })}</div>
+                    <div className="mt-4">{renderDeliverOn({ dark: true, collapsiblePerDay: true })}</div>
                     {renderExistingBanner()}
                   </div>
                   <div>
@@ -977,7 +1080,7 @@ const PartnerPortal = () => {
                 <>
                   <div className="text-[19px]" style={AB}>Checkout</div>
                   <div className="text-[12px] text-[#a8ccf5] mt-1">
-                    {sortedSelected.length > 1 ? `${sortedSelected.length} days` : fmtDay(anchorDate)} · {DELIVERY_WINDOW}
+                    {sortedSelected.length > 1 ? `${sortedSelected.length} days` : fmtDay(anchorDate)} · {mixedWindows ? 'Mixed windows' : deliveryWindow}
                   </div>
                   <div className="mt-4">{renderCheckoutBody()}</div>
                 </>
@@ -1051,7 +1154,7 @@ const PartnerPortal = () => {
           <div className="flex-1 min-h-0 overflow-y-auto px-[18px] pt-4 pb-[210px]">
             {renderDayModeSwitch()}
             {renderCalendar({ cellH: 46, radius: 14 })}
-            <div className="mt-3.5">{renderDeliverOn()}</div>
+            <div className="mt-3.5">{renderDeliverOn({ collapsiblePerDay: true })}</div>
             {renderExistingBanner()}
 
             <div className="flex justify-between items-baseline mt-6 mb-2.5">
@@ -1145,7 +1248,7 @@ const PartnerPortal = () => {
                     className="ml-auto w-9 h-9 rounded-full bg-[#0a1230] text-[#a8ccf5] hover:text-[#ff3b00] transition-colors">✕</button>
                 </div>
                 <div className="text-[12.5px] text-[#a8ccf5] mt-1">
-                  {sortedSelected.length > 1 ? `${sortedSelected.length} days` : fmtDay(anchorDate)} · {DELIVERY_WINDOW}
+                  {sortedSelected.length > 1 ? `${sortedSelected.length} days` : fmtDay(anchorDate)} · {mixedWindows ? 'Mixed windows' : deliveryWindow}
                 </div>
                 <div className="mt-3.5">{renderCheckoutBody()}</div>
               </div>

@@ -27,6 +27,12 @@ const MAP_OPTIONS = {
   fullscreenControl: true,
 };
 
+function driverDisplayName(driver) {
+  const firstName = driver?.profile?.firstName;
+  const lastName = driver?.profile?.lastName;
+  return [firstName, lastName].filter(Boolean).join(' ').trim() || driver?.email || 'Driver';
+}
+
 function timeAgo(iso) {
   if (!iso) return '';
   const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
@@ -92,6 +98,10 @@ const LiveTracking = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeVehicleNo, setActiveVehicleNo] = useState(null);
+  // Every driver, for the "reassign tracker" dropdown — not just the ones
+  // already mapped to a vehicle (those come back on `vehicles` already).
+  const [allDrivers, setAllDrivers] = useState([]);
+  const [reassigningVehicleNo, setReassigningVehicleNo] = useState(null);
 
   const mapInstanceRef = useRef(null);
 
@@ -115,6 +125,42 @@ const LiveTracking = () => {
     const interval = setInterval(fetchVehicles, REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [fetchVehicles]);
+
+  useEffect(() => {
+    api.get('/users/drivers')
+      .then((res) => {
+        const payload = res?.data;
+        const list = payload?.data?.drivers || payload?.data || payload?.drivers || payload || [];
+        setAllDrivers(Array.isArray(list) ? list : []);
+      })
+      .catch(() => setAllDrivers([]));
+  }, []);
+
+  // Owner (2026-10-09): "add an option to change the assigned driver to the
+  // tracker" — reassign which driver a vehicle belongs to right from this
+  // page, instead of going through the driver's own profile edit form. The
+  // server clears the old driver's mapping (if any) so a vehicle never ends
+  // up pointing at two drivers at once.
+  const handleReassign = async (vehicleNo, driverId) => {
+    setReassigningVehicleNo(vehicleNo);
+    setError('');
+    try {
+      const res = await api.put(`/truckoom/vehicles/${vehicleNo}/driver`, { driverId: driverId || null });
+      const newDriver = res.data?.data?.driver || null;
+      setVehicles((prev) => prev.map((v) => {
+        if (v.vehicleNo === vehicleNo) return { ...v, driver: newDriver };
+        // Clear the vehicle this driver used to be on, if any — mirrors the
+        // server's own "one vehicle, one driver" rule immediately, without
+        // waiting for the next 60s poll.
+        if (newDriver && v.driver?.id === newDriver.id) return { ...v, driver: null };
+        return v;
+      }));
+    } catch (err) {
+      setError(err.response?.data?.message || err.message || 'Failed to reassign driver');
+    } finally {
+      setReassigningVehicleNo(null);
+    }
+  };
 
   const locatedVehicles = useMemo(
     () => vehicles.filter((v) => Number.isFinite(v.latitude) && Number.isFinite(v.longitude)),
@@ -171,13 +217,12 @@ const LiveTracking = () => {
           ) : (
             <ul className="divide-y divide-gray-100">
               {vehicles.map((v) => (
-                <li key={v.vehicleNo}>
+                <li key={v.vehicleNo} className={activeVehicleNo === v.vehicleNo ? 'bg-blue-50' : ''}>
                   <button
+                    type="button"
                     onClick={() => panToVehicle(v)}
                     disabled={!Number.isFinite(v.latitude)}
-                    className={`w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                      activeVehicleNo === v.vehicleNo ? 'bg-blue-50' : ''
-                    }`}
+                    className="w-full text-left px-4 pt-3 flex items-center gap-3 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <span
                       className="w-8 h-8 rounded-full flex items-center justify-center text-sm flex-shrink-0"
@@ -197,6 +242,20 @@ const LiveTracking = () => {
                       )}
                     </span>
                   </button>
+                  <div className="px-4 pb-3 pt-1.5 pl-[52px]">
+                    <select
+                      value={v.driver?.id || ''}
+                      disabled={reassigningVehicleNo === v.vehicleNo}
+                      onChange={(e) => handleReassign(v.vehicleNo, e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="w-full text-xs border border-gray-200 rounded px-2 py-1 bg-white text-gray-700 disabled:opacity-50"
+                    >
+                      <option value="">— Unassigned —</option>
+                      {allDrivers.map((d) => (
+                        <option key={d._id} value={d._id}>{driverDisplayName(d)}</option>
+                      ))}
+                    </select>
+                  </div>
                 </li>
               ))}
             </ul>

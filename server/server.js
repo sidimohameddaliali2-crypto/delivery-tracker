@@ -32,6 +32,7 @@ import { startFlaggedNotifier } from './jobs/flaggedCustomerNotifier.js';
 import { startMoveUncollectedCollectionsJob } from './jobs/moveUncollectedCollections.js';
 import { startRecalculateDriverKpisJob } from './jobs/recalculateDriverKpis.js';
 import { startImportMatterDeliveriesJob } from './jobs/importMatterDeliveries.js';
+import { startRecordVehicleLocationsJob } from './jobs/recordVehicleLocations.js';
 
 // Initialize Spaces after dotenv loads
 initializeSpaces();
@@ -402,6 +403,7 @@ startFlaggedNotifier();
 startMoveUncollectedCollectionsJob();
 startRecalculateDriverKpisJob();
 startImportMatterDeliveriesJob();
+startRecordVehicleLocationsJob();
 
 // Warm the Supy recipe search cache so the first meal-editor search of the
 // day isn't the one waiting on a ~2500-recipe cold fetch.

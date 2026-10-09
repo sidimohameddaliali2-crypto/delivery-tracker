@@ -39,6 +39,10 @@ class TruckoomApiService {
     }
   }
 
+  isConfigured() {
+    return Boolean(this.username && this.password && this.companyName);
+  }
+
   /** Every vehicle registered under the company — vehicle_no, imei, device_name. */
   async getCompanyVehicles() {
     this.assertConfigured();

@@ -24,6 +24,14 @@ import {
 const CATEGORY_LABEL = { breakfast: 'Breakfast', meal: 'Meal', snack: 'Snack' };
 const CATEGORY_ORDER = { breakfast: 0, meal: 1, snack: 2 };
 
+// Owner (2026-10-09): a breakfast tagged Large (auto-upgraded, or a large preset)
+// is counted on its own row, apart from the normal breakfast of the same name
+// — it is cooked at a bigger portion, so the two must not be summed together.
+const countingMealName = (meal) => {
+  const base = meal.mealName || meal.menuItemName || 'Unnamed meal';
+  return meal.category === 'breakfast' && meal.flags?.isLargeBreakfast ? `${base} (LARGE)` : base;
+};
+
 const KitchenCounting = () => {
   const [menus, setMenus] = useState([]);
   const [loadingMenus, setLoadingMenus] = useState(false);
@@ -157,7 +165,29 @@ const KitchenCounting = () => {
         });
       });
 
-      setCustomerEntries(computed);
+      // Owner (2026-10-09): a customer with a saved selection but no active
+      // Matter delivery on this date (paused / skipped / not started / ended)
+      // isn't cooked for, so isn't counted. Partner members have no Matter
+      // subscription of their own and are always kept. If Matter can't be
+      // reached the counts are not shown, rather than counting customers who
+      // may not be delivered.
+      const deliveryRes = await api.get('/matter/subscriptions/delivery-on-date', {
+        params: { date: selectedDate },
+        timeout: 180000
+      });
+      const deliverySubs = deliveryRes.data?.data || [];
+      const deliveryEmails = new Set(deliverySubs.map((s) => String(s.email || '').trim().toLowerCase()).filter(Boolean));
+      const deliverySubIds = new Set(deliverySubs.map((s) => String(s.subscription_id || '').trim()).filter(Boolean));
+      const deliveryCustIds = new Set(deliverySubs.map((s) => String(s.customer_id ?? '').trim()).filter(Boolean));
+      const hasDelivery = (entry) => {
+        if (entry.partner) return true;
+        const subId = String(entry.matterSubscriptionId || '').trim();
+        const custId = String(entry.matterCustomerId || '').trim();
+        const email = String(entry.email || '').trim().toLowerCase();
+        return (subId && deliverySubIds.has(subId)) || (custId && deliveryCustIds.has(custId)) || (!!email && deliveryEmails.has(email));
+      };
+
+      setCustomerEntries(computed.filter(hasDelivery));
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to load kitchen counting data');
     } finally {
@@ -180,7 +210,7 @@ const KitchenCounting = () => {
         .filter((meal) => getDateKey(meal?.date) === selectedDate)
         .forEach((meal) => {
           const category = meal.category || 'meal';
-          const mealName = meal.mealName || meal.menuItemName || 'Unnamed meal';
+          const mealName = countingMealName(meal);
           const proteinWeight = Number(meal.proteinWeight) || 0;
           const carbWeight = Number(meal.carbWeight) || 0;
           const vegWeight = Number(meal.vegWeight) || 0;
@@ -238,7 +268,7 @@ const KitchenCounting = () => {
     customerEntries.forEach((entry) => {
       (entry.selectedMeals || [])
         .filter((meal) => getDateKey(meal?.date) === selectedDate)
-        .filter((meal) => (meal.category || 'meal') === category && (meal.mealName || meal.menuItemName || 'Unnamed meal') === mealName)
+        .filter((meal) => (meal.category || 'meal') === category && countingMealName(meal) === mealName)
         .forEach((meal) => {
           const qty = Number(meal.quantity) || 1;
           for (let i = 0; i < qty; i += 1) {

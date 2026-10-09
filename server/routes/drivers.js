@@ -2,6 +2,7 @@ import express from 'express';
 import User from '../models/User.js';
 import Delivery from '../models/Delivery.js';
 import { protect, admin } from '../middleware/auth.js';
+import { getDirections } from '../services/googleDirectionsService.js';
 
 const router = express.Router();
 
@@ -179,6 +180,40 @@ router.put('/:id/location', protect, async (req, res) => {
   } catch (error) {
     console.error('Error updating driver location:', error);
     res.status(500).json({ message: 'Failed to update driver location', error: error.message });
+  }
+});
+
+// Get driving directions through an ordered sequence of points, for the
+// mobile Route Navigator screen (driver's live position + remaining stops,
+// in the dispatch-assigned visit order). Proxies Google Directions so the
+// API key stays server-side — the mobile app never holds it directly.
+router.post('/:id/route-directions', protect, async (req, res) => {
+  try {
+    const driverId = req.params.id;
+
+    const canView =
+      req.user.role === 'super_admin' ||
+      req.user.role === 'admin' ||
+      req.user.id === driverId;
+
+    if (!canView) {
+      return res.status(403).json({ message: 'You do not have permission to request directions for this driver' });
+    }
+
+    const points = Array.isArray(req.body?.points) ? req.body.points : [];
+    const validPoints = points.filter(
+      (p) => p && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))
+    );
+
+    if (validPoints.length < 2) {
+      return res.status(400).json({ message: 'At least two valid {lat, lng} points are required' });
+    }
+
+    const directions = await getDirections(validPoints);
+    res.json({ success: true, ...directions });
+  } catch (error) {
+    console.error('Error fetching route directions:', error);
+    res.status(500).json({ message: 'Failed to fetch route directions', error: error.message });
   }
 });
 

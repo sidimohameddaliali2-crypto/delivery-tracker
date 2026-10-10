@@ -108,6 +108,8 @@ const Layout = ({ children }) => {
   const currentPageName = navigationGroups
     .flatMap((group) => group.items)
     .find((item) => item.href === location.pathname)?.name;
+  // The Dashboard is the delivery operations view, so its top-bar label is "Operations".
+  const headerLabel = currentPageName === 'Dashboard' ? 'Operations' : currentPageName;
 
   const renderGroups = (onLinkClick) => (
     <nav className="mo-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-1">
@@ -218,7 +220,7 @@ const Layout = ({ children }) => {
       {/* Main content */}
       <div className="flex flex-col flex-1 overflow-hidden">
         {/* Header */}
-        <header className="mo-chrome-font flex items-center justify-between flex-shrink-0 px-6 py-4 bg-[#0b1630] border-b border-white/10 text-white">
+        <header className="mo-chrome-font mo-app-header relative z-40 flex items-center justify-between flex-wrap gap-x-4 flex-shrink-0 px-6 py-4 bg-[#0b1630] border-b border-white/10 text-white">
           <div className="flex items-center">
             <button
               onClick={() => setSidebarOpen(true)}
@@ -236,15 +238,17 @@ const Layout = ({ children }) => {
                 <Menu className="w-6 h-6" />
               </button>
             )}
-            {currentPageName && (
+            {headerLabel && (
               <span className="ml-3 pl-3 border-l border-white/20 text-[11px] tracking-[0.18em] uppercase text-white/80">
-                {currentPageName}
+                {headerLabel}
               </span>
             )}
           </div>
 
+          {/* Pages can portal their controls here (the Dashboard puts its date navigation in it). */}
+          <div id="mo-header-slot" className="mo-header-slot" />
+
           <div className="flex items-center space-x-4">
-            {/* Date would go here */}
             <div className="mo-user-chip flex items-center space-x-3">
               <div className="text-right hidden sm:block">
                 <p className="mo-user-name">

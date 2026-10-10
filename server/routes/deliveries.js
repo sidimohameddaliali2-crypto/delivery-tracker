@@ -16,7 +16,7 @@ import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { syncDeliveryToSheet, syncDeliveriesToSheet } from '../services/googleSheetSync.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
-import { businessRangeBounds, getDailyTimingCounts, getLatenessStats, getTimingRecords } from '../services/deliveryTimingHistory.js';
+import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
 import {
   optimizeRoutes,
   applyRoutePlan,
@@ -1477,43 +1477,47 @@ router.get('/late-early',  async (req, res) => {
   }
 });
 
-// Dashboard delivery-history chart: per-day early / on-time / late / awaiting
-// counts for an inclusive business-day range (YYYY-MM-DD). Must stay above '/:id'.
+// Dashboard delivery overview. Both endpoints take an inclusive Dubai-day range
+// (start/end = YYYY-MM-DD) plus optional search / zone / driver / status / customerId
+// filters. They must stay above '/:id'.
+const TIMING_FILTER_KEYS = ['search', 'zone', 'driver', 'status', 'customerId'];
+const pickTimingFilters = (query) => Object.fromEntries(
+  TIMING_FILTER_KEYS.filter((key) => query[key] !== undefined).map((key) => [key, String(query[key])])
+);
+const isRangeError = (error) => /YYYY-MM-DD|End date/.test(error.message);
+
+// Per-day counts (+ per-hour for a single day), lateness stats and filter options.
 router.get('/timing-history', async (req, res) => {
   try {
     const range = businessRangeBounds(req.query.start, req.query.end);
-    const [days, lateness] = await Promise.all([getDailyTimingCounts(range), getLatenessStats(range)]);
-    res.json({ success: true, data: { days, lateness, updatedAt: new Date().toISOString() } });
+    const data = await getTimingOverview(range, pickTimingFilters(req.query), {
+      hourly: req.query.start === req.query.end,
+    });
+    res.json({ success: true, data: { ...data, updatedAt: new Date().toISOString() } });
   } catch (error) {
-    if (/YYYY-MM-DD|End date/.test(error.message)) {
-      return res.status(400).json({ success: false, message: error.message });
-    }
+    if (isRangeError(error)) return res.status(400).json({ success: false, message: error.message });
     console.error('Timing history error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
-// Records behind a chart segment (also used, with a large limit, for CSV export).
+// Records behind the table, a chart segment or a CSV export (large limit).
 router.get('/timing-records', async (req, res) => {
   try {
     const range = businessRangeBounds(req.query.start, req.query.end);
-    const data = await getTimingRecords(range, {
+    const data = await getTimingRecords(range, pickTimingFilters(req.query), {
       timing: req.query.timing,
-      search: req.query.search,
+      hour: req.query.hour ?? null,
       page: req.query.page,
       limit: req.query.limit,
     });
     res.json({ success: true, data });
   } catch (error) {
-    if (/YYYY-MM-DD|End date/.test(error.message)) {
-      return res.status(400).json({ success: false, message: error.message });
-    }
+    if (isRangeError(error)) return res.status(400).json({ success: false, message: error.message });
     console.error('Timing records error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
-
-
 
 // @desc    Get delivery by ID
 // @route   GET /api/deliveries/:id

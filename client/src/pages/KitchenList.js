@@ -1668,6 +1668,14 @@ const KitchenList = () => {
     return match || cleaned;
   };
 
+  // Owner (2026-10-10): customers whose zone (Matter's address `area`) is
+  // Dubai South district ("Dubai South" or "Emaar South") are grouped under the Abu Dhabi category on the kitchen paper
+  // (PDF, Word, Excel and the customer-list export). Their printed address
+  // still shows Dubai South / Dubai.
+  const paperEmirate = (addr) => (/dubai\s*south|emaar\s*south/i.test(String(addr?.area || ''))
+    ? 'Abu Dhabi'
+    : canonicalizeEmirate(addr?.emirate));
+
   // Extracts a sortable 24h hour from labels like "By 6 AM" / "By 12:30 PM".
   // Windows that can't be parsed sort to the end.
   const parseDeliveryHour = (label) => {
@@ -1771,7 +1779,7 @@ const KitchenList = () => {
     const partnerEntries = entriesWithMeals.filter((row) => !!row.entry.partner);
     const regularEntries = entriesWithMeals.filter((row) => !row.entry.partner);
 
-    const emirateOf = (row) => canonicalizeEmirate(row.entry.deliveryAddress?.emirate);
+    const emirateOf = (row) => paperEmirate(row.entry.deliveryAddress);
     const emirateGroups = new Map();
     regularEntries.forEach((row) => {
       const emirate = emirateOf(row);
@@ -1860,7 +1868,7 @@ const KitchenList = () => {
       const dayNote = (entry.dayNotes || []).find((n) => n.date === dateKey)?.note || '';
       const section = entry.partner
         ? `Partner: ${entry.partner?.businessName || 'Partner'}`
-        : `${canonicalizeEmirate(entry.deliveryAddress?.emirate)} — ${formatDeliveryHourLabel(parseDeliveryHour(entry.deliveryWindow?.label))}`;
+        : `${paperEmirate(entry.deliveryAddress)} — ${formatDeliveryHourLabel(parseDeliveryHour(entry.deliveryWindow?.label))}`;
       return dayMeals.map((meal, index) => {
         const label = getMealLabel(meal);
         return {
@@ -1962,7 +1970,7 @@ const KitchenList = () => {
 
     const emirateGroups = new Map();
     regularEntries.forEach((row) => {
-      const emirate = canonicalizeEmirate(row.entry.deliveryAddress?.emirate);
+      const emirate = paperEmirate(row.entry.deliveryAddress);
       if (!emirateGroups.has(emirate)) emirateGroups.set(emirate, []);
       emirateGroups.get(emirate).push(row);
     });
@@ -2203,7 +2211,7 @@ ${body}
       const partnerEntries = entriesWithMeals.filter((row) => !!row.entry.partner);
       const regularEntries = entriesWithMeals.filter((row) => !row.entry.partner);
 
-      const emirateOf = (row) => canonicalizeEmirate(row.entry.deliveryAddress?.emirate);
+      const emirateOf = (row) => paperEmirate(row.entry.deliveryAddress);
 
       const emirateGroups = new Map();
       regularEntries.forEach((row) => {

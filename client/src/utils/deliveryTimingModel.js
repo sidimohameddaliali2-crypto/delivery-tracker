@@ -7,7 +7,7 @@ export const TIMING_LABELS = Object.freeze({
   early: 'Early',
   on: 'On time',
   late: 'Late',
-  unknown: 'Awaiting update',
+  unknown: 'Missing timing',
 });
 
 export const PRESETS = [
@@ -17,8 +17,17 @@ export const PRESETS = [
   ['90', '90 days'],
   ['year', '1 year'],
   ['all', 'All time'],
-  ['custom', 'Custom date'],
 ];
+
+// The table tabs; "unknown" is shown as "Missing timing" in this view.
+export const TIMING_TABS = [
+  ['all', 'All records'],
+  ['early', 'Early'],
+  ['on', 'On time'],
+  ['late', 'Late'],
+  ['unknown', 'Missing timing'],
+];
+export const MISSING_VALUE = '__missing__';
 
 // Earliest day "All time" will ask for.
 export const HISTORY_START = '2024-01-01';
@@ -65,6 +74,25 @@ export function rangeFor(preset, today, custom = {}) {
 const emptyBucket = (start, end) => ({
   key: `${start}_${end}`, start, end, early: 0, on: 0, late: 0, unknown: 0, total: 0, recorded: 0,
 });
+
+const hourLabel = (hour) => `${String(hour).padStart(2, '0')}:00`;
+
+// 24 scheduled Dubai hours for a single-day range (server `hours` rows).
+export function groupHours(hours, day) {
+  return {
+    grouping: 'hour',
+    buckets: (hours || []).map((h) => ({
+      key: `${day}T${String(h.hour).padStart(2, '0')}`,
+      start: day,
+      end: day,
+      hour: h.hour,
+      hourStart: hourLabel(h.hour),
+      hourEnd: hourLabel(h.hour + 1),
+      early: h.early, on: h.on, late: h.late, unknown: h.unknown, total: h.total,
+      recorded: h.early + h.on + h.late,
+    })),
+  };
+}
 
 export function summarize(days) {
   const sum = days.reduce((acc, d) => {
@@ -115,6 +143,8 @@ export const dayLabel = (day, full = false) => (full
 export const periodLabel = (range) => (range.start === range.end
   ? dayLabel(range.start)
   : `${dayLabel(range.start)} – ${dayLabel(range.end)}`);
+export const bucketLabel = (bucket) => periodLabel(bucket)
+  + (bucket.hourStart === undefined ? '' : ` · ${bucket.hourStart}–${bucket.hourEnd}`);
 export const shortDayLabel = (day) => dayFmt(day, { day: 'numeric', month: 'short' });
 
 // Text starting with = + - @ is prefixed with ' so spreadsheets never run it as a formula.
@@ -125,10 +155,10 @@ const csvCell = (value) => {
 };
 
 export function recordsToCsv(records) {
-  const header = ['Customer', 'Customer ID', 'Status', 'Timing', 'Scheduled (Dubai)', 'Delivered (Dubai)', 'Variance (min)'];
+  const header = ['Customer', 'Customer ID', 'Zone', 'Driver', 'Status', 'Timing', 'Scheduled (Dubai)', 'Delivered (Dubai)', 'Variance (min)'];
   const stamp = (value) => (value ? new Date(value).toLocaleString('en-GB', { timeZone: 'Asia/Dubai', hourCycle: 'h23' }) : '');
   const lines = records.map((r) => [
-    r.customerName, r.customerId, r.status, TIMING_LABELS[r.timing] || r.timing,
+    r.customerName, r.customerId, r.zone, r.driverName, r.status, TIMING_LABELS[r.timing] || r.timing,
     stamp(r.scheduledTime), stamp(r.deliveredTime), r.varianceMinutes ?? '',
   ].map(csvCell).join(','));
   return [header.map(csvCell).join(','), ...lines].join('\n');

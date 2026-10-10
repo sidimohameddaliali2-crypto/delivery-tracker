@@ -46,13 +46,16 @@ function FlaggedCustomersModal({ flaggedCustomers, onClose }) {
 }
 
 function BagLifecycleAnalyticsCard({ assignedCount, remainingCount, flaggedCustomers }) {
+  const navigate = useNavigate();
   const [isModalOpen, setIsModalOpen] = useState(false);
   return (
-    <section className="mo-panel" aria-label="Bag lifecycle">
+    <section className="mo-panel" aria-label="Bags">
       <div className="mo-panel-head">
         <div>
-          <h2>Bag lifecycle <InfoTip text="Bags currently assigned to customers. Flagged customers hold 3 or more bags." /></h2>
-          <p>Bag balances are independent of the delivery date range.</p>
+          <h2>Bags <InfoTip text="Bags currently assigned to customers. Flagged customers hold 3 or more bags." /></h2>
+          <button type="button" className="mo-btn mo-bag-link" onClick={() => navigate('/bags')}>
+            <span className="material-symbols-outlined" aria-hidden="true">shopping_bag</span> Bag tracking
+          </button>
         </div>
         <CardMenu
           label="Bag lifecycle options"
@@ -71,6 +74,7 @@ function BagLifecycleAnalyticsCard({ assignedCount, remainingCount, flaggedCusto
           )}
         </div>
       </div>
+      <p className="mo-bag-note">Live bag balances · independent of delivery filters.</p>
       {isModalOpen && <FlaggedCustomersModal flaggedCustomers={flaggedCustomers} onClose={() => setIsModalOpen(false)} />}
     </section>
   );

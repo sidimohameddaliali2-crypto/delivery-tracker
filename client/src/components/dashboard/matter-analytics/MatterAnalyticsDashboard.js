@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchBags } from '../../../store/slices/bagSlice';
 import api from '../../../utils/api';
@@ -6,13 +6,11 @@ import { dubaiToday } from '../../../utils/deliveryTimingModel';
 import { FLAGGED_BAG_THRESHOLD } from './communications/constants';
 import '../../../styles/matterDashboard.css';
 
-import OperationsOverviewHeader from './OperationsOverviewHeader';
-import TodayStrip from './TodayStrip';
-import DeliveryHistoryPanel from './DeliveryHistoryPanel';
+import DeliveryWorkspace from './DeliveryWorkspace';
 import BagLifecycleAnalyticsCard from './BagLifecycleAnalyticsCard';
 import TeamUpdates from './TeamUpdates';
-import IncidentsDialog from './IncidentsDialog';
 import AddIncidentModal from './AddIncidentModal';
+import IncidentsDialog from './IncidentsDialog';
 import CommunicationsCenterModal from './communications/CommunicationsCenterModal';
 import QuickNewCommunicationModal from './communications/QuickNewCommunicationModal';
 
@@ -20,14 +18,13 @@ function MatterAnalyticsDashboard() {
   const dispatch = useDispatch();
   const { bags = [] } = useSelector((state) => state.bag || {});
 
-  // Dubai "today" (refreshed when the tab regains focus) and a counter the
-  // "View today" buttons bump to reset the history panel to Today.
+  // Dubai "today", refreshed when the tab regains focus (the page can stay open overnight).
   const [dubaiDay, setDubaiDay] = useState(dubaiToday);
-  const [viewTodayRequest, setViewTodayRequest] = useState(0);
-  const historyPanelRef = useRef(null);
-
-  // Today's { total, incomplete } from /deliveries/timing-history.
-  const [todayStats, setTodayStats] = useState(null);
+  useEffect(() => {
+    const update = () => setDubaiDay(dubaiToday());
+    window.addEventListener('focus', update);
+    return () => window.removeEventListener('focus', update);
+  }, []);
 
   const [incidents, setIncidents] = useState([]);
   const [showIncidentModal, setShowIncidentModal] = useState(false);
@@ -47,34 +44,8 @@ function MatterAnalyticsDashboard() {
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
 
   useEffect(() => {
-    const update = () => setDubaiDay(dubaiToday());
-    window.addEventListener('focus', update);
-    return () => window.removeEventListener('focus', update);
-  }, []);
-
-  const viewToday = useCallback(() => {
-    setDubaiDay(dubaiToday());
-    setViewTodayRequest((n) => n + 1);
-    historyPanelRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
-  }, []);
-
-  useEffect(() => {
     dispatch(fetchBags({ page: 1, limit: 5000 }));
   }, [dispatch]);
-
-  // Same endpoint (and Dubai-day boundaries) as the history panel, so the strip and the
-  // panel's "Today" preset always show the same numbers.
-  useEffect(() => {
-    let cancelled = false;
-    api.get('/deliveries/timing-history', { params: { start: dubaiDay, end: dubaiDay } })
-      .then((res) => {
-        if (cancelled) return;
-        const day = res.data?.data?.days?.[0];
-        setTodayStats({ total: day?.total || 0, incomplete: day?.unknown || 0 });
-      })
-      .catch((error) => { if (!cancelled) { setTodayStats(null); console.error('Failed to load today stats:', error); } });
-    return () => { cancelled = true; };
-  }, [dubaiDay]);
 
   const fetchIncidents = useCallback(async () => {
     try {
@@ -85,7 +56,6 @@ function MatterAnalyticsDashboard() {
       console.error('Failed to load incidents:', error);
     }
   }, []);
-
   useEffect(() => { fetchIncidents(); }, [fetchIncidents]);
 
   const fetchIssuesPreview = useCallback(async () => {
@@ -100,7 +70,6 @@ function MatterAnalyticsDashboard() {
       setIssuesPreviewLoading(false);
     }
   }, []);
-
   useEffect(() => { fetchIssuesPreview(); }, [fetchIssuesPreview]);
 
   const handleIncidentSubmit = async (event) => {
@@ -169,37 +138,24 @@ function MatterAnalyticsDashboard() {
   const openIncidentModal = () => setShowIncidentModal(true);
 
   return (
-    <div className="matter-analytics p-4 sm:p-6 space-y-4 sm:space-y-6 min-h-screen">
-      <OperationsOverviewHeader
-        onOpenComms={openCommsModal}
-        onAddIncident={openIncidentModal}
-        onViewToday={viewToday}
-      />
+    <div className="matter-analytics p-4 sm:p-6 min-h-screen">
+      <DeliveryWorkspace today={dubaiDay}>
+        <TeamUpdates
+          incidents={incidentsMetrics}
+          issues={openIssuesPreview}
+          issuesLoading={issuesPreviewLoading}
+          onAddIncident={openIncidentModal}
+          onViewIncidents={() => setShowIncidentsList(true)}
+          onOpenComms={openCommsModal}
+          onNewCommunication={() => setIsQuickAddOpen(true)}
+        />
 
-      <TodayStrip
-        stats={todayStats}
-        openIncidents={incidentsMetrics.count}
-        onViewToday={viewToday}
-        onViewIncidents={() => setShowIncidentsList(true)}
-      />
-
-      <DeliveryHistoryPanel panelRef={historyPanelRef} today={dubaiDay} presetRequest={viewTodayRequest} />
-
-      <BagLifecycleAnalyticsCard
-        assignedCount={assignedBagsCount}
-        remainingCount={remainingBagsCount}
-        flaggedCustomers={flaggedCustomers}
-      />
-
-      <TeamUpdates
-        incidents={incidentsMetrics}
-        issues={openIssuesPreview}
-        issuesLoading={issuesPreviewLoading}
-        onAddIncident={openIncidentModal}
-        onViewIncidents={() => setShowIncidentsList(true)}
-        onOpenComms={openCommsModal}
-        onNewCommunication={() => setIsQuickAddOpen(true)}
-      />
+        <BagLifecycleAnalyticsCard
+          assignedCount={assignedBagsCount}
+          remainingCount={remainingBagsCount}
+          flaggedCustomers={flaggedCustomers}
+        />
+      </DeliveryWorkspace>
 
       {showIncidentsList && (
         <IncidentsDialog

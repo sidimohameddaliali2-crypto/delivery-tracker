@@ -154,8 +154,15 @@ export const fetchBreakfastPresets = async (api, menuId) => {
 };
 
 export const getCustomerName = (entry) => {
-  const matterName = String(entry?.matterName || '').trim();
-  if (matterName) return matterName;
+  const rawMatterName = String(entry?.matterName || '').trim();
+  if (rawMatterName) {
+    // Matter's names are sometimes typed all-lowercase or ALL CAPS — tidy only
+    // those to Title Case; a name with mixed case is left exactly as Matter has it.
+    const allOneCase = rawMatterName === rawMatterName.toLowerCase() || rawMatterName === rawMatterName.toUpperCase();
+    return allOneCase
+      ? rawMatterName.toLowerCase().replace(/(^|[\s'-])([a-z])/g, (m, sep, ch) => sep + ch.toUpperCase())
+      : rawMatterName;
+  }
   const first = String(entry?.firstName || '').trim();
   const last = String(entry?.lastName || '').trim();
   const combined = [first, last].filter(Boolean).join(' ').trim();

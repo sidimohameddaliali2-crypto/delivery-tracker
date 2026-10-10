@@ -971,7 +971,12 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
 
   return {
     customerId: customer?.customerId,
-    customerName: [customer?.firstName, customer?.lastName].filter(Boolean).join(' ').trim(),
+    // The caller's resolved display name wins (Kitchen List passes the Matter
+    // name first, then the saved first/last name) — this used to be rebuilt
+    // here from first/last only, so a customer saved with no name (or a
+    // different spelling than Matter's) showed their email / old name.
+    customerName: String(customer?.customerName || '').trim()
+      || [customer?.firstName, customer?.lastName].filter(Boolean).join(' ').trim(),
     email: customer?.email,
     // Carried through so callers can match this customer to Matter's delivery
     // list (kitchen paper / counting leave out customers with no delivery).

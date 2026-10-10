@@ -230,6 +230,17 @@ const buildRemarkFromParts = (checked, extras) => [
   ...extras
 ].join(' + ');
 
+// Owner (2026-10-10): every customer's food exclusions (Matter's dietary
+// restrictions) are printed on the kitchen paper, PDF and Word. "None" when the
+// customer has none; "Not available" when no Matter subscription data loaded,
+// so a missing lookup is never mistaken for "no exclusions".
+const exclusionsText = (entry) => {
+  const list = (Array.isArray(entry?.dietaryRestrictions) ? entry.dietaryRestrictions : [])
+    .map((item) => String(item || '').trim()).filter(Boolean);
+  if (list.length > 0) return list.join(', ');
+  return entry?.planName ? 'None' : 'Not available';
+};
+
 // Remark column text for the kitchen paper PDF/Excel.
 const mealRemarkText = (meal) => [
   meal?.remark ? `Change ${meal.remark}` : '',
@@ -1855,8 +1866,11 @@ const KitchenList = () => {
   };
 
   // Excel version of the Day Kitchen Paper: one row per meal, in exactly the
-  // PDF's order (buildKitchenPaperOrder), with the same P/C/V weight columns,
-  // remark, and day note the PDF prints per customer.
+  // PDF's order (buildKitchenPaperOrder), carrying everything the printed
+  // sheet shows per customer — delivery time, plan line, exclusions, day note,
+  // the meal's remark and P/C/V weights, and the customer's total macros — so
+  // the sheet can be filtered/sorted in Excel. Same customers as the PDF (no
+  // Matter delivery that day = left out).
   const exportDayKitchenPaperToExcel = async (dateKey) => {
     if (!dateKey) return;
     const deliverableRows = await getDeliverableRows(dateKey);
@@ -1864,17 +1878,27 @@ const KitchenList = () => {
     const orderedEntries = buildKitchenPaperOrder(dateKey, deliverableRows);
     if (orderedEntries.length === 0) return;
     const XLSX = await loadXLSX();
+    const yesNo = (v) => (v === null || v === undefined ? 'N/A' : (v ? 'Yes' : 'No'));
     const rows = orderedEntries.flatMap(({ entry, dayMeals }) => {
       const dayNote = (entry.dayNotes || []).find((n) => n.date === dateKey)?.note || '';
       const section = entry.partner
         ? `Partner: ${entry.partner?.businessName || 'Partner'}`
         : `${paperEmirate(entry.deliveryAddress)} — ${formatDeliveryHourLabel(parseDeliveryHour(entry.deliveryWindow?.label))}`;
+      const windowHour = parseDeliveryHour(entry.deliveryWindow?.label);
+      const deliveryTime = windowHour === 999
+        ? 'No delivery window'
+        : (/^\s*by\b/i.test(String(entry.deliveryWindow?.label || '')) ? `By ${formatDeliveryHourLabel(windowHour)}` : formatDeliveryHourLabel(windowHour));
       return dayMeals.map((meal, index) => {
         const label = getMealLabel(meal);
         return {
           Section: section,
+          'Delivery time': entry.partner ? '' : deliveryTime,
           Customer: entry.customerName || entry.email || 'Unknown customer',
           Plan: entry.planName || '',
+          'Meals/day': entry.mealsPerDay ?? '',
+          'Snacks/day': entry.snacksPerDay ?? '',
+          'Breakfast included': yesNo(entry.breakfastIncluded),
+          Exclusions: exclusionsText(entry),
           Address: entry.partner ? '' : formatAddress(entry.deliveryAddress),
           Type: label.mealType,
           Meal: label.mealName,
@@ -1882,11 +1906,19 @@ const KitchenList = () => {
           'P (g)': Number(meal.proteinWeight) || 0,
           'C (g)': Number(meal.carbWeight) || 0,
           'V (g)': Number(meal.vegWeight) || 0,
+          'Total C': Math.round(Number(entry.macros?.C) || 0),
+          'Total P': Math.round(Number(entry.macros?.P) || 0),
+          'Total F': Math.round(Number(entry.macros?.F) || 0),
           Note: index === 0 ? dayNote : ''
         };
       });
     });
     const worksheet = XLSX.utils.json_to_sheet(rows);
+    // Readable out of the box: sensible column widths and a filter on the header row.
+    const widths = { Section: 24, 'Delivery time': 14, Customer: 28, Plan: 16, 'Meals/day': 9, 'Snacks/day': 10, 'Breakfast included': 11, Exclusions: 34, Address: 48, Type: 10, Meal: 44, Remark: 22, 'P (g)': 7, 'C (g)': 7, 'V (g)': 7, 'Total C': 8, 'Total P': 8, 'Total F': 8, Note: 30 };
+    const headers = Object.keys(rows[0] || {});
+    worksheet['!cols'] = headers.map((h) => ({ wch: widths[h] || 12 }));
+    worksheet['!autofilter'] = { ref: worksheet['!ref'] };
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Paper');
     XLSX.writeFile(workbook, `kitchen-paper-${dateKey}${planFileSuffix}.xlsx`);
@@ -1942,27 +1974,36 @@ const KitchenList = () => {
           + `<td style="color:#c2410c;font-weight:bold">${esc(remark)}</td>`
           + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
       }).join('');
+      // The whole customer block sits in ONE table row that Word may not split
+      // across a page edge (page-break-inside:avoid on the row is how Word itself
+      // writes "Allow row to break across pages" off). Paragraph keep-with-next
+      // is not honoured when Word imports HTML, so this is what keeps a name
+      // and its meals and totals on the same page.
       return `
-        <div style="margin-top:14pt">
-          <p style="margin:0;font-size:12pt"><b>${esc(nameOf({ entry }) || 'Unknown customer')}</b>
+        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin-top:6pt"><tr style="page-break-inside:avoid"><td style="padding-top:8pt">
+          <p style="margin:0;font-size:12pt;page-break-after:avoid"><b>${esc(nameOf({ entry }) || 'Unknown customer')}</b>
             &nbsp;&nbsp;<span style="background:${hasWindow ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:9pt;font-weight:bold">&nbsp;${esc(tagText)}&nbsp;</span></p>
-          <p style="margin:0;font-size:9pt">${esc(subLine)}</p>
-          ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:9pt;color:#be123c"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
-          <p style="margin:0;font-size:9pt"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
-          ${dayNote ? `<p style="margin:0;font-size:9pt;color:#b45309"><b>Note: ${esc(dayNote)}</b></p>` : ''}
+          <p style="margin:0;font-size:9pt;page-break-after:avoid">${esc(subLine)}</p>
+          ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:9pt;color:#be123c;page-break-after:avoid"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
+          <p style="margin:0;font-size:9pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
+          <p style="margin:0;font-size:9pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
+          ${dayNote ? `<p style="margin:0;font-size:9pt;color:#b45309;page-break-after:avoid"><b>Note: ${esc(dayNote)}</b></p>` : ''}
           <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-size:9pt;margin-top:4pt">
             <tr style="background:#1e293b;color:#ffffff"><th>Type</th><th>Meal</th><th>Remark</th><th>P</th><th>C</th><th>V</th></tr>
             ${rows}
           </table>
           <p style="margin:4pt 0 0 0;font-size:10pt"><b>Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}</b></p>
-        </div>`;
+        </td></tr></table>`;
     };
 
     const sections = [];
     const addSection = (kicker, heading, rows, subLineFor) => {
+      // The page break goes on the section's FIRST PARAGRAPH only. Put on the
+      // wrapping <div> instead, Word applies it to every paragraph and table
+      // inside — each customer line landed on its own page (1,300+ pages).
       sections.push(`
-        <div style="${sections.length > 0 ? 'page-break-before:always' : ''}">
-          <p style="margin:0;font-size:10pt;color:#787878">${esc(kicker)}</p>
+        <div>
+          <p style="margin:0;font-size:10pt;color:#787878;${sections.length > 0 ? 'page-break-before:always' : ''}">${esc(kicker)}</p>
           <h2 style="margin:4pt 0 0 0;font-size:13pt;background:#f1f5f9;padding:3pt">${esc(heading)}</h2>
           ${rows.map((row) => customerBlock(row, subLineFor(row))).join('')}
         </div>`);
@@ -2006,7 +2047,7 @@ const KitchenList = () => {
     const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
 <head><meta charset="utf-8"><title>Kitchen Prep Sheet</title>
 <!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View></w:WordDocument></xml><![endif]-->
-<style>body{font-family:Arial,sans-serif} th,td{text-align:left}</style></head>
+<style>body{font-family:Arial,sans-serif} th,td{text-align:left;page-break-after:avoid} tr{page-break-inside:avoid}</style></head>
 <body>
 <h1 style="font-size:16pt;margin:0">Kitchen Prep Sheet — ${esc(dayLabel)}</h1>
 <p style="font-size:9pt;color:#787878;margin:0">Generated: ${esc(new Date().toLocaleString())}</p>
@@ -2133,6 +2174,15 @@ ${body}
         );
         doc.setFont(undefined, 'normal');
         y += 5;
+
+        // Food exclusions, in red so the kitchen can't miss them.
+        const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry)}`, pageWidth - 28);
+        doc.setFont(undefined, 'bold');
+        doc.setTextColor(190, 18, 60);
+        doc.text(exclusionLines, 14, y);
+        doc.setTextColor(0);
+        doc.setFont(undefined, 'normal');
+        y += exclusionLines.length * 4.4 + 0.6;
 
         // Kitchen-only note for this specific delivery day, if one was
         // added on Kitchen List — printed right under the address so it's

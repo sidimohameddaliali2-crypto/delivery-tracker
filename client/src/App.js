@@ -53,6 +53,7 @@ import Renewal from './pages/Renewal';
 
 // Layout
 import Layout from './components/Layout';
+import { SocketProvider } from './contexts/SocketContext';
 
 // Protected Route Component
 const AccessDenied = ({ 
@@ -259,6 +260,7 @@ const MemberRoute = ({ children }) => {
 function App() {
   return (
     <Provider store={store}>
+      <SocketProvider>
       <Router>
         <AuthBootstrap />
         <div className="App">
@@ -622,6 +624,7 @@ function App() {
           <Toaster />
         </div>
       </Router>
+      </SocketProvider>
     </Provider>
   );
 }

@@ -2,8 +2,9 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import api from '../utils/api';
 import PrintConfigModal from '../components/deliveries/PrintConfigModal';
-import RowActionsMenu from '../components/deliveries/RowActionsMenu';
+import DeliveryDetailModal from '../components/deliveries/DeliveryDetailModal';
 import { toBusinessComponents } from '../utils/businessTime';
+import { useSocket } from '../contexts/SocketContext';
 
 const COMPLETED_STATUSES = ['delivered', 'completed', 'collected'];
 const PENDING_STATUSES = ['pending', 'assigned', 'on_route', 'picked_up'];
@@ -84,6 +85,13 @@ const formatDate = (dateString) => {
   return { date: `${month}/${day}/${c.year}`, time: `${String(hours).padStart(2, '0')}:${minutes} ${ampm}` };
 };
 
+// The actual moment a driver completed the stop — distinct from
+// scheduledTime (when it was due). Collections set collectionDetails.collectedAt
+// rather than completedAt/deliveredTime, so all three are checked.
+const getActualDeliveryTime = (delivery) => (
+  delivery.completedAt || delivery.deliveredTime || delivery.collectionDetails?.collectedAt || null
+);
+
 const getDriverDisplayName = (driver) => {
   if (!driver) return 'Unnamed driver';
   const firstName = driver.profile?.firstName || driver.firstName;
@@ -110,6 +118,10 @@ const Deliveries = () => {
   const [allDrivers, setAllDrivers] = useState([]);
   const [isPrintConfigOpen, setIsPrintConfigOpen] = useState(false);
   const [isDeletingSelected, setIsDeletingSelected] = useState(false);
+  // Owner (2026-10-10): clicking a delivery opens its details in a modal,
+  // in place, instead of navigating to a separate page — closing it must
+  // NOT refetch the whole table (no fetchDeliveries() call on close).
+  const [activeDeliveryId, setActiveDeliveryId] = useState(null);
   const MAX_FETCH_LIMIT = 2000;
 
   // Fetch every delivery for the selected date (all statuses) — status/type/area/timing/
@@ -156,6 +168,48 @@ const Deliveries = () => {
   }, [selectedDate]);
 
   useEffect(() => { fetchDeliveries(); }, [fetchDeliveries]);
+
+  // Owner (2026-10-10): "auto refresh whenever someone completes the
+  // delivery, and a popup that goes away after 2s" — later refined to "top
+  // of the page, driver name, customer name, delivered." Completion fires
+  // over Socket.IO as either 'delivery:statusUpdate' (the driver app's own
+  // complete/collect-delivery flow) or 'delivery:updated' (bulk/other
+  // update paths) — both are broadcast server-wide, not scoped to a room,
+  // so this page gets them regardless of who triggered the completion.
+  const { socket } = useSocket();
+  const [completionToast, setCompletionToast] = useState(null);
+  // The emitted delivery's `driver` field is just an id (the server doesn't
+  // populate it before emitting), so the driver's name is looked up here
+  // against the already-loaded driver list. Kept in a ref so the socket
+  // listener below doesn't need to re-subscribe every time allDrivers loads.
+  const allDriversRef = React.useRef([]);
+  useEffect(() => { allDriversRef.current = allDrivers; }, [allDrivers]);
+
+  useEffect(() => {
+    if (!socket) return undefined;
+    const handleDeliveryEvent = (delivery) => {
+      if (!delivery || !COMPLETED_STATUSES.includes(delivery.status)) return;
+      const driverId = typeof delivery.driver === 'object' ? delivery.driver?._id : delivery.driver;
+      const driver = allDriversRef.current.find((d) => d._id === driverId);
+      const driverName = driver ? getDriverDisplayName(driver) : 'Driver';
+      const customerName = delivery.customerName || 'Customer';
+      const statusLabel = (STATUS_STYLES[delivery.status]?.label || 'completed').toLowerCase();
+      setCompletionToast(`${driverName} → ${customerName}: ${statusLabel}`);
+      fetchDeliveries();
+    };
+    socket.on('delivery:statusUpdate', handleDeliveryEvent);
+    socket.on('delivery:updated', handleDeliveryEvent);
+    return () => {
+      socket.off('delivery:statusUpdate', handleDeliveryEvent);
+      socket.off('delivery:updated', handleDeliveryEvent);
+    };
+  }, [socket, fetchDeliveries]);
+
+  useEffect(() => {
+    if (!completionToast) return undefined;
+    const timer = setTimeout(() => setCompletionToast(null), 2000);
+    return () => clearTimeout(timer);
+  }, [completionToast]);
 
   useEffect(() => {
     api.get('/users/drivers')
@@ -221,6 +275,20 @@ const Deliveries = () => {
     if (timingFilter === 'late') filtered = filtered.filter((d) => d.lateMinutes > 0);
     else if (timingFilter === 'early') filtered = filtered.filter((d) => d.earlyMinutes > 0);
 
+    // Owner (2026-10-10): always arrange by the driver's ACTUAL delivery
+    // time (earliest to latest) — with or without a driver filter applied —
+    // not by scheduled time. Deliveries with no actual time yet (still
+    // pending) have nothing to sort by, so they're pushed to the end,
+    // ordered among themselves by scheduled time.
+    filtered = [...filtered].sort((a, b) => {
+      const at = getActualDeliveryTime(a);
+      const bt = getActualDeliveryTime(b);
+      if (at && bt) return new Date(at) - new Date(bt);
+      if (at) return -1;
+      if (bt) return 1;
+      return new Date(a.scheduledTime || 0) - new Date(b.scheduledTime || 0);
+    });
+
     setFilteredDeliveries(filtered);
   }, [deliveries, searchTerm, statusFilter, typeFilter, areaFilter, emirateFilter, driverFilter, timingFilter]);
 
@@ -231,6 +299,11 @@ const Deliveries = () => {
     late: deliveries.filter((d) => d.lateMinutes > 0).length,
     early: deliveries.filter((d) => d.earlyMinutes > 0).length,
   }), [deliveries]);
+
+  const activeDelivery = useMemo(
+    () => (activeDeliveryId ? deliveries.find((d) => d._id === activeDeliveryId) || null : null),
+    [deliveries, activeDeliveryId]
+  );
 
   const filteredDeliveryIds = useMemo(() => filteredDeliveries.map((d) => d._id), [filteredDeliveries]);
   const allFilteredSelected = filteredDeliveryIds.length > 0 && filteredDeliveryIds.every((id) => selectedDeliveries.has(id));
@@ -317,6 +390,11 @@ const Deliveries = () => {
 
   return (
     <div className="matter-analytics p-6 bg-gray-50 min-h-screen">
+      {completionToast && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-lg bg-emerald-600 text-white font-medium shadow-lg">
+          {completionToast}
+        </div>
+      )}
       {/* Header */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
         <div>
@@ -458,10 +536,11 @@ const Deliveries = () => {
           const statusStyle = STATUS_STYLES[delivery.status] || { label: delivery.status || 'Unknown', dot: 'bg-gray-400', cls: 'bg-gray-100 text-gray-700' };
           const driverName = delivery.driver ? getDriverDisplayName(delivery.driver) : null;
           return (
-            <Link
+            <button
+              type="button"
               key={delivery._id}
-              to={`/deliveries/${delivery._id}`}
-              className={`relative overflow-hidden bg-white border border-gray-200 rounded-xl p-4 pl-5 flex flex-col gap-3 ${delivery.status === 'delivered' || delivery.status === 'completed' || delivery.status === 'collected' ? 'opacity-75' : ''}`}
+              onClick={() => setActiveDeliveryId(delivery._id)}
+              className={`relative overflow-hidden bg-white border border-gray-200 rounded-xl p-4 pl-5 flex flex-col gap-3 text-left w-full ${delivery.status === 'delivered' || delivery.status === 'completed' || delivery.status === 'collected' ? 'opacity-75' : ''}`}
             >
               <div className={`absolute top-0 left-0 w-1 h-full ${getTimingBandColor(delivery)}`} />
               <div className="flex justify-between items-start">
@@ -503,6 +582,12 @@ const Deliveries = () => {
                   <span className="material-symbols-outlined text-[18px]">schedule</span>
                   <span>{scheduled.date} · {scheduled.time}</span>
                 </div>
+                {getActualDeliveryTime(delivery) && (
+                  <div className="flex items-center gap-2 text-emerald-600 text-sm">
+                    <span className="material-symbols-outlined text-[18px]">local_shipping</span>
+                    <span>Delivered {formatDate(getActualDeliveryTime(delivery)).time}</span>
+                  </div>
+                )}
                 {!timing.isIcon && timing.text !== '—' && (
                   <div className={`flex items-center gap-2 text-sm font-medium ${timing.cls}`}>
                     <span className="material-symbols-outlined text-[18px]">warning</span>
@@ -532,7 +617,7 @@ const Deliveries = () => {
                   View Details
                 </span>
               </div>
-            </Link>
+            </button>
           );
         })}
 
@@ -580,17 +665,22 @@ const Deliveries = () => {
                 <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Driver</th>
                 <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center">Late/Early</th>
                 <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center">Proof</th>
-                <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filteredDeliveries.map((delivery) => {
                 const timing = getTimingInfo(delivery);
                 const scheduled = formatDate(delivery.scheduledTime);
+                const actualTimeRaw = getActualDeliveryTime(delivery);
+                const actualTime = actualTimeRaw ? formatDate(actualTimeRaw) : null;
                 const statusStyle = STATUS_STYLES[delivery.status] || { label: delivery.status || 'Unknown', dot: 'bg-gray-400', cls: 'bg-gray-100 text-gray-700' };
                 return (
-                  <tr key={delivery._id} className="hover:bg-gray-50 transition-colors">
-                    <td className="p-3">
+                  <tr
+                    key={delivery._id}
+                    onClick={() => setActiveDeliveryId(delivery._id)}
+                    className="hover:bg-gray-50 transition-colors cursor-pointer"
+                  >
+                    <td className="p-3" onClick={(e) => e.stopPropagation()}>
                       <input
                         type="checkbox"
                         className="w-4 h-4 text-blue-600 border-gray-300 rounded"
@@ -630,6 +720,11 @@ const Deliveries = () => {
                     <td className="p-3 text-sm text-gray-700 font-mono">
                       <div>{scheduled.date}</div>
                       <div className="text-gray-400">{scheduled.time}</div>
+                      {actualTime ? (
+                        <div className="text-emerald-600 text-xs mt-1">Delivered {actualTime.time}</div>
+                      ) : (
+                        <div className="text-gray-300 text-xs mt-1">Not delivered yet</div>
+                      )}
                     </td>
                     <td className="p-3">
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${statusStyle.cls}`}>
@@ -649,9 +744,6 @@ const Deliveries = () => {
                       {delivery.proof?.images?.length > 0
                         ? <span className="material-symbols-outlined text-emerald-500 text-[18px]">check_circle</span>
                         : <span className="text-gray-300">—</span>}
-                    </td>
-                    <td className="p-3 text-right">
-                      <RowActionsMenu deliveryId={delivery._id} />
                     </td>
                   </tr>
                 );
@@ -690,6 +782,13 @@ const Deliveries = () => {
           deliveries={getPrintTargets()}
           onClose={() => setIsPrintConfigOpen(false)}
           selectedDate={selectedDate}
+        />
+      )}
+
+      {activeDelivery && (
+        <DeliveryDetailModal
+          delivery={activeDelivery}
+          onClose={() => setActiveDeliveryId(null)}
         />
       )}
     </div>

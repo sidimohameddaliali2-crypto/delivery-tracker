@@ -38,6 +38,16 @@ test('stripHtml decodes &amp; and &nbsp; entities', () => {
   assert.equal(stripHtml('Exit 4A&nbsp;&amp;&nbsp;merge onto I-95'), 'Exit 4A & merge onto I-95');
 });
 
+test('stripHtml keeps a space where a secondary note div abuts the closing tag', () => {
+  // Real response captured from the live Google Directions API for a real
+  // delivery address — Google appends secondary notes like this with no
+  // whitespace in the raw HTML, which used to collide into one word.
+  assert.equal(
+    stripHtml('Head <b>northwest</b><div style="font-size:0.9em">Restricted usage road</div>'),
+    'Head northwest Restricted usage road'
+  );
+});
+
 test('stripHtml handles null/undefined without throwing', () => {
   assert.equal(stripHtml(null), '');
   assert.equal(stripHtml(undefined), '');

@@ -2957,17 +2957,15 @@ router.patch('/:id/status', async (req, res) => {
         delivery.proof.timestamp = new Date();
       }
 
-      // Persist customer location into delivery.gpsLocation when provided
-      if (proof.location && status === 'delivered') {
-        const { lat, lng, link } = proof.location;
-        if (typeof lat === 'number' && typeof lng === 'number') {
-          delivery.gpsLocation = {
-            lat,
-            lng,
-            link: link || `https://www.google.com/maps?q=${lat},${lng}`
-          };
-        }
-      }
+      // Owner (2026-10-10): "make two pins, the actual location and the
+      // driver location, do not overwrite" — this used to copy the driver's
+      // phone GPS at delivery time into delivery.gpsLocation, silently
+      // replacing the address/geocoded pin with wherever the driver's phone
+      // happened to be standing (which can be off by blocks — GPS drift,
+      // parked nearby, inside a building). proof.location is already
+      // preserved as its own field by the Object.keys(proof) merge above —
+      // it's the driver's on-site GPS, kept separate from the address pin
+      // so both can be shown (see DriverRouteMap2GIS.jsx).
     }
 
     // Add bag assignment if provided

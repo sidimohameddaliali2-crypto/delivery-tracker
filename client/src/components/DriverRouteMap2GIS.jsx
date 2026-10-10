@@ -158,6 +158,17 @@ const hubVanHtml = (label) =>
   `<div title="${escapeAttr(label)}" style="width:34px;height:34px;border-radius:8px;background:#ea580c;border:2px solid #fff;` +
   `box-shadow:0 1px 4px rgba(0,0,0,.5);font:16px/30px system-ui,sans-serif;text-align:center;color:#fff">🚚</div>`;
 
+// Owner (2026-10-10): "make two pins, the actual location and the driver
+// location, do not overwrite" — the numbered stop pin is the address pin
+// (customer location); this second, smaller pin is where the driver's phone
+// GPS actually was at the moment they completed the delivery (proof.location,
+// now kept separate from delivery.gpsLocation server-side — see routes/
+// deliveries.js). Only drawn when it meaningfully differs from the address
+// pin, so every already-accurate delivery doesn't get a redundant second dot.
+const proofLocationHtml = (label) =>
+  `<div title="${escapeAttr(label)}" style="width:16px;height:16px;border-radius:9999px;background:#dc2626;border:2px solid #fff;` +
+  `box-shadow:0 1px 3px rgba(0,0,0,.5);"></div>`;
+
 // 2GIS returns geometry as WKT "LINESTRING(lng lat, lng lat, …)".
 function parseWkt(selection) {
   if (typeof selection !== 'string') return [];
@@ -1016,6 +1027,23 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
           makeMarkerDraggable(marker, map, container, (lngLat) => handlePinDrop(stop, lngLat));
         }
         markersRef.current.push(marker);
+
+        // Second pin: where the driver's phone actually was at delivery
+        // (proof.location), only when it meaningfully differs from the
+        // address pin — otherwise every accurate delivery would get a
+        // redundant second dot sitting right on top of its own marker.
+        const proofLoc = stop.proof?.location;
+        if (proofLoc && Number.isFinite(proofLoc.lat) && Number.isFinite(proofLoc.lng)) {
+          const driftKm = haversineKm(stop.coords.lat, stop.coords.lng, proofLoc.lat, proofLoc.lng);
+          if (driftKm > 0.05) {
+            markersRef.current.push(new mapgl.HtmlMarker(map, {
+              coordinates: [proofLoc.lng, proofLoc.lat],
+              html: proofLocationHtml(`Delivered here — ${Math.round(driftKm * 1000)}m from the customer's address`),
+              anchor: [8, 8],
+              zIndex: 9
+            }));
+          }
+        }
       });
     });
 
@@ -1939,6 +1967,29 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                 {activeStop.routeOrder != null ? (
                   <p className="mt-1 text-xs text-gray-400">Stop #{activeStop.routeOrder + 1}</p>
                 ) : null}
+                {(() => {
+                  const proofLoc = activeStop.proof?.location;
+                  if (!proofLoc || !Number.isFinite(proofLoc.lat) || !Number.isFinite(proofLoc.lng)) return null;
+                  const driftKm = haversineKm(activeStop.coords.lat, activeStop.coords.lng, proofLoc.lat, proofLoc.lng);
+                  if (driftKm <= 0.05) return null;
+                  return (
+                    <p className="mt-1.5 flex items-start gap-1.5 text-red-700 text-xs">
+                      <span className="w-2 h-2 rounded-full bg-red-600 border border-white mt-0.5 flex-shrink-0" />
+                      <span>
+                        Driver delivered to a different spot, {Math.round(driftKm * 1000)}m away —{' '}
+                        <a
+                          href={`https://www.google.com/maps?q=${proofLoc.lat},${proofLoc.lng}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          view location
+                        </a>
+                      </span>
+                    </p>
+                  );
+                })()}
               </div>
             ) : null}
           </div>

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { toBusinessComponents } from '../../utils/businessTime';
+import { haversineKm } from '../../utils/deliveryCoords';
 
 // Owner (2026-10-10): "remove the action button, clicking a delivery should
 // open a modal inside the app without navigating to another page, and
@@ -67,6 +68,22 @@ export default function DeliveryDetailModal({ delivery, onClose }) {
   const timeline = Array.isArray(delivery.timeline) ? [...delivery.timeline].reverse() : [];
   const proofImages = delivery.proof?.images || [];
 
+  // Where the driver's phone actually was when they confirmed delivery —
+  // kept separate from the address pin (gpsLocation) since the server no
+  // longer overwrites one with the other. Only worth showing when it's
+  // meaningfully different from the address (owner, 2026-10-10: "add the
+  // other location as the location that the driver delivered to").
+  const proofLoc = delivery.proof?.location;
+  const addressLoc = delivery.gpsLocation;
+  let deliveredToDriftM = null;
+  if (
+    proofLoc && Number.isFinite(proofLoc.lat) && Number.isFinite(proofLoc.lng)
+    && addressLoc && Number.isFinite(addressLoc.lat) && Number.isFinite(addressLoc.lng)
+  ) {
+    const driftKm = haversineKm(addressLoc.lat, addressLoc.lng, proofLoc.lat, proofLoc.lng);
+    if (driftKm > 0.05) deliveredToDriftM = Math.round(driftKm * 1000);
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
@@ -107,6 +124,21 @@ export default function DeliveryDetailModal({ delivery, onClose }) {
           </div>
 
           <Field label="Address">{delivery.address}</Field>
+          {deliveredToDriftM !== null && (
+            <Field label="Delivered to">
+              <span className="text-red-700">
+                A different spot, {deliveredToDriftM}m from the address —{' '}
+                <a
+                  href={`https://www.google.com/maps?q=${proofLoc.lat},${proofLoc.lng}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline font-medium"
+                >
+                  view location
+                </a>
+              </span>
+            </Field>
+          )}
           <Field label="Notes">{delivery.notes}</Field>
 
           {proofImages.length > 0 && (

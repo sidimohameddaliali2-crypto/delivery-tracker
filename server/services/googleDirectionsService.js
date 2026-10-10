@@ -12,12 +12,18 @@ const DIRECTIONS_URL = 'https://maps.googleapis.com/maps/api/directions/json';
 
 // Strips Google's `html_instructions` (e.g. "Turn <b>left</b> onto <b>Palm
 // Grove St</b>") down to plain text for display in the app's instruction
-// banner.
+// banner. Google sometimes appends a secondary note directly after the
+// closing tag with no whitespace, e.g.
+// 'Head <b>northwest</b><div style="font-size:0.9em">Restricted usage road</div>'
+// — stripping tags to nothing would collide the two into "northwestRestricted".
+// Replacing each tag with a space (then collapsing runs of whitespace) keeps
+// them separated.
 export function stripHtml(html) {
   return String(html || '')
-    .replace(/<[^>]+>/g, '')
+    .replace(/<[^>]+>/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -84,6 +90,12 @@ export async function getDirections(points) {
     origin: `${origin.lat},${origin.lng}`,
     destination: `${destination.lat},${destination.lng}`,
     mode: 'driving',
+    // Current traffic conditions, not just static road-network timing — a
+    // jam shows up as a longer ETA even when the road itself isn't closed.
+    // Google only returns duration_in_traffic when departure_time is set;
+    // 'now' is the literal value its docs specify for "right now".
+    departure_time: 'now',
+    traffic_model: 'best_guess',
     key: GOOGLE_DIRECTIONS_API_KEY
   };
   if (waypoints.length > 0) {
@@ -108,7 +120,10 @@ export async function getDirections(points) {
 
   const legs = (route.legs || []).map((leg) => ({
     distanceMeters: leg.distance?.value ?? 0,
-    durationSeconds: leg.duration?.value ?? 0,
+    // duration_in_traffic is only present when Google actually has live
+    // traffic data for this road right now — falls back to the static
+    // duration when it doesn't (e.g. a road with no traffic reporting).
+    durationSeconds: leg.duration_in_traffic?.value ?? leg.duration?.value ?? 0,
     steps: (leg.steps || []).map((step) => ({
       text: stripHtml(step.html_instructions),
       distanceMeters: step.distance?.value ?? 0,
